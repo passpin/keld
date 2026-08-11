@@ -1,6 +1,6 @@
 # Keld Language Design
 
-Status: approved baseline awaiting written-spec review
+Status: corrected baseline awaiting written-spec review
 
 Date: 2026-08-11
 
@@ -48,6 +48,7 @@ rules below are the basis for later preservation and progress proofs.
 - LLVM is the first production backend behind a backend-neutral executable IR.
 - The compiler is implemented in Rust.
 - An interpreter for executable IR is the semantic test oracle.
+- The normative core grammar is defined separately from compiler code.
 
 ## 3. Language-Level Memory Concepts
 
@@ -59,8 +60,9 @@ enums, tuples, and immutable text values.
 The compiler may place a value inline, on the stack, in registers, or in hidden
 storage. This placement is not observable in safe Keld.
 
-Copying a copyable value creates an independent value. Non-copyable resources
-are transferred only by operations defined by their APIs.
+Copying a copyable value creates an independent value. Keld 0.1 does not permit
+resource-owning values inside entity fields; resource types are deferred until a
+restricted cleanup ABI is specified.
 
 ### 3.2 Entities
 
@@ -81,9 +83,9 @@ lifecycle level {
 }
 ```
 
-An ordinary local entity binding is a compiler-proven live reference. It may be
-aliased freely within its proven lifetime. The binding is not the entity's
-cleanup authority and does not keep the entity alive.
+An ordinary local entity binding is a compiler-proven live `EntityRef`. It may
+be aliased freely within its proven lifetime. The binding is not a raw pointer,
+is not the entity's cleanup authority, and does not keep the entity alive.
 
 All direct aliases carry the same hidden identity provenance. Retiring through
 one alias invalidates every direct alias with that provenance. The compiler does
@@ -92,10 +94,20 @@ not treat aliases as independent owners.
 Direct entity references may exist in locals, parameters, and compiler-bounded
 temporary results. Persistent fields and containers must use `link`.
 
+At runtime an `EntityRef` contains or can reconstruct the entity's store brand,
+slot, and generation. The compiler may replace it with a direct address only
+inside a proven access window.
+
 ### 3.3 Links
 
 A `link T` is a copyable, non-owning relationship to an entity of type `T`.
 A `link T?` may additionally begin with no target.
+
+The `?` applies to the link value: `link Enemy?` means `(link Enemy)?`, not a
+link to an optional entity. A non-optional `link Enemy` must contain an identity,
+but resolving it is still conditional because that identity may have retired.
+`link Enemy?` additionally permits the stored value `none`. Both forms use
+`when` for resolution.
 
 Links never extend an entity's lifetime. Arbitrary link cycles are permitted.
 Resolving a link may fail because its target was retired.
@@ -108,8 +120,9 @@ when boss.target as target {
 }
 ```
 
-`when link-expression as name` resolves the expression exactly once. The bound
-name is a direct entity reference valid only within the successful branch.
+`when link-expression as name` validates the expression exactly once. The bound
+name is an `EntityRef` valid only within the successful branch. Individual
+payload accesses through that reference create shorter-lived hidden views.
 Failure enters an optional `else` branch when present.
 
 ```keld
@@ -128,10 +141,10 @@ A `lifecycle` is a semantic cleanup group.
 
 ```keld
 lifecycle game {
-    let player = Player(...)
+    let player = Enemy(health: 100, target: none)
 
     lifecycle level {
-        let enemy = Enemy(...)
+        let enemy = Enemy(health: 30, target: player)
         keep enemy in game
     }
 }
@@ -147,6 +160,11 @@ Rules:
 - Child lifecycles end before their parent.
 - `keep entity in lifecycle` moves an entity to a named ancestor lifecycle.
 - `retire entity` ends one entity early.
+
+A function call does not create a lifecycle implicitly. The callee inherits the
+call site's current lifecycle as a hidden argument, so an entity created by an
+ordinary function joins the caller's current lifecycle. An explicit lifecycle
+inside the function still has its own lexical extent.
 
 `keep` only extends lifetime. Moving an entity into a shorter-lived or unrelated
 lifecycle is rejected. This restriction makes the operation locally
@@ -198,10 +216,10 @@ Retired
 Permitted state transitions are:
 
 ```text
-Empty(g) -> Live(g, ...)
-Live(g, ...) -> Dying(g, ...)
-Dying(g, ...) -> Empty(g + 1)
-Dying(MAX, ...) -> Retired
+Empty(g) -> Live(g, type, lifecycle, payload)
+Live(g, type, lifecycle, payload) -> Dying(g, type, lifecycle, payload)
+Dying(g, type, lifecycle, payload) -> Empty(g + 1)
+Dying(MAX, type, lifecycle, payload) -> Retired
 ```
 
 No other transition is valid. A generation never wraps. A slot whose generation
@@ -230,20 +248,37 @@ Otherwise resolution yields absence. It never yields a dangling address.
 
 ### 4.4 Hidden access windows
 
-The compiler lowers entity access into bounded read or edit windows.
+The compiler lowers entity payload access into bounded read or edit windows.
+The runtime object created inside a window is a `View`, not an `EntityRef`.
 
 - A read window permits any number of reads.
 - An edit window permits reads and mutations within the current sequential task.
 - Aliasing inside one edit window is permitted.
 - Structural operations cannot execute while either window is active.
-- Direct views cannot escape their window.
+- A `View` is a direct payload address and cannot escape its window.
+- An `EntityRef` may span multiple windows while its static live proof remains
+  valid.
 - Local sequential windows normally lower to no runtime synchronization.
 
 Structural operations are allocation, retirement, lifecycle movement, lifecycle
 destruction, and any operation that may re-enter the same store structurally.
 
 The compiler chooses the smallest practical window from typed control flow. A
-structural operation ends prior windows and later access begins a new one.
+structural operation ends prior windows. Later payload access may begin a new
+window only from an `EntityRef` whose live proof survived that operation.
+
+Structural effects update proofs as follows:
+
+- allocation preserves existing live proofs;
+- `keep` preserves proofs because it only extends lifetime;
+- retiring an exact entity invalidates every reference that may alias it;
+- ending a lifecycle invalidates every reference proven to belong to it or a
+  descendant; and
+- an opaque broad-retirement effect invalidates every compatible reference in
+  the affected store.
+
+An invalidated `EntityRef` cannot silently revalidate. The program must resolve a
+`link` again with `when` to obtain a new proof.
 
 ### 4.5 Entity retirement algorithm
 
@@ -272,8 +307,14 @@ Descendant lifecycles are destroyed deepest-first before their parent. Entities
 previously kept in an ancestor are no longer members and survive.
 
 Cleanup code cannot create entities, resolve links, move lifecycle membership,
-retire another entity, call user code, or re-enter the store. Keld 0.1 has no
-arbitrary user-defined entity destructor.
+retire another entity, call user or foreign code, or re-enter the store. Keld
+0.1 has no arbitrary user-defined entity destructor and forbids
+resource-owning entity fields. Entity cleanup recursively releases plain value
+storage and links without callbacks.
+
+A later resource design may add trusted, non-reentrant cleanup intrinsics. Such
+intrinsics are not part of Keld 0.1 and cannot be assumed by its compiler or
+runtime.
 
 ## 5. Safety Invariants
 
@@ -284,13 +325,17 @@ A conforming safe implementation must maintain all of these invariants:
 3. Lifecycle parentage is acyclic.
 4. Slot generations are monotonic and never wrap.
 5. A link resolves only to the same live slot generation it originally named.
-6. A direct view cannot outlive its hidden access window.
-7. Structural store operations execute with no active direct views.
-8. A direct entity binding cannot be used after its retirement or lifecycle end.
-9. Ending a lifecycle retires every remaining member exactly once.
-10. Normal error exits execute the same required cleanup as normal control flow.
-11. Safe code cannot construct a raw address, counterfeit link, or store brand.
-12. In the sequential core, all mutation occurs on the owning task.
+6. An `EntityRef` outside an access window carries identity and proof, never an
+   exposed payload address.
+7. A `View` can be created only from a `Live` proof and cannot outlive its hidden
+   access window.
+8. Structural store operations execute with no active views.
+9. An invalidated, retired, or out-of-scope `EntityRef` cannot open a view.
+10. Ending a lifecycle retires every remaining member exactly once.
+11. Normal error exits execute the same lifecycle cleanup as normal control
+    flow.
+12. Safe code cannot construct a raw address, counterfeit link, or store brand.
+13. In the sequential core, all mutation occurs on the owning task.
 
 Consequences:
 
@@ -308,10 +353,11 @@ Consequences:
 The compiler may reason with the following hidden forms:
 
 ```text
-EntityRef<T, lifecycle, state, provenance>
-Link<T, optionality>
-Lifecycle<identity, parent, state>
-Access<store, mode, extent>
+EntityRef[T, lifecycle, proof, provenance]
+View[T, access]
+Link[T, optionality]
+Lifecycle[identity, parent, state]
+Access[store, mode, extent]
 ```
 
 These forms appear in compiler IR and diagnostics, never as source annotations.
@@ -331,23 +377,38 @@ Let `L1 <= L2` mean that `L2` is an ancestor of `L1` and therefore outlives
 
 ### 6.3 Flow-sensitive entity state
 
-For each direct entity binding, typed control flow tracks one of:
+For each `EntityRef`, typed control flow tracks one of:
 
 ```text
 Live(lifecycle, provenance)
-MaybeLive(link_origin)
+Invalidated(cause)
 Retired
 OutOfScope
 ```
 
-Only `Live` permits direct field access or calls requiring an entity. Resolving a
-link refines `MaybeLive` to a new scoped `Live` binding in the successful branch.
+Only `Live` can open a `View` for field access or be passed to a function that
+requires a live entity. Resolving a link dynamically creates a new scoped `Live`
+reference in the successful branch.
 
 Provenance is an SSA identity or a conservative set of possible identities.
-Copying a direct binding copies its provenance. `retire` invalidates all direct
-bindings whose provenance may name the retired entity. Because direct references
-cannot enter persistent fields or containers, this alias set remains bounded by
-typed local flow and function summaries rather than general heap analysis.
+The verifier uses these rules:
+
+- Copying an `EntityRef` creates a must-alias provenance.
+- Two simultaneously live entities from distinct allocation operations are
+  must-distinct.
+- Independently supplied entity parameters may alias.
+- Independent link resolutions may alias, even when the link expressions differ.
+- In the true branch of `a != b`, the references are distinct. For entities,
+  `==` and `!=` compare stable identity, not field values.
+
+`retire x` changes `x` and all must-alias references to `Retired`. It changes
+every remaining may-alias reference to `Invalidated`. An invalidated reference is
+safe to discard but cannot be accessed, returned, or retired. The program must
+resolve a persistent link again if it needs a new live proof.
+
+Because `EntityRef` values cannot enter persistent fields or containers, the
+alias set remains bounded by typed local flow and function summaries rather than
+general heap analysis.
 
 At control-flow joins, the state is the least permissive state valid on every
 incoming edge. For example, an entity retired on only one branch is not directly
@@ -355,16 +416,20 @@ usable after the join.
 
 ### 6.4 Direct-reference escape checking
 
-The compiler infers the provenance of direct entity results:
+The compiler infers the provenance of `EntityRef` results:
 
 - created in the caller's active lifecycle;
-- derived from a specific direct entity parameter; or
-- scoped result of a link resolution.
+- derived from a specific entity parameter.
 
 Public module metadata records provenance summaries without exposing lifetime
-syntax. A function cannot return or store a direct reference when no summary can
+syntax. A function cannot return or store an `EntityRef` when no summary can
 prove its target live at every caller. The programmer must return a `link`
 instead.
+
+An `EntityRef` obtained by resolving a link cannot escape its `when` block or be
+returned from the function. A public API that finds an existing entity through a
+persistent relationship returns `link T` or `link T?`, and its caller resolves
+that link in its own scope.
 
 Direct references cannot be stored in entity fields, heap containers, globals,
 closures that outlive the current scope, or foreign state. Those locations use
@@ -372,23 +437,25 @@ links.
 
 ### 6.5 Function effects
 
-Typed functions carry inferred semantic effects. Initial effects are:
+Typed functions carry inferred semantic effects. Initial internal effects are:
 
 ```text
 pure
-read entities
-edit entities
-structural lifecycle
+reads(parameter set)
+edits(parameter set)
+allocates(current lifecycle)
+retires(parameter)
+retires_any(type, store)
 io
-raises E
+raises(error set)
 unsafe
 ```
 
-Local effects are inferred. Public declarations display application-visible
-effects such as `raises`; hidden access and lifecycle summaries are serialized in
-compiled module metadata.
+Local access and allocation effects are inferred. Public declarations display
+application-visible effects that can change control flow or liveness. Full
+summaries are serialized in compiled module metadata.
 
-A public function that can end the lifetime of a direct entity parameter must
+A public function that can end the lifetime of an entity parameter must
 declare that semantic effect:
 
 ```keld
@@ -400,6 +467,67 @@ Keld 0.1 does not permit a public function to retire an entity parameter without
 this declaration. Lifecycle extension with `keep` remains lexical in Keld 0.1
 and cannot be hidden inside an ordinary function call.
 
+A function that may resolve internal links and retire an entity not named by a
+direct parameter must declare a broad retirement effect:
+
+```keld
+fn sweep(world: World) retires any Enemy
+```
+
+After `sweep(world)`, every live `Enemy` reference in the same hidden store is
+`Invalidated`. References can be reacquired from links. The broad effect is
+deliberately visible because it creates a compile-time liveness barrier.
+
+Inside a function, entity parameters are assumed to may-alias unless refined by
+an identity comparison. Therefore this function is rejected:
+
+```keld
+fn invalid(a: Enemy, b: Enemy) retires a {
+    retire a
+    b.health = 0
+}
+```
+
+`b` is invalidated by `retire a`. The edit is accepted inside an `a != b` branch.
+When dynamic dispatch is added after Keld 0.1, it must use the union of every
+possible implementation's retirement effects.
+
+### 6.6 Normative alias examples
+
+This function is valid because the identity comparison establishes the only
+branch in which `b` is used after retiring `a`:
+
+```keld
+fn remove_then_edit(a: Enemy, b: Enemy) retires a {
+    if a != b {
+        retire a
+        b.health = 0
+    } else {
+        retire a
+    }
+}
+```
+
+This sequence is invalid because the broad retirement effect removes the live
+proof for `selected`:
+
+```keld
+when selected_link as selected {
+    sweep(world)
+    selected.health = 0 // KLD1008
+}
+```
+
+The repair is to end the old reference scope and resolve the persistent link
+after the structural call:
+
+```keld
+sweep(world)
+when selected_link as selected {
+    selected.health = 0
+}
+```
+
 The backend receives only operations already accepted by lifecycle and effect
 verification.
 
@@ -407,7 +535,7 @@ verification.
 
 Keld uses static, strong typing with bidirectional local inference.
 
-Initial type categories:
+Keld 0.1 core type categories:
 
 - primitives: `Bool`, fixed-width integers, platform-independent `Int`, and
   floating-point values;
@@ -416,13 +544,16 @@ Initial type categories:
 - identity-bearing records: `entity`;
 - persistent identity relationships: `link T` and `link T?`;
 - absence: `T?`;
-- functions and closures; and
-- interfaces.
+- functions.
+
+Closures and interfaces are planned language features but remain reserved and
+ungrammatical in Keld 0.1.
 
 Rules:
 
 - Local bindings infer types when the initializer is sufficient.
-- Function parameters and public return types are explicit.
+- Function parameters and non-`Unit` return types are explicit; omitting a return
+  clause means `Unit`.
 - There is no implicit null.
 - Pattern matching is exhaustive.
 - Numeric widening is permitted only when lossless and unambiguous.
@@ -431,8 +562,8 @@ Rules:
 
 Generics use a hybrid compilation model:
 
-- entity, link, and interface representations compile uniformly when layout is
-  known independently of the type argument;
+- entity and link representations compile uniformly when layout is known
+  independently of the type argument;
 - value layouts specialize when physical representation requires it; and
 - optimized builds may specialize measured hot instantiations without changing
   source or module ABI.
@@ -457,11 +588,13 @@ try {
 ```
 
 Error effects lower to explicit tagged control flow. Runtime stack unwinding is
-not required. Every exit edge receives compiler-generated lifecycle and resource
-cleanup.
+not required. Every exit edge receives compiler-generated lifecycle cleanup.
+Future lexical resource types must define their own non-throwing exit operation
+before this rule is extended to them.
 
 Fatal invariant failures abort the process. Fatal abort does not promise user
-cleanup. Destructors cannot fail.
+cleanup. Allocation exhaustion is fatal in Keld 0.1 and follows the same rule.
+Destructors cannot fail.
 
 ## 9. Concurrency Boundary
 
@@ -491,7 +624,7 @@ Safe modules cannot:
 - counterfeit a link or store brand;
 - bypass link validation;
 - invoke an unsafe function directly; or
-- retain a direct entity view in foreign state.
+- retain an `EntityRef` or `View` in foreign state.
 
 An unsafe module may declare C-ABI foreign functions and implementation-specific
 raw address types. Its safe exported functions must re-establish all Keld
@@ -550,7 +683,7 @@ error[KLD1004]: `level` does not outlive the entity's current lifecycle
 
 ```text
 error[KLD1005]: this link may refer to a retired entity
-  resolve it with `when target as value { ... }`
+  resolve it with `when target as value { use(value) }`
 ```
 
 ### KLD1006: structural operation during access
@@ -566,10 +699,49 @@ error[KLD1006]: cannot retire an entity while this entity access is active
 error[KLD1007]: cleanup cannot create, resolve, keep, or retire entities
 ```
 
+### KLD1008: live proof invalidated by a possible alias
+
+```text
+error[KLD1008]: `selected` may have been retired by this operation
+  `sweep` can retire any `Enemy` in the current store
+  resolve a persistent link after the call to obtain a new live reference
+```
+
+### KLD1009: resource-owning entity field
+
+```text
+error[KLD1009]: resource-owning fields are not supported in Keld 0.1 entities
+  keep this resource in lexical value storage
+```
+
 Diagnostics must include the operation that created the restriction, the use
 that violates it, and one concrete repair when one is mechanically known.
 
-## 12. Compiler Architecture
+## 12. Normative Grammar
+
+Keld syntax is defined by two normative files:
+
+- [`docs/spec/grammar.md`](../../spec/grammar.md) defines encoding, tokens,
+  statement termination, precedence, and semantic parsing restrictions.
+- [`docs/spec/keld.ebnf`](../../spec/keld.ebnf) defines the Keld 0.1 core
+  productions.
+
+Examples in this design document are explanatory. When an example and the
+normative grammar differ, the grammar controls and the example must be corrected.
+
+The core grammar resolves these previously ambiguous cases:
+
+- blocks use braces and are not indentation-sensitive;
+- newlines or explicit semicolons produce normalized statement terminators;
+- `link Enemy?` means optional link storage, not a link to an optional entity;
+- `when` validates a link or optional value exactly once;
+- `retires parameter` and `retires any Type` are part of function syntax; and
+- entity `==` and `!=` compare identity and can refine alias facts.
+
+Reserved post-0.1 features have no accepted productions. A parser must not invent
+syntax for them.
+
+## 13. Compiler Architecture
 
 The compiler pipeline is defined by Keld semantics:
 
@@ -579,7 +751,6 @@ Source
   -> Module Semantics
        names
        types
-       interfaces
        error effects
   -> Typed Flow IR
        explicit evaluation order
@@ -601,7 +772,7 @@ Source
 
 Ownership of decisions is strict:
 
-- Module semantics owns names, types, interfaces, and visible effects.
+- Module semantics owns names, types, and visible effects.
 - Typed Flow IR owns source evaluation order and control-flow identity.
 - The lifecycle planner proves memory operations and creates cleanup paths.
 - Executable IR owns the exact runtime operation sequence.
@@ -612,14 +783,14 @@ LLVM artifacts are backend details, not Keld's package or module format.
 Compiled libraries store Keld module semantics, generic layout information,
 provenance summaries, and lifecycle/effect summaries.
 
-## 13. Repository Boundaries
+## 14. Repository Boundaries
 
 The planned Rust workspace uses small crates with one owner each:
 
 ```text
 crates/keld-cli/           command-line interface and diagnostics output
 crates/keld-syntax/        source text, lexer, lossless parser, syntax tree
-crates/keld-semantics/     names, types, interfaces, visible effects
+crates/keld-semantics/     names, types, visible effects
 crates/keld-flow/          typed control-flow representation
 crates/keld-lifecycle/     Custody Ledger verification and cleanup planning
 crates/keld-ir/            executable IR and validation
@@ -627,14 +798,15 @@ crates/keld-interpreter/   semantic oracle
 crates/keld-runtime/       slots, generations, lifecycle membership, cleanup
 crates/keld-backend-llvm/  LLVM-only lowering and object emission
 tests/                     cross-stage and end-to-end programs
-docs/                      normative design and implementation records
+docs/spec/                 normative grammar and language rules
+docs/superpowers/specs/     approved design records
 ```
 
 The first implementation plan may combine crates temporarily only when the
 boundary remains explicit and splitting immediately would add no independent
 test surface.
 
-## 14. Backend Contract
+## 15. Backend Contract
 
 LLVM is the single initial production backend.
 
@@ -665,7 +837,7 @@ Backend rules:
 Direct machine-code generation, source transpilation, JVM bytecode, and CIL are
 excluded from the initial implementation.
 
-## 15. First Buildable Milestone
+## 16. First Buildable Milestone
 
 The first milestone proves Custody Ledger semantics before native code
 generation.
@@ -695,7 +867,7 @@ Excluded from this milestone:
 - concurrency and async;
 - interfaces and generics;
 - typed error effects;
-- user-defined cleanup;
+- resource types and user-defined cleanup;
 - unsafe code and FFI; and
 - package management.
 
@@ -713,8 +885,15 @@ Done criteria:
    movement, and stale-link resolution.
 10. Every accepted milestone program produces the same observable result in
     direct executable-IR tests and the command-line interpreter.
+11. Grammar golden tests cover virtual terminators, operator precedence,
+    `link T?`, `when`, lifecycle statements, and retirement effects.
+12. Compile-fail tests reject use through may-alias parameters after retirement.
+13. Compile-pass tests accept identity-refined distinct parameters.
+14. A broad `retires any T` call invalidates every compatible live proof and
+    allows references to be reacquired from links afterward.
+15. No executable IR contains a `View` that crosses a structural operation.
 
-## 16. Verification Strategy
+## 17. Verification Strategy
 
 Verification proceeds in layers:
 
@@ -723,6 +902,8 @@ Verification proceeds in layers:
   lifecycle-end sequences;
 - compile-pass tests for valid lifecycle and link programs;
 - compile-fail tests for every diagnostic family;
+- parser golden tests derived from every normative EBNF production;
+- alias counterexamples using equal and distinct runtime identities;
 - executable-IR validation before interpretation or backend lowering;
 - interpreter/runtime differential tests;
 - native/interpreter differential tests once LLVM lowering exists;
@@ -733,7 +914,7 @@ Verification proceeds in layers:
 No milestone is complete solely because the compiler builds. Its language-level
 done criteria and negative safety tests must pass.
 
-## 17. Non-Goals for Version 0.1
+## 18. Non-Goals for Version 0.1
 
 - Transparent reclamation of arbitrary unstructured object graphs.
 - Making every reference permanently valid.
@@ -741,9 +922,11 @@ done criteria and negative safety tests must pass.
 - Supporting raw-pointer programming in ordinary modules.
 - Matching low-level ownership-tree performance for every workload.
 - Providing a tracing collector or reference-counted fallback.
+- Resource-owning entity fields before a restricted cleanup ABI exists.
+- Arbitrary user-defined entity destructors.
 - Claiming worldwide novelty or formal correctness before evidence exists.
 
-## 18. Design Summary
+## 19. Design Summary
 
 Keld separates three concerns:
 

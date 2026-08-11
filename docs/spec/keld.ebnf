@@ -1,0 +1,131 @@
+(* Keld 0.1 core grammar.
+   IDENT, INT, STRING, TERM, and EOF are produced by the lexer described in
+   grammar.md. Repeated TERM tokens are accepted between top-level forms. *)
+
+source_file       = { TERM }, [ module_decl, TERM, { TERM } ],
+                    { use_decl, TERM, { TERM } },
+                    { item, TERM, { TERM } }, EOF ;
+
+module_decl       = [ "unsafe" ], "module", path ;
+use_decl          = "use", path ;
+
+item              = [ visibility ], item_body ;
+visibility        = "pub" ;
+item_body         = struct_decl
+                  | entity_decl
+                  | enum_decl
+                  | function_decl
+                  | extern_function_decl ;
+
+struct_decl       = "struct", IDENT, [ type_parameters ], field_block ;
+entity_decl       = "entity", IDENT, [ type_parameters ], field_block ;
+enum_decl         = "enum", IDENT, [ type_parameters ], variant_block ;
+
+type_parameters   = "[", IDENT, { ",", IDENT }, [ "," ], "]" ;
+type_arguments    = "[", type, { ",", type }, [ "," ], "]" ;
+
+field_block       = "{", { TERM },
+                    { field_decl, TERM, { TERM } }, "}" ;
+field_decl        = IDENT, ":", type ;
+
+variant_block     = "{", { TERM },
+                    { variant_decl, TERM, { TERM } }, "}" ;
+variant_decl      = IDENT, [ "(", [ type_list ], ")" ] ;
+
+function_decl     = "fn", IDENT, [ type_parameters ], parameter_list,
+                    [ return_clause ], [ raises_clause ], [ retires_clause ],
+                    block ;
+
+extern_function_decl
+                  = "extern", STRING, "fn", IDENT, parameter_list,
+                    [ return_clause ], [ raises_clause ] ;
+
+parameter_list    = "(", [ parameter, { ",", parameter }, [ "," ] ], ")" ;
+parameter         = IDENT, ":", type ;
+return_clause     = "->", type ;
+raises_clause     = "raises", type, { ",", type } ;
+retires_clause    = "retires", retirement_target,
+                    { ",", retirement_target } ;
+retirement_target = IDENT | "any", type ;
+
+type              = link_type | value_type, [ "?" ] ;
+link_type         = "link", link_target, [ "?" ] ;
+link_target       = path, [ type_arguments ] ;
+value_type        = path, [ type_arguments ]
+                  | "(", type_list, ")" ;
+type_list         = type, { ",", type }, [ "," ] ;
+
+block             = "{", { TERM },
+                    { statement, TERM, { TERM } }, "}" ;
+
+statement         = binding_stmt
+                  | assignment_stmt
+                  | keep_stmt
+                  | retire_stmt
+                  | return_stmt
+                  | break_stmt
+                  | continue_stmt
+                  | expression_stmt
+                  | lifecycle_stmt
+                  | when_stmt
+                  | if_stmt
+                  | while_stmt
+                  | try_stmt ;
+
+binding_stmt      = ( "let" | "var" ), IDENT, [ ":", type ],
+                    [ "=", expression ] ;
+assignment_stmt   = place, assign_operator, expression ;
+assign_operator   = "=" | "+=" | "-=" | "*=" | "/=" | "%=" ;
+keep_stmt         = "keep", expression, "in", IDENT ;
+retire_stmt       = "retire", expression ;
+return_stmt       = "return", [ expression ] ;
+break_stmt        = "break" ;
+continue_stmt     = "continue" ;
+expression_stmt   = expression ;
+
+lifecycle_stmt    = "lifecycle", IDENT, block ;
+when_stmt         = "when", expression, "as", IDENT, block,
+                    [ { TERM }, "else", block ] ;
+if_stmt           = "if", expression, block,
+                    { { TERM }, "else", "if", expression, block },
+                    [ { TERM }, "else", block ] ;
+while_stmt        = "while", expression, block ;
+try_stmt          = "try", block, { TERM }, handle_clause,
+                    { { TERM }, handle_clause } ;
+handle_clause     = "handle", type, "as", IDENT, block ;
+
+place             = IDENT, { field_suffix | index_suffix } ;
+
+expression        = logical_or ;
+logical_or        = logical_and, { "||", logical_and } ;
+logical_and       = equality, { "&&", equality } ;
+equality          = comparison, [ ( "==" | "!=" ), comparison ] ;
+comparison        = additive,
+                    [ ( "<" | "<=" | ">" | ">=" ), additive ] ;
+additive          = multiplicative, { ( "+" | "-" ), multiplicative } ;
+multiplicative    = unary, { ( "*" | "/" | "%" ), unary } ;
+unary             = ( "!" | "-" ), unary | postfix ;
+postfix           = primary, { call_suffix | field_suffix | index_suffix } ;
+
+call_suffix       = "(", [ argument, { ",", argument }, [ "," ] ], ")" ;
+argument          = [ IDENT, ":" ], expression ;
+field_suffix      = ".", IDENT ;
+index_suffix      = "[", expression, "]" ;
+
+primary           = literal
+                  | IDENT
+                  | "(", expression, ")"
+                  | match_expression ;
+
+match_expression  = "match", expression, "{", { TERM },
+                    match_arm, TERM, { TERM },
+                    { match_arm, TERM, { TERM } }, "}" ;
+match_arm         = pattern, "=>", ( expression | block ) ;
+
+pattern           = "_"
+                  | literal
+                  | path, [ "(", [ pattern_list ], ")" ] ;
+pattern_list      = pattern, { ",", pattern }, [ "," ] ;
+
+literal           = INT | STRING | "true" | "false" | "none" ;
+path              = IDENT, { ".", IDENT } ;
