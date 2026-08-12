@@ -5,6 +5,7 @@ use keld_interpreter::{
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::TypedModule;
 use keld_source::{Diagnostic, SourceId, SourceText, sort_diagnostics};
+use keld_storage::VerifiedStorageModule;
 use keld_syntax::ParsedFile;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ pub struct Compilation {
     pub typed: Option<TypedModule>,
     pub flow: Option<FlowModule>,
     pub verified: Option<VerifiedFlowModule>,
+    pub storage: Option<VerifiedStorageModule>,
     pub ir: Option<keld_ir::Module>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -29,6 +31,7 @@ impl Compilation {
             typed: None,
             flow: None,
             verified: None,
+            storage: None,
             ir: None,
             diagnostics: Vec::new(),
         }
@@ -126,8 +129,20 @@ pub fn compile_source(path: &Path, bytes: Vec<u8>) -> Compilation {
     let Some(verified) = verification.module else {
         return compilation;
     };
-    let ir = keld_ir::lower(&verified);
     compilation.verified = Some(verified);
+    let Some(verified) = compilation.verified.as_ref() else {
+        return compilation;
+    };
+    let storage = keld_storage::verify(verified.clone());
+    if !storage.diagnostics.is_empty() {
+        compilation.stop_with(storage.diagnostics);
+        return compilation;
+    }
+    let Some(storage_module) = storage.module else {
+        return compilation;
+    };
+    let ir = keld_ir::lower(&storage_module);
+    compilation.storage = Some(storage_module);
     let diagnostics = keld_ir::validate(&ir);
     compilation.ir = Some(ir);
     if !diagnostics.is_empty() {

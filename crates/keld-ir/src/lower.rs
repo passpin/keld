@@ -1,15 +1,52 @@
 use crate::{
-    Function, Instruction, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module,
-    Register, Terminator, ViewId, ViewMode,
+    ArgumentSource, Function, Instruction, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind,
+    IrType, Module, Register, Terminator, ViewId, ViewMode,
 };
+use keld_flow::FlowModule;
 use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, ValueId};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{CompareOp, DefinitionKind, LocalId, TypeId, TypeKind, TypeStore};
+use keld_storage::{FunctionStorageSummary, VerifiedStorageModule};
 use std::collections::BTreeMap;
 
 #[must_use]
-pub fn lower(verified: &VerifiedFlowModule) -> Module {
-    let flow = &verified.flow;
+pub trait VerifiedInput {
+    fn flow(&self) -> &FlowModule;
+    fn storage_summary(
+        &self,
+        function: keld_semantics::FunctionId,
+    ) -> Option<&FunctionStorageSummary>;
+}
+
+impl VerifiedInput for VerifiedFlowModule {
+    fn flow(&self) -> &FlowModule {
+        &self.flow
+    }
+
+    fn storage_summary(
+        &self,
+        _function: keld_semantics::FunctionId,
+    ) -> Option<&FunctionStorageSummary> {
+        None
+    }
+}
+
+impl VerifiedInput for VerifiedStorageModule {
+    fn flow(&self) -> &FlowModule {
+        &self.lifecycle.flow
+    }
+
+    fn storage_summary(
+        &self,
+        function: keld_semantics::FunctionId,
+    ) -> Option<&FunctionStorageSummary> {
+        self.summaries.get(function.0 as usize)
+    }
+}
+
+#[must_use]
+pub fn lower<V: VerifiedInput>(verified: &V) -> Module {
+    let flow = verified.flow();
     Module {
         definitions: flow
             .definitions
@@ -30,7 +67,10 @@ pub fn lower(verified: &VerifiedFlowModule) -> Module {
         functions: flow
             .functions
             .iter()
-            .map(|function| FunctionLowerer::new(function, &flow.types).lower())
+            .map(|function| {
+                FunctionLowerer::new(function, &flow.types, verified.storage_summary(function.id))
+                    .lower()
+            })
             .collect(),
         main: flow.main,
     }
@@ -107,15 +147,21 @@ struct FunctionLowerer<'flow> {
     types: &'flow TypeStore,
     registers: Registers,
     next_view: u32,
+    storage_summary: Option<&'flow FunctionStorageSummary>,
 }
 
 impl<'flow> FunctionLowerer<'flow> {
-    fn new(function: &'flow FlowFunction, types: &'flow TypeStore) -> Self {
+    fn new(
+        function: &'flow FlowFunction,
+        types: &'flow TypeStore,
+        storage_summary: Option<&'flow FunctionStorageSummary>,
+    ) -> Self {
         Self {
             function,
             types,
             registers: Registers::new(function, types),
             next_view: 0,
+            storage_summary,
         }
     }
 
@@ -146,6 +192,11 @@ impl<'flow> FunctionLowerer<'flow> {
                 .iter()
                 .map(|local| self.registers.local(*local))
                 .collect(),
+            parameter_modes: self.function.parameter_modes.clone(),
+            parameter_effects: self.storage_summary.map_or_else(
+                || vec![keld_storage::LoanEffect::Read; self.function.parameters.len()],
+                |summary| summary.effects.clone(),
+            ),
             current_lifecycle: self.registers.lifecycle(self.function.current_lifecycle),
             register_types: self.registers.types,
             return_type: map_type(self.types, self.function.return_type),
@@ -154,6 +205,7 @@ impl<'flow> FunctionLowerer<'flow> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
         match operation {
             FlowOp::ConstInt { dst, value, span } => output.push(Instruction::ConstInt {
@@ -164,6 +216,11 @@ impl<'flow> FunctionLowerer<'flow> {
             FlowOp::ConstBool { dst, value, span } => output.push(Instruction::ConstBool {
                 dst: self.registers.value(*dst),
                 value: *value,
+                span: *span,
+            }),
+            FlowOp::ConstText { dst, value, span } => output.push(Instruction::ConstText {
+                dst: self.registers.value(*dst),
+                value: value.clone(),
                 span: *span,
             }),
             FlowOp::ConstNoneLink { dst, entity, span } => {
@@ -190,6 +247,115 @@ impl<'flow> FunctionLowerer<'flow> {
             FlowOp::StoreLocal { local, value, span } => output.push(Instruction::Copy {
                 dst: self.registers.local(*local),
                 src: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::TakeLocal { dst, local, span } => output.push(Instruction::Take {
+                dst: self.registers.value(*dst),
+                src: self.registers.local(*local),
+                span: *span,
+            }),
+            FlowOp::CopyStorage { dst, source, span } => output.push(Instruction::Copy {
+                dst: self.registers.value(*dst),
+                src: self.registers.value(*source),
+                span: *span,
+            }),
+            FlowOp::ListNew { dst, span } => output.push(Instruction::ListNew {
+                dst: self.registers.value(*dst),
+                span: *span,
+            }),
+            FlowOp::ListLength { dst, list, span } => output.push(Instruction::ListLength {
+                dst: self.registers.value(*dst),
+                list: self.registers.value(*list),
+                span: *span,
+            }),
+            FlowOp::ListPush { list, value, span } => output.push(Instruction::ListPush {
+                list: self.registers.value(*list),
+                value: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::ListPushPlace {
+                list,
+                place,
+                value,
+                span,
+            } => output.push(Instruction::ListPushPlace {
+                list: self.registers.value(*list),
+                source: ArgumentSource {
+                    base: self.registers.local(place.base),
+                    fields: place.fields.clone(),
+                },
+                value: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::ListLengthLocal { dst, local, span } => output.push(Instruction::ListLength {
+                dst: self.registers.value(*dst),
+                list: self.registers.local(*local),
+                span: *span,
+            }),
+            FlowOp::ListPushLocal { local, value, span } => output.push(Instruction::ListPush {
+                list: self.registers.local(*local),
+                value: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::ListRemove {
+                dst,
+                list,
+                index,
+                span,
+            } => output.push(Instruction::ListRemove {
+                dst: self.registers.value(*dst),
+                list: self.registers.value(*list),
+                index: self.registers.value(*index),
+                span: *span,
+            }),
+            FlowOp::ListRemovePlace {
+                dst,
+                list,
+                place,
+                index,
+                span,
+            } => output.push(Instruction::ListRemovePlace {
+                dst: self.registers.value(*dst),
+                list: self.registers.value(*list),
+                source: ArgumentSource {
+                    base: self.registers.local(place.base),
+                    fields: place.fields.clone(),
+                },
+                index: self.registers.value(*index),
+                span: *span,
+            }),
+            FlowOp::ListRemoveLocal {
+                dst,
+                local,
+                index,
+                span,
+            } => output.push(Instruction::ListRemove {
+                dst: self.registers.value(*dst),
+                list: self.registers.local(*local),
+                index: self.registers.value(*index),
+                span: *span,
+            }),
+            FlowOp::TextByteLength { dst, text, span } => {
+                output.push(Instruction::TextByteLength {
+                    dst: self.registers.value(*dst),
+                    text: self.registers.value(*text),
+                    span: *span,
+                });
+            }
+            FlowOp::TextIsEmpty { dst, text, span } => output.push(Instruction::TextIsEmpty {
+                dst: self.registers.value(*dst),
+                text: self.registers.value(*text),
+                span: *span,
+            }),
+            FlowOp::TextConcat {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => output.push(Instruction::TextConcat {
+                dst: self.registers.value(*dst),
+                lhs: self.registers.value(*lhs),
+                rhs: self.registers.value(*rhs),
                 span: *span,
             }),
             FlowOp::UnaryInt {
@@ -313,8 +479,10 @@ impl<'flow> FunctionLowerer<'flow> {
                 dst,
                 function,
                 arguments,
+                argument_places,
                 current_lifecycle,
                 span,
+                ..
             } => output.push(Instruction::Call {
                 dst: dst.map(|value| self.registers.value(value)),
                 function: *function,
@@ -322,9 +490,22 @@ impl<'flow> FunctionLowerer<'flow> {
                     .iter()
                     .map(|(parameter, value)| (*parameter, self.registers.value(*value)))
                     .collect(),
+                argument_sources: argument_places
+                    .iter()
+                    .map(|(parameter, place)| {
+                        (
+                            *parameter,
+                            place.as_ref().map(|place| ArgumentSource {
+                                base: self.registers.local(place.base),
+                                fields: place.fields.clone(),
+                            }),
+                        )
+                    })
+                    .collect(),
                 current_lifecycle: self.registers.lifecycle(*current_lifecycle),
                 span: *span,
             }),
+            FlowOp::BeginCall { .. } | FlowOp::ReserveArgument { .. } => {}
             FlowOp::Keep {
                 entity,
                 target,
@@ -343,10 +524,25 @@ impl<'flow> FunctionLowerer<'flow> {
             }
             FlowOp::ConstInt { .. }
             | FlowOp::ConstBool { .. }
+            | FlowOp::ConstText { .. }
             | FlowOp::ConstNoneLink { .. }
             | FlowOp::BeginLifecycle { .. }
             | FlowOp::CopyLocal { .. }
             | FlowOp::StoreLocal { .. }
+            | FlowOp::TakeLocal { .. }
+            | FlowOp::CopyStorage { .. }
+            | FlowOp::ListNew { .. }
+            | FlowOp::ListLength { .. }
+            | FlowOp::ListPush { .. }
+            | FlowOp::ListPushPlace { .. }
+            | FlowOp::ListLengthLocal { .. }
+            | FlowOp::ListPushLocal { .. }
+            | FlowOp::ListRemove { .. }
+            | FlowOp::ListRemovePlace { .. }
+            | FlowOp::ListRemoveLocal { .. }
+            | FlowOp::TextByteLength { .. }
+            | FlowOp::TextIsEmpty { .. }
+            | FlowOp::TextConcat { .. }
             | FlowOp::UnaryInt { .. }
             | FlowOp::BinaryInt { .. }
             | FlowOp::Not { .. }
@@ -508,6 +704,8 @@ fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
             entity: *entity,
             optional: *optional,
         },
+        TypeKind::Text => IrType::Text,
+        TypeKind::List(element) => IrType::List(Box::new(map_type(types, *element))),
         TypeKind::Optional(_) | TypeKind::Error => {
             unreachable!("verified bootstrap flow contains only executable types")
         }

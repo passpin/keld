@@ -94,7 +94,12 @@ fn validate_named_type(module: &Module, ty: &IrType, span: Span, sink: &mut Diag
         | IrType::Link {
             entity: definition, ..
         } => (*definition, IrDefinitionKind::Entity),
-        IrType::Unit | IrType::Bool | IrType::Int | IrType::Lifecycle => return,
+        IrType::Unit
+        | IrType::Bool
+        | IrType::Int
+        | IrType::Text
+        | IrType::List(_)
+        | IrType::Lifecycle => return,
     };
     if module
         .definitions
@@ -517,6 +522,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate_instruction(
         &mut self,
         instruction: &Instruction,
@@ -527,6 +533,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         match instruction {
             Instruction::ConstInt { dst, .. } => self.expect_type(*dst, &IrType::Int, span),
             Instruction::ConstBool { dst, .. } => self.expect_type(*dst, &IrType::Bool, span),
+            Instruction::ConstText { dst, .. } => self.expect_type(*dst, &IrType::Text, span),
             Instruction::ConstNoneLink { dst, entity, .. } => self.expect_type(
                 *dst,
                 &IrType::Link {
@@ -535,7 +542,90 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 },
                 span,
             ),
-            Instruction::Copy { dst, src, .. } => self.expect_same_type(*dst, *src, span),
+            Instruction::Copy { dst, src, .. } | Instruction::Take { dst, src, .. } => {
+                self.expect_same_type(*dst, *src, span);
+            }
+            Instruction::ListNew { dst, .. } => {
+                if !matches!(self.register_type(*dst, span), Some(IrType::List(_))) {
+                    self.sink.error(
+                        "KLD9006",
+                        span,
+                        "list construction destination must have a List type",
+                    );
+                }
+            }
+            Instruction::ListLength { dst, list, .. } => {
+                self.expect_type(*dst, &IrType::Int, span);
+                if !matches!(self.register_type(*list, span), Some(IrType::List(_))) {
+                    self.sink
+                        .error("KLD9006", span, "list length requires a List value");
+                }
+            }
+            Instruction::ListPush { list, value, .. } => {
+                if !matches!(self.register_type(*list, span), Some(IrType::List(_))) {
+                    self.sink
+                        .error("KLD9006", span, "list push requires a List value");
+                }
+                self.check_register(*value, span);
+            }
+            Instruction::ListPushPlace {
+                list,
+                source,
+                value,
+                ..
+            } => {
+                if !matches!(self.register_type(*list, span), Some(IrType::List(_))) {
+                    self.sink
+                        .error("KLD9006", span, "list push requires a List value");
+                }
+                self.check_register(source.base, span);
+                self.check_register(*value, span);
+            }
+            Instruction::ListRemove {
+                dst, list, index, ..
+            } => {
+                let Some(IrType::List(element)) = self.register_type(*list, span).cloned() else {
+                    self.sink
+                        .error("KLD9006", span, "list remove requires a List value");
+                    self.check_register(*dst, span);
+                    self.check_register(*index, span);
+                    return;
+                };
+                self.expect_type(*dst, &element, span);
+                self.expect_type(*index, &IrType::Int, span);
+            }
+            Instruction::ListRemovePlace {
+                dst,
+                list,
+                source,
+                index,
+                ..
+            } => {
+                let Some(IrType::List(element)) = self.register_type(*list, span).cloned() else {
+                    self.sink
+                        .error("KLD9006", span, "list remove requires a List value");
+                    self.check_register(*dst, span);
+                    self.check_register(source.base, span);
+                    self.check_register(*index, span);
+                    return;
+                };
+                self.expect_type(*dst, &element, span);
+                self.check_register(source.base, span);
+                self.expect_type(*index, &IrType::Int, span);
+            }
+            Instruction::TextByteLength { dst, text, .. } => {
+                self.expect_type(*dst, &IrType::Int, span);
+                self.expect_type(*text, &IrType::Text, span);
+            }
+            Instruction::TextIsEmpty { dst, text, .. } => {
+                self.expect_type(*dst, &IrType::Bool, span);
+                self.expect_type(*text, &IrType::Text, span);
+            }
+            Instruction::TextConcat { dst, lhs, rhs, .. } => {
+                self.expect_type(*dst, &IrType::Text, span);
+                self.expect_type(*lhs, &IrType::Text, span);
+                self.expect_type(*rhs, &IrType::Text, span);
+            }
             Instruction::CheckedUnaryInt { dst, src, .. } => {
                 self.expect_type(*dst, &IrType::Int, span);
                 self.expect_type(*src, &IrType::Int, span);
@@ -670,20 +760,33 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 dst,
                 function,
                 arguments,
+                argument_sources,
                 current_lifecycle,
                 ..
             } => self.validate_call(
                 *dst,
                 *function,
                 arguments,
+                argument_sources,
                 *current_lifecycle,
                 active_lifecycles,
                 span,
             ),
             Instruction::ConstInt { .. }
             | Instruction::ConstBool { .. }
+            | Instruction::ConstText { .. }
             | Instruction::ConstNoneLink { .. }
             | Instruction::Copy { .. }
+            | Instruction::Take { .. }
+            | Instruction::ListNew { .. }
+            | Instruction::ListLength { .. }
+            | Instruction::ListPush { .. }
+            | Instruction::ListPushPlace { .. }
+            | Instruction::ListRemove { .. }
+            | Instruction::ListRemovePlace { .. }
+            | Instruction::TextByteLength { .. }
+            | Instruction::TextIsEmpty { .. }
+            | Instruction::TextConcat { .. }
             | Instruction::CheckedUnaryInt { .. }
             | Instruction::CheckedBinaryInt { .. }
             | Instruction::Not { .. }
@@ -717,12 +820,12 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             self.expect_type(lhs, &IrType::Int, span);
         } else if !matches!(
             self.register_type(lhs, span),
-            Some(IrType::Int | IrType::Bool | IrType::Entity(_))
+            Some(IrType::Int | IrType::Bool | IrType::Text | IrType::Entity(_))
         ) {
             self.sink.error(
                 REGISTER_ERROR,
                 span,
-                "equality comparison requires Int, Bool, or entity operands",
+                "equality comparison requires Int, Bool, Text, or entity operands",
             );
         }
     }
@@ -844,11 +947,20 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         dst: Option<Register>,
         function: keld_semantics::FunctionId,
         arguments: &[(keld_semantics::ParameterIndex, Register)],
+        argument_sources: &[(
+            keld_semantics::ParameterIndex,
+            Option<crate::ArgumentSource>,
+        )],
         current_lifecycle: Register,
         active_lifecycles: &BTreeSet<Register>,
         span: Span,
     ) {
         self.require_active_lifecycle(current_lifecycle, active_lifecycles, span);
+        for (_, source) in argument_sources {
+            if let Some(source) = source {
+                self.check_register(source.base, span);
+            }
+        }
         let Some(callee) = self.module.functions.get(function.0 as usize).cloned() else {
             self.sink
                 .error(REGISTER_ERROR, span, "call targets an unknown function");
@@ -1097,8 +1209,17 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
     match instruction {
         Instruction::ConstInt { dst, .. }
         | Instruction::ConstBool { dst, .. }
+        | Instruction::ConstText { dst, .. }
         | Instruction::ConstNoneLink { dst, .. }
         | Instruction::Copy { dst, .. }
+        | Instruction::Take { dst, .. }
+        | Instruction::ListNew { dst, .. }
+        | Instruction::ListLength { dst, .. }
+        | Instruction::ListRemove { dst, .. }
+        | Instruction::ListRemovePlace { dst, .. }
+        | Instruction::TextByteLength { dst, .. }
+        | Instruction::TextIsEmpty { dst, .. }
+        | Instruction::TextConcat { dst, .. }
         | Instruction::CheckedUnaryInt { dst, .. }
         | Instruction::CheckedBinaryInt { dst, .. }
         | Instruction::Not { dst, .. }
@@ -1115,6 +1236,8 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::OpenView { .. }
         | Instruction::WriteField { .. }
         | Instruction::CloseView { .. }
+        | Instruction::ListPush { .. }
+        | Instruction::ListPushPlace { .. }
         | Instruction::KeepEntity { .. }
         | Instruction::RetireEntity { .. } => None,
     }
@@ -1124,13 +1247,35 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
     match instruction {
         Instruction::ConstInt { .. }
         | Instruction::ConstBool { .. }
+        | Instruction::ConstText { .. }
         | Instruction::ConstNoneLink { .. }
+        | Instruction::ListNew { .. }
         | Instruction::Phi { .. }
         | Instruction::ReadField { .. }
         | Instruction::CloseView { .. } => Vec::new(),
         Instruction::Copy { src, .. }
+        | Instruction::Take { src, .. }
         | Instruction::CheckedUnaryInt { src, .. }
         | Instruction::Not { src, .. } => vec![*src],
+        Instruction::ListLength { list, .. } => vec![*list],
+        Instruction::ListPush { list, value, .. } => vec![*list, *value],
+        Instruction::ListPushPlace {
+            list,
+            source,
+            value,
+            ..
+        } => vec![*list, source.base, *value],
+        Instruction::ListRemove { list, index, .. } => vec![*list, *index],
+        Instruction::ListRemovePlace {
+            list,
+            source,
+            index,
+            ..
+        } => vec![*list, source.base, *index],
+        Instruction::TextByteLength { text, .. } | Instruction::TextIsEmpty { text, .. } => {
+            vec![*text]
+        }
+        Instruction::TextConcat { lhs, rhs, .. } => vec![*lhs, *rhs],
         Instruction::CheckedBinaryInt { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
             vec![*lhs, *rhs]
         }
@@ -1156,11 +1301,17 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         } => vec![*entity, *lifecycle],
         Instruction::Call {
             arguments,
+            argument_sources,
             current_lifecycle,
             ..
         } => arguments
             .iter()
             .map(|(_, register)| *register)
+            .chain(
+                argument_sources
+                    .iter()
+                    .filter_map(|(_, source)| source.as_ref().map(|source| source.base)),
+            )
             .chain(std::iter::once(*current_lifecycle))
             .collect(),
     }
@@ -1186,6 +1337,11 @@ fn is_structural(instruction: &Instruction) -> bool {
             | Instruction::AllocateEntity { .. }
             | Instruction::KeepEntity { .. }
             | Instruction::RetireEntity { .. }
+            | Instruction::ListPush { .. }
+            | Instruction::ListRemove { .. }
+            | Instruction::TextByteLength { .. }
+            | Instruction::TextIsEmpty { .. }
+            | Instruction::TextConcat { .. }
             | Instruction::Call { .. }
     )
 }
@@ -1207,8 +1363,19 @@ fn instruction_span(instruction: &Instruction) -> Span {
     match instruction {
         Instruction::ConstInt { span, .. }
         | Instruction::ConstBool { span, .. }
+        | Instruction::ConstText { span, .. }
         | Instruction::ConstNoneLink { span, .. }
         | Instruction::Copy { span, .. }
+        | Instruction::Take { span, .. }
+        | Instruction::ListNew { span, .. }
+        | Instruction::ListLength { span, .. }
+        | Instruction::ListPush { span, .. }
+        | Instruction::ListPushPlace { span, .. }
+        | Instruction::ListRemove { span, .. }
+        | Instruction::ListRemovePlace { span, .. }
+        | Instruction::TextByteLength { span, .. }
+        | Instruction::TextIsEmpty { span, .. }
+        | Instruction::TextConcat { span, .. }
         | Instruction::CheckedUnaryInt { span, .. }
         | Instruction::CheckedBinaryInt { span, .. }
         | Instruction::Not { span, .. }

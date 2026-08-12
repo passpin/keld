@@ -9,6 +9,12 @@ pub enum ExitTarget {
     Return(Option<ValueId>),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Place {
+    pub base: LocalId,
+    pub fields: Vec<FieldId>,
+}
+
 #[derive(Clone, Debug)]
 pub enum FlowOp {
     ConstInt {
@@ -21,6 +27,11 @@ pub enum FlowOp {
         value: bool,
         span: Span,
     },
+    ConstText {
+        dst: ValueId,
+        value: String,
+        span: Span,
+    },
     ConstNoneLink {
         dst: ValueId,
         entity: DefId,
@@ -31,6 +42,18 @@ pub enum FlowOp {
         parent: LifecycleId,
         span: Span,
     },
+    BeginCall {
+        call: u32,
+        function: FunctionId,
+        span: Span,
+    },
+    ReserveArgument {
+        call: u32,
+        parameter: ParameterIndex,
+        value: ValueId,
+        place: Option<Place>,
+        span: Span,
+    },
     CopyLocal {
         dst: ValueId,
         local: LocalId,
@@ -39,6 +62,81 @@ pub enum FlowOp {
     StoreLocal {
         local: LocalId,
         value: ValueId,
+        span: Span,
+    },
+    TakeLocal {
+        dst: ValueId,
+        local: LocalId,
+        span: Span,
+    },
+    CopyStorage {
+        dst: ValueId,
+        source: ValueId,
+        span: Span,
+    },
+    ListNew {
+        dst: ValueId,
+        span: Span,
+    },
+    ListLength {
+        dst: ValueId,
+        list: ValueId,
+        span: Span,
+    },
+    ListPush {
+        list: ValueId,
+        value: ValueId,
+        span: Span,
+    },
+    ListPushPlace {
+        list: ValueId,
+        place: Place,
+        value: ValueId,
+        span: Span,
+    },
+    ListLengthLocal {
+        dst: ValueId,
+        local: LocalId,
+        span: Span,
+    },
+    ListPushLocal {
+        local: LocalId,
+        value: ValueId,
+        span: Span,
+    },
+    ListRemove {
+        dst: ValueId,
+        list: ValueId,
+        index: ValueId,
+        span: Span,
+    },
+    ListRemovePlace {
+        dst: ValueId,
+        list: ValueId,
+        place: Place,
+        index: ValueId,
+        span: Span,
+    },
+    ListRemoveLocal {
+        dst: ValueId,
+        local: LocalId,
+        index: ValueId,
+        span: Span,
+    },
+    TextByteLength {
+        dst: ValueId,
+        text: ValueId,
+        span: Span,
+    },
+    TextIsEmpty {
+        dst: ValueId,
+        text: ValueId,
+        span: Span,
+    },
+    TextConcat {
+        dst: ValueId,
+        lhs: ValueId,
+        rhs: ValueId,
         span: Span,
     },
     UnaryInt {
@@ -115,9 +213,11 @@ pub enum FlowOp {
         span: Span,
     },
     Call {
+        call: u32,
         dst: Option<ValueId>,
         function: FunctionId,
         arguments: Vec<(ParameterIndex, ValueId)>,
+        argument_places: Vec<(ParameterIndex, Option<Place>)>,
         current_lifecycle: LifecycleId,
         span: Span,
     },

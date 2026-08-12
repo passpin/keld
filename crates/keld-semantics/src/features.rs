@@ -33,26 +33,23 @@ fn unsupported_feature<'a>(
         SyntaxKind::UseDecl => Some("use"),
         SyntaxKind::EnumDecl => Some("enum"),
         SyntaxKind::ExternFunctionDecl => Some("extern"),
-        SyntaxKind::TypeParameterList | SyntaxKind::TypeArgumentList => Some("generic"),
+        SyntaxKind::TypeParameterList => Some("generic"),
         SyntaxKind::WhileStmt => Some("while"),
         SyntaxKind::BreakStmt => Some("break"),
         SyntaxKind::ContinueStmt => Some("continue"),
         SyntaxKind::MatchExpr => Some("match"),
-        SyntaxKind::TakeExpr => Some("take"),
         SyntaxKind::RaisesClause => Some("raises"),
         SyntaxKind::TryStmt => Some("try"),
-        SyntaxKind::LiteralExpr if has_direct_kind(node, lexed, TokenKind::String) => {
-            Some("string")
-        }
+        SyntaxKind::LiteralExpr if has_direct_kind(node, lexed, TokenKind::String) => None,
         SyntaxKind::BindingStmt
             if has_direct_kind(node, lexed, TokenKind::Keyword(Keyword::Var)) =>
         {
-            Some("var")
+            None
         }
         SyntaxKind::Parameter
             if has_direct_kind(node, lexed, TokenKind::Keyword(Keyword::Take)) =>
         {
-            Some("take")
+            None
         }
         SyntaxKind::ModuleDecl
             if has_direct_kind(node, lexed, TokenKind::Keyword(Keyword::Unsafe)) =>
@@ -69,8 +66,26 @@ fn unsupported_feature<'a>(
             .descendant_nodes()
             .find(|child| child.kind == SyntaxKind::Name)
             .and_then(|name| node_text(name, lexed, source));
-        if matches!(name, Some("Text" | "List")) {
-            return name;
+        if name == Some("List") {
+            let valid_shape = node
+                .child_nodes()
+                .find(|child| child.kind == SyntaxKind::TypeArgumentList)
+                .is_some_and(|arguments| {
+                    arguments
+                        .child_nodes()
+                        .filter(|child| child.kind == SyntaxKind::Type)
+                        .count()
+                        == 1
+                });
+            if !valid_shape {
+                return Some("List type arguments");
+            }
+        } else if name == Some("Text")
+            && node
+                .child_nodes()
+                .any(|child| child.kind == SyntaxKind::TypeArgumentList)
+        {
+            return Some("Text type arguments");
         }
     }
     None

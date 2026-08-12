@@ -1,8 +1,10 @@
 use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFaultKind};
-use crate::frame::{ActiveView, Frame};
+use crate::frame::{ActiveView, Frame, LoanReturn};
+use crate::value::RuntimeText;
 use crate::value::{CopyAllocation, EntityPayload, Value, try_copy_value};
 use keld_ir::{
-    FaultKind, Function, Instruction, IrBlockId, Module, Register, Terminator, ViewMode,
+    ArgumentSource, FaultKind, Function, Instruction, IrBlockId, Module, Register, Terminator,
+    ViewMode,
 };
 use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
@@ -65,7 +67,7 @@ impl<'module> Interpreter<'module> {
             .get(self.module.main.0 as usize)
             .ok_or_else(|| internal("validated main function is missing"))?;
         let root = self.store.root_lifecycle();
-        let frame = build_frame(main, Vec::new(), root, None, main.span)?;
+        let frame = build_frame(main, Vec::new(), root, None, Vec::new(), main.span)?;
         self.frames.push(frame);
         enter_block(self.module, &mut self.frames, main.entry, None, main.span)?;
         loop {
@@ -134,6 +136,13 @@ pub fn run_text_for_test(text: &str) -> Result<ExecutionResult, RuntimeFault> {
             verification.diagnostics
         )
     });
+    let storage = keld_storage::verify(verified);
+    let verified = storage.module.unwrap_or_else(|| {
+        panic!(
+            "test source failed storage verification: {:#?}",
+            storage.diagnostics
+        )
+    });
     let ir = keld_ir::lower(&verified);
     let mut interpreter = match Interpreter::new(&ir) {
         Ok(interpreter) => interpreter,
@@ -147,6 +156,7 @@ pub fn run_text_for_test(text: &str) -> Result<ExecutionResult, RuntimeFault> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn execute_instruction(
     module: &Module,
     store: &mut Store<EntityPayload>,
@@ -161,6 +171,13 @@ fn execute_instruction(
         Instruction::ConstBool { dst, value, .. } => {
             set_register(frames, *dst, Value::Bool(*value))?;
         }
+        Instruction::ConstText { dst, value, .. } => {
+            set_register(
+                frames,
+                *dst,
+                Value::Text(RuntimeText::from_string(value.clone())),
+            )?;
+        }
         Instruction::ConstNoneLink { dst, .. } => {
             set_register(frames, *dst, Value::Link(None))?;
         }
@@ -168,6 +185,112 @@ fn execute_instruction(
             let value =
                 try_copy_value(frame_value(frames, *src)?).map_err(|_| allocation_failure(span))?;
             set_register(frames, *dst, value)?;
+        }
+        Instruction::Take { dst, src, .. } => {
+            let value = take_register(frames, *src)?;
+            set_register(frames, *dst, value)?;
+        }
+        Instruction::ListNew { dst, .. } => {
+            set_register(frames, *dst, Value::List(Vec::new()))?;
+        }
+        Instruction::ListLength { dst, list, .. } => {
+            let Value::List(elements) = frame_value(frames, *list)? else {
+                return Err(internal("validated list length received a non-list"));
+            };
+            let length = i64::try_from(elements.len())
+                .map_err(|_| internal("validated List length exceeds Int"))?;
+            set_register(frames, *dst, Value::Int(length))?;
+        }
+        Instruction::ListPush { list, value, .. } => {
+            let value = try_copy_value(frame_value(frames, *value)?)
+                .map_err(|_| allocation_failure(span))?;
+            let mut list_value = take_register(frames, *list)?;
+            let Value::List(elements) = &mut list_value else {
+                return Err(internal("validated list push received a non-list"));
+            };
+            if elements.try_reserve(1).is_err() {
+                set_register(frames, *list, list_value)?;
+                return Err(allocation_failure(span));
+            }
+            elements.push(value);
+            set_register(frames, *list, list_value)?;
+        }
+        Instruction::ListPushPlace { source, value, .. } => {
+            let value = try_copy_value(frame_value(frames, *value)?)
+                .map_err(|_| allocation_failure(span))?;
+            let mut list_value = take_source(module, store, frames, source, span)?;
+            let result = if let Value::List(elements) = &mut list_value {
+                if elements.try_reserve(1).is_err() {
+                    Err(allocation_failure(span))
+                } else {
+                    elements.push(value);
+                    Ok(())
+                }
+            } else {
+                Err(internal("validated list push received a non-list"))
+            };
+            write_source(module, store, frames, source, list_value, span)?;
+            result?;
+        }
+        Instruction::ListRemove {
+            dst, list, index, ..
+        } => {
+            let index = usize::try_from(expect_int(frame_value(frames, *index)?)?)
+                .map_err(|_| bounds_failure(span))?;
+            let mut list_value = take_register(frames, *list)?;
+            let Value::List(elements) = &mut list_value else {
+                return Err(internal("validated list remove received a non-list"));
+            };
+            if index >= elements.len() {
+                set_register(frames, *list, list_value)?;
+                return Err(bounds_failure(span));
+            }
+            let removed = elements.remove(index);
+            set_register(frames, *list, list_value)?;
+            set_register(frames, *dst, removed)?;
+        }
+        Instruction::ListRemovePlace {
+            dst, source, index, ..
+        } => {
+            let index = usize::try_from(expect_int(frame_value(frames, *index)?)?)
+                .map_err(|_| bounds_failure(span))?;
+            let mut list_value = take_source(module, store, frames, source, span)?;
+            let result = if let Value::List(elements) = &mut list_value {
+                if index >= elements.len() {
+                    Err(bounds_failure(span))
+                } else {
+                    Ok(elements.remove(index))
+                }
+            } else {
+                Err(internal("validated list remove received a non-list"))
+            };
+            write_source(module, store, frames, source, list_value, span)?;
+            set_register(frames, *dst, result?)?;
+        }
+        Instruction::TextByteLength { dst, text, .. } => {
+            let Value::Text(value) = frame_value(frames, *text)? else {
+                return Err(internal("validated text byte length received a non-text"));
+            };
+            let length = i64::try_from(value.byte_length())
+                .map_err(|_| internal("validated Text length exceeds Int"))?;
+            set_register(frames, *dst, Value::Int(length))?;
+        }
+        Instruction::TextIsEmpty { dst, text, .. } => {
+            let Value::Text(value) = frame_value(frames, *text)? else {
+                return Err(internal("validated text is_empty received a non-text"));
+            };
+            let is_empty = value.byte_length() == 0;
+            set_register(frames, *dst, Value::Bool(is_empty))?;
+        }
+        Instruction::TextConcat { dst, lhs, rhs, .. } => {
+            let Value::Text(left) = frame_value(frames, *lhs)? else {
+                return Err(internal("validated text concat received a non-text lhs"));
+            };
+            let Value::Text(right) = frame_value(frames, *rhs)? else {
+                return Err(internal("validated text concat received a non-text rhs"));
+            };
+            let value = RuntimeText::concat(left, right).ok_or_else(|| allocation_failure(span))?;
+            set_register(frames, *dst, Value::Text(value))?;
         }
         Instruction::CheckedUnaryInt { dst, op, src, .. } => {
             let value = expect_int(frame_value(frames, *src)?)?;
@@ -396,23 +519,37 @@ fn execute_call_or_retirement(
             dst,
             function,
             arguments,
+            argument_sources,
             current_lifecycle,
             ..
         } => {
             return execute_call(
                 module,
+                store,
                 frames,
                 *dst,
                 *function,
                 arguments,
+                argument_sources,
                 *current_lifecycle,
                 span,
             );
         }
         Instruction::ConstInt { .. }
         | Instruction::ConstBool { .. }
+        | Instruction::ConstText { .. }
         | Instruction::ConstNoneLink { .. }
         | Instruction::Copy { .. }
+        | Instruction::Take { .. }
+        | Instruction::ListNew { .. }
+        | Instruction::ListLength { .. }
+        | Instruction::ListPush { .. }
+        | Instruction::ListPushPlace { .. }
+        | Instruction::ListRemove { .. }
+        | Instruction::ListRemovePlace { .. }
+        | Instruction::TextByteLength { .. }
+        | Instruction::TextIsEmpty { .. }
+        | Instruction::TextConcat { .. }
         | Instruction::CheckedUnaryInt { .. }
         | Instruction::CheckedBinaryInt { .. }
         | Instruction::Not { .. }
@@ -435,31 +572,87 @@ fn execute_call_or_retirement(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_call(
     module: &Module,
+    store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     destination: Option<Register>,
     function: keld_semantics::FunctionId,
     arguments: &[(ParameterIndex, Register)],
+    argument_sources: &[(ParameterIndex, Option<ArgumentSource>)],
     current_lifecycle: Register,
     span: Span,
 ) -> Result<(), InterpreterFailure> {
-    let mut materialized = Vec::new();
-    materialized
-        .try_reserve_exact(arguments.len())
-        .map_err(|_| allocation_failure(span))?;
-    for (parameter, register) in arguments {
-        let value = try_copy_value(frame_value(frames, *register)?)
-            .map_err(|_| allocation_failure(span))?;
-        materialized.push((*parameter, value));
-    }
-    let lifecycle = expect_lifecycle(frame_value(frames, current_lifecycle)?)?;
     let callee = module
         .functions
         .get(function.0 as usize)
         .ok_or_else(|| internal("validated call target is missing"))?;
+    let mut materialized = Vec::new();
+    let mut loan_returns = Vec::new();
+    materialized
+        .try_reserve_exact(arguments.len())
+        .map_err(|_| allocation_failure(span))?;
+    for (parameter, register) in arguments {
+        let parameter_index = parameter.0 as usize;
+        let mode = callee
+            .parameter_modes
+            .get(parameter_index)
+            .copied()
+            .unwrap_or(keld_semantics::ParameterMode::Loan);
+        let effect = callee
+            .parameter_effects
+            .get(parameter_index)
+            .copied()
+            .unwrap_or(keld_storage::LoanEffect::Read);
+        let value = if mode == keld_semantics::ParameterMode::Take
+            || matches!(
+                effect,
+                keld_storage::LoanEffect::Edit | keld_storage::LoanEffect::Structural
+            ) {
+            let source = if mode == keld_semantics::ParameterMode::Loan {
+                argument_sources
+                    .iter()
+                    .find(|(candidate, _)| *candidate == *parameter)
+                    .and_then(|(_, source)| source.clone())
+            } else {
+                None
+            };
+            let value = if let Some(source) = source.as_ref() {
+                take_source(module, store, frames, source, span)?
+            } else {
+                take_register(frames, *register)?
+            };
+            if mode == keld_semantics::ParameterMode::Loan {
+                let callee_register = callee
+                    .parameters
+                    .get(parameter_index)
+                    .copied()
+                    .ok_or_else(|| internal("validated call parameter is missing"))?;
+                loan_returns.push(LoanReturn {
+                    source: source.unwrap_or(ArgumentSource {
+                        base: *register,
+                        fields: Vec::new(),
+                    }),
+                    callee: callee_register,
+                });
+            }
+            value
+        } else {
+            try_copy_value(frame_value(frames, *register)?).map_err(|_| allocation_failure(span))?
+        };
+        materialized.push((*parameter, value));
+    }
+    let lifecycle = expect_lifecycle(frame_value(frames, current_lifecycle)?)?;
     advance(frames)?;
-    let frame = build_frame(callee, materialized, lifecycle, destination, span)?;
+    let frame = build_frame(
+        callee,
+        materialized,
+        lifecycle,
+        destination,
+        loan_returns,
+        span,
+    )?;
     frames
         .try_reserve(1)
         .map_err(|_| allocation_failure(span))?;
@@ -472,9 +665,10 @@ fn build_frame(
     arguments: Vec<(ParameterIndex, Value)>,
     current_lifecycle: RuntimeLifecycleId,
     return_destination: Option<Register>,
+    loan_returns: Vec<LoanReturn>,
     span: Span,
 ) -> Result<Frame, InterpreterFailure> {
-    let mut frame = Frame::new(function, return_destination)
+    let mut frame = Frame::new(function, return_destination, loan_returns)
         .map_err(|CopyAllocation| allocation_failure(span))?;
     frame
         .set(
@@ -537,7 +731,9 @@ fn execute_terminator(
             }
             Ok(None)
         }
-        Terminator::Return(register) => return_from_frame(module, frames, *register, fallback_span),
+        Terminator::Return(register) => {
+            return_from_frame(module, store, frames, *register, fallback_span)
+        }
         Terminator::Fault { kind, span } => Err(InterpreterFailure::Runtime(RuntimeFault {
             kind: match kind {
                 FaultKind::Arithmetic => RuntimeFaultKind::Arithmetic,
@@ -552,10 +748,11 @@ fn execute_terminator(
 }
 
 fn return_from_frame(
-    _module: &Module,
+    module: &Module,
+    store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     register: Option<Register>,
-    _span: Span,
+    span: Span,
 ) -> Result<Option<Value>, InterpreterFailure> {
     let frame = frames
         .last_mut()
@@ -570,14 +767,27 @@ fn return_from_frame(
         Value::Unit
     };
     let destination = frame.return_destination;
+    let loan_returns = frame
+        .loan_returns
+        .iter()
+        .map(|loan| {
+            let value = frame
+                .registers
+                .get_mut(loan.callee.0 as usize)
+                .and_then(Option::take)
+                .ok_or_else(|| internal("validated loan parameter register is undefined"))?;
+            Ok((loan.source.clone(), value))
+        })
+        .collect::<Result<Vec<_>, InterpreterFailure>>()?;
     frames.pop();
-    let Some(caller) = frames.last_mut() else {
+    if frames.last().is_none() {
         return Ok(Some(value));
-    };
+    }
+    for (source, value) in loan_returns {
+        write_source(module, store, frames, &source, value, span)?;
+    }
     if let Some(destination) = destination {
-        caller
-            .set(destination, value)
-            .map_err(|()| internal("call destination is outside the caller frame"))?;
+        set_register(frames, destination, value)?;
     }
     Ok(None)
 }
@@ -714,6 +924,155 @@ fn set_register(
         .map_err(|()| internal("validated destination is outside the frame"))
 }
 
+fn take_register(frames: &mut [Frame], register: Register) -> Result<Value, InterpreterFailure> {
+    let frame = frames
+        .last_mut()
+        .ok_or_else(|| internal("register move has no active frame"))?;
+    frame
+        .registers
+        .get_mut(register.0 as usize)
+        .and_then(Option::take)
+        .ok_or_else(|| internal("validated source register is undefined or already moved"))
+}
+
+fn take_source(
+    module: &Module,
+    store: &mut Store<EntityPayload>,
+    frames: &mut [Frame],
+    source: &ArgumentSource,
+    span: Span,
+) -> Result<Value, InterpreterFailure> {
+    if source.fields.is_empty() {
+        return take_register(frames, source.base);
+    }
+    let is_entity = matches!(frame_value(frames, source.base)?, Value::Entity(_));
+    if is_entity {
+        let entity = expect_entity(frame_value(frames, source.base)?)?;
+        let value = store
+            .edit(entity, |payload| {
+                let index = field_index(module, payload.definition, source.fields[0])?;
+                if source.fields.len() == 1 {
+                    Ok(std::mem::replace(
+                        payload
+                            .fields
+                            .get_mut(index)
+                            .ok_or_else(|| internal("entity payload layout is invalid"))?,
+                        Value::Unit,
+                    ))
+                } else {
+                    take_nested(
+                        module,
+                        payload
+                            .fields
+                            .get_mut(index)
+                            .ok_or_else(|| internal("entity payload layout is invalid"))?,
+                        &source.fields[1..],
+                    )
+                }
+            })
+            .map_err(|error| store_failure(error, span))??;
+        return Ok(value);
+    }
+    let mut aggregate = take_register(frames, source.base)?;
+    let value = take_nested(module, &mut aggregate, &source.fields)?;
+    frames
+        .last_mut()
+        .ok_or_else(|| internal("source writeback has no active frame"))?
+        .set(source.base, aggregate)
+        .map_err(|()| internal("source base register is outside the caller frame"))?;
+    Ok(value)
+}
+
+fn write_source(
+    module: &Module,
+    store: &mut Store<EntityPayload>,
+    frames: &mut [Frame],
+    source: &ArgumentSource,
+    value: Value,
+    span: Span,
+) -> Result<(), InterpreterFailure> {
+    if source.fields.is_empty() {
+        return set_register(frames, source.base, value);
+    }
+    let is_entity = matches!(frame_value(frames, source.base)?, Value::Entity(_));
+    if is_entity {
+        let entity = expect_entity(frame_value(frames, source.base)?)?;
+        store
+            .edit(entity, |payload| {
+                let index = field_index(module, payload.definition, source.fields[0])?;
+                let destination = payload
+                    .fields
+                    .get_mut(index)
+                    .ok_or_else(|| internal("entity payload layout is invalid"))?;
+                if source.fields.len() == 1 {
+                    *destination = value;
+                    Ok(())
+                } else {
+                    write_nested(module, destination, &source.fields[1..], value)
+                }
+            })
+            .map_err(|error| store_failure(error, span))??;
+        return Ok(());
+    }
+    let mut aggregate = take_register(frames, source.base)?;
+    write_nested(module, &mut aggregate, &source.fields, value)?;
+    frames
+        .last_mut()
+        .ok_or_else(|| internal("source writeback has no active frame"))?
+        .set(source.base, aggregate)
+        .map_err(|()| internal("source base register is outside the caller frame"))
+}
+
+fn take_nested(
+    module: &Module,
+    value: &mut Value,
+    fields: &[FieldId],
+) -> Result<Value, InterpreterFailure> {
+    let Some(field) = fields.first().copied() else {
+        return Ok(std::mem::replace(value, Value::Unit));
+    };
+    let Value::Struct {
+        definition,
+        fields: values,
+    } = value
+    else {
+        return Err(internal(
+            "argument source path does not name a struct field",
+        ));
+    };
+    let index = field_index(module, *definition, field)?;
+    let destination = values
+        .get_mut(index)
+        .ok_or_else(|| internal("struct payload layout is invalid"))?;
+    take_nested(module, destination, &fields[1..])
+}
+
+fn write_nested(
+    module: &Module,
+    value: &mut Value,
+    fields: &[FieldId],
+    replacement: Value,
+) -> Result<(), InterpreterFailure> {
+    let Some(field) = fields.first().copied() else {
+        *value = replacement;
+        return Ok(());
+    };
+    let Value::Struct {
+        definition,
+        fields: values,
+    } = value
+    else {
+        return Err(internal(
+            "argument source path does not name a struct field",
+        ));
+    };
+    let index = field_index(module, *definition, field)?;
+    let destination = values
+        .get_mut(index)
+        .ok_or_else(|| internal("struct payload layout is invalid"))?;
+    write_nested(module, destination, &fields[1..], replacement)
+}
+
 fn active_view(frames: &[Frame], view: keld_ir::ViewId) -> Result<ActiveView, InterpreterFailure> {
     frames
         .last()
@@ -785,6 +1144,7 @@ fn compare_values(
     let equality = || match (lhs, rhs) {
         (Value::Int(lhs), Value::Int(rhs)) => Ok(lhs == rhs),
         (Value::Bool(lhs), Value::Bool(rhs)) => Ok(lhs == rhs),
+        (Value::Text(lhs), Value::Text(rhs)) => Ok(lhs == rhs),
         (Value::Entity(lhs), Value::Entity(rhs)) => Ok(lhs == rhs),
         _ => Err(internal(
             "validated equality operands have invalid value kinds",
@@ -818,6 +1178,13 @@ fn allocation_failure(span: Span) -> InterpreterFailure {
     })
 }
 
+fn bounds_failure(span: Span) -> InterpreterFailure {
+    InterpreterFailure::Runtime(RuntimeFault {
+        kind: RuntimeFaultKind::Bounds,
+        span,
+    })
+}
+
 fn store_failure(error: StoreError, span: Span) -> InterpreterFailure {
     match error {
         StoreError::Allocation => allocation_failure(span),
@@ -845,8 +1212,19 @@ fn instruction_span(instruction: &Instruction) -> Span {
     match instruction {
         Instruction::ConstInt { span, .. }
         | Instruction::ConstBool { span, .. }
+        | Instruction::ConstText { span, .. }
         | Instruction::ConstNoneLink { span, .. }
         | Instruction::Copy { span, .. }
+        | Instruction::Take { span, .. }
+        | Instruction::ListNew { span, .. }
+        | Instruction::ListLength { span, .. }
+        | Instruction::ListPush { span, .. }
+        | Instruction::ListPushPlace { span, .. }
+        | Instruction::ListRemove { span, .. }
+        | Instruction::ListRemovePlace { span, .. }
+        | Instruction::TextByteLength { span, .. }
+        | Instruction::TextIsEmpty { span, .. }
+        | Instruction::TextConcat { span, .. }
         | Instruction::CheckedUnaryInt { span, .. }
         | Instruction::CheckedBinaryInt { span, .. }
         | Instruction::Not { span, .. }

@@ -6,7 +6,18 @@ fn call_arguments_are_materialized_left_to_right() {
         "fn pick(a: Int, b: Int) -> Int { return b }\nfn main() -> Int { return pick(1 + 2, 3 * 4) }\n",
     )
     .unwrap();
-    let ops = flow.function_named("main").unwrap().linear_ops();
+    let ops = flow
+        .function_named("main")
+        .unwrap()
+        .linear_ops()
+        .into_iter()
+        .filter(|operation| {
+            !matches!(
+                operation,
+                FlowOp::BeginCall { .. } | FlowOp::ReserveArgument { .. }
+            )
+        })
+        .collect::<Vec<_>>();
 
     assert!(matches!(ops[0], FlowOp::ConstInt { value: 1, .. }));
     assert!(matches!(ops[1], FlowOp::ConstInt { value: 2, .. }));
@@ -111,4 +122,15 @@ fn boolean_operators_use_control_flow_and_one_phi() {
         3
     );
     assert!(function.blocks.len() >= 10);
+}
+
+#[test]
+fn take_lowers_to_an_explicit_local_transfer() {
+    let flow = lower_text_for_test(
+        "fn take_items(take items: List[Int]) -> List[Int] { return take items }\nfn main() -> Int { return 0 }\n",
+    )
+    .unwrap();
+    let ops = flow.function_named("take_items").unwrap().linear_ops();
+
+    assert!(matches!(ops[0], FlowOp::TakeLocal { .. }));
 }

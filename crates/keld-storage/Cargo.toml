@@ -1,5 +1,5 @@
 [package]
-name = "keld-interpreter"
+name = "keld-storage"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,11 +7,7 @@ license.workspace = true
 
 [dependencies]
 keld-flow = { path = "../keld-flow" }
-keld-ir = { path = "../keld-ir" }
 keld-lifecycle = { path = "../keld-lifecycle" }
-keld-storage = { path = "../keld-storage" }
-keld-numeric = { path = "../keld-numeric" }
-keld-runtime = { path = "../keld-runtime" }
 keld-semantics = { path = "../keld-semantics" }
 keld-source = { path = "../keld-source" }
 

@@ -21,6 +21,11 @@ pub enum Instruction {
         value: bool,
         span: Span,
     },
+    ConstText {
+        dst: Register,
+        value: String,
+        span: Span,
+    },
     ConstNoneLink {
         dst: Register,
         entity: DefId,
@@ -29,6 +34,60 @@ pub enum Instruction {
     Copy {
         dst: Register,
         src: Register,
+        span: Span,
+    },
+    Take {
+        dst: Register,
+        src: Register,
+        span: Span,
+    },
+    ListNew {
+        dst: Register,
+        span: Span,
+    },
+    ListLength {
+        dst: Register,
+        list: Register,
+        span: Span,
+    },
+    ListPush {
+        list: Register,
+        value: Register,
+        span: Span,
+    },
+    ListPushPlace {
+        list: Register,
+        source: crate::ArgumentSource,
+        value: Register,
+        span: Span,
+    },
+    ListRemove {
+        dst: Register,
+        list: Register,
+        index: Register,
+        span: Span,
+    },
+    ListRemovePlace {
+        dst: Register,
+        list: Register,
+        source: crate::ArgumentSource,
+        index: Register,
+        span: Span,
+    },
+    TextByteLength {
+        dst: Register,
+        text: Register,
+        span: Span,
+    },
+    TextIsEmpty {
+        dst: Register,
+        text: Register,
+        span: Span,
+    },
+    TextConcat {
+        dst: Register,
+        lhs: Register,
+        rhs: Register,
         span: Span,
     },
     CheckedUnaryInt {
@@ -129,6 +188,7 @@ pub enum Instruction {
         dst: Option<Register>,
         function: FunctionId,
         arguments: Vec<(ParameterIndex, Register)>,
+        argument_sources: Vec<(ParameterIndex, Option<crate::ArgumentSource>)>,
         current_lifecycle: Register,
         span: Span,
     },

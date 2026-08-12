@@ -55,6 +55,7 @@ pub(crate) fn dump(module: &Module) -> String {
     output
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_instruction(output: &mut String, instruction: &Instruction) {
     match instruction {
         Instruction::ConstInt { dst, value, span } => {
@@ -65,6 +66,11 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
             write!(output, "r{} = bool {value} ", dst.0).expect("writing to String cannot fail");
             write_span(output, *span);
         }
+        Instruction::ConstText { dst, value, span } => {
+            write!(output, "r{} = text {:?} ", dst.0, value)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
         Instruction::ConstNoneLink { dst, entity, span } => {
             write!(output, "r{} = none d{} ", dst.0, entity.0)
                 .expect("writing to String cannot fail");
@@ -72,6 +78,90 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
         }
         Instruction::Copy { dst, src, span } => {
             write!(output, "r{} = copy r{} ", dst.0, src.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::Take { dst, src, span } => {
+            write!(output, "r{} = take r{} ", dst.0, src.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListNew { dst, span } => {
+            write!(output, "r{} = list-new ", dst.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListLength { dst, list, span } => {
+            write!(output, "r{} = list-length r{} ", dst.0, list.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListPush { list, value, span } => {
+            write!(output, "list-push r{} r{} ", list.0, value.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListPushPlace {
+            list,
+            source,
+            value,
+            span,
+        } => {
+            write!(
+                output,
+                "list-push-place r{} base r{} fields{} r{} ",
+                list.0,
+                source.base.0,
+                source.fields.len(),
+                value.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListRemove {
+            dst,
+            list,
+            index,
+            span,
+        } => {
+            write!(output, "r{} = list-remove r{} r{} ", dst.0, list.0, index.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListRemovePlace {
+            dst,
+            list,
+            source,
+            index,
+            span,
+        } => {
+            write!(
+                output,
+                "r{} = list-remove-place r{} base r{} fields{} r{} ",
+                dst.0,
+                list.0,
+                source.base.0,
+                source.fields.len(),
+                index.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::TextByteLength { dst, text, span } => {
+            write!(output, "r{} = text-byte-length r{} ", dst.0, text.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::TextIsEmpty { dst, text, span } => {
+            write!(output, "r{} = text-is-empty r{} ", dst.0, text.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::TextConcat {
+            dst,
+            lhs,
+            rhs,
+            span,
+        } => {
+            write!(output, "r{} = text-concat r{} r{} ", dst.0, lhs.0, rhs.0)
+                .expect("writing to String cannot fail");
             write_span(output, *span);
         }
         Instruction::CheckedUnaryInt { dst, op, src, span } => {
@@ -189,6 +279,7 @@ fn write_composite_instruction(output: &mut String, instruction: &Instruction) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
     match instruction {
         Instruction::OpenView {
@@ -257,6 +348,7 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
             arguments,
             current_lifecycle,
             span,
+            ..
         } => {
             if let Some(dst) = dst {
                 write!(output, "r{} = ", dst.0).expect("writing to String cannot fail");
@@ -272,8 +364,19 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
         }
         Instruction::ConstInt { .. }
         | Instruction::ConstBool { .. }
+        | Instruction::ConstText { .. }
         | Instruction::ConstNoneLink { .. }
         | Instruction::Copy { .. }
+        | Instruction::Take { .. }
+        | Instruction::ListNew { .. }
+        | Instruction::ListLength { .. }
+        | Instruction::ListPush { .. }
+        | Instruction::ListPushPlace { .. }
+        | Instruction::ListRemove { .. }
+        | Instruction::ListRemovePlace { .. }
+        | Instruction::TextByteLength { .. }
+        | Instruction::TextIsEmpty { .. }
+        | Instruction::TextConcat { .. }
         | Instruction::CheckedUnaryInt { .. }
         | Instruction::CheckedBinaryInt { .. }
         | Instruction::Not { .. }
@@ -382,6 +485,8 @@ fn type_name(ty: &IrType) -> String {
         IrType::Link { entity, optional } => {
             format!("Link[d{}{}]", entity.0, if *optional { "?" } else { "" })
         }
+        IrType::Text => "Text".to_owned(),
+        IrType::List(element) => format!("List[{}]", type_name(element)),
         IrType::Lifecycle => "Lifecycle".to_owned(),
     }
 }

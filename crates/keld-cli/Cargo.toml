@@ -14,10 +14,10 @@ keld-flow = { path = "../keld-flow" }
 keld-interpreter = { path = "../keld-interpreter" }
 keld-ir = { path = "../keld-ir" }
 keld-lifecycle = { path = "../keld-lifecycle" }
+keld-storage = { path = "../keld-storage" }
 keld-semantics = { path = "../keld-semantics" }
 keld-source = { path = "../keld-source" }
 keld-syntax = { path = "../keld-syntax" }
 
 [lints]
 workspace = true
-

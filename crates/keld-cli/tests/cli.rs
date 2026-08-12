@@ -70,7 +70,7 @@ fn check_is_silent_on_success_and_static_failures_have_stable_codes() {
             1,
             19,
             "KLD0004",
-            "`var` is parsed but not supported by the bootstrap compiler",
+            "`while` is parsed but not supported by the bootstrap compiler",
             "remove this feature or use the currently supported bootstrap subset",
         ),
     ] {

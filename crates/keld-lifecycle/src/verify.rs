@@ -258,6 +258,7 @@ impl Analyzer<'_> {
         state
     }
 
+    #[allow(clippy::too_many_lines)]
     fn operation(
         &mut self,
         block: BlockId,
@@ -326,6 +327,7 @@ impl Analyzer<'_> {
                 arguments,
                 current_lifecycle,
                 span,
+                ..
             } => self.call(
                 block,
                 index,
@@ -350,8 +352,25 @@ impl Analyzer<'_> {
             }
             FlowOp::ConstInt { .. }
             | FlowOp::ConstBool { .. }
+            | FlowOp::ConstText { .. }
             | FlowOp::ConstNoneLink { .. }
             | FlowOp::BeginLifecycle { .. }
+            | FlowOp::BeginCall { .. }
+            | FlowOp::ReserveArgument { .. }
+            | FlowOp::TakeLocal { .. }
+            | FlowOp::CopyStorage { .. }
+            | FlowOp::ListNew { .. }
+            | FlowOp::ListLength { .. }
+            | FlowOp::ListPush { .. }
+            | FlowOp::ListPushPlace { .. }
+            | FlowOp::ListLengthLocal { .. }
+            | FlowOp::ListPushLocal { .. }
+            | FlowOp::ListRemove { .. }
+            | FlowOp::ListRemovePlace { .. }
+            | FlowOp::ListRemoveLocal { .. }
+            | FlowOp::TextByteLength { .. }
+            | FlowOp::TextIsEmpty { .. }
+            | FlowOp::TextConcat { .. }
             | FlowOp::UnaryInt { .. }
             | FlowOp::BinaryInt { .. }
             | FlowOp::Not { .. }

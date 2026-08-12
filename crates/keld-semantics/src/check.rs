@@ -1,9 +1,10 @@
 use crate::analyze::{Analyzer, direct_child};
 use crate::symbols::{FunctionSignature, RetirementSignature};
 use crate::{
-    CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp, HirBlock, HirExpr,
-    HirExprKind, HirFunction, HirIf, HirLifecycle, HirLifecycleId, HirPlace, HirStmt, HirStmtKind,
-    HirUnaryOp, HirWhen, LocalId, ParameterIndex, TypeId, TypeKind, TypeStore,
+    BindingMutability, CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp,
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle, HirLifecycleId, HirPlace,
+    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, ParameterIndex, TypeId, TypeKind,
+    TypeStore,
 };
 use keld_numeric::{
     IntBinaryOp, IntUnaryOp, ParsedIntLiteral, eval_binary, eval_unary, parse_int_literal,
@@ -50,6 +51,7 @@ struct BodyChecker<'analyzer, 'source, 'syntax> {
     next_local: u32,
     next_lifecycle: u32,
     local_types: Vec<TypeId>,
+    local_mutability: Vec<BindingMutability>,
     suppressed_constant_faults: u16,
 }
 
@@ -74,6 +76,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             next_local: u32::try_from(signature.parameters.len()).unwrap_or(u32::MAX),
             next_lifecycle: 0,
             local_types,
+            local_mutability: vec![BindingMutability::Let; signature.parameters.len()],
             suppressed_constant_faults: 0,
         }
     }
@@ -120,6 +123,12 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                     )
                 })
                 .collect(),
+            parameter_modes: self
+                .signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.mode)
+                .collect(),
             parameter_names: self
                 .signature
                 .parameters
@@ -131,6 +140,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             body,
             span: self.signature.node.span,
             local_types: self.local_types,
+            local_mutability: self.local_mutability,
         }
     }
 
@@ -237,16 +247,31 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         let explicit = direct_child(node, SyntaxKind::Type)
             .map(|type_node| self.analyzer.resolve_type(type_node));
         let expression = expression_child(node);
-        let Some(expression) = expression else {
+        let is_var = self.analyzer.context.has_direct_keyword(node, Keyword::Var);
+        let checked =
+            expression.map(|expression| self.check_expression(expression, explicit, environment));
+        let Some(ty) = explicit.or_else(|| checked.as_ref().map(|checked| checked.hir.ty)) else {
+            self.error(
+                TYPE_DIAGNOSTIC,
+                node.span,
+                "a binding without an initializer requires an explicit type".to_owned(),
+            );
+            return None;
+        };
+        if !is_var && checked.is_none() {
             self.error(
                 TYPE_DIAGNOSTIC,
                 node.span,
                 "`let` requires an initializer".to_owned(),
             );
             return None;
-        };
-        let checked = self.check_expression(expression, explicit, environment);
-        let ty = explicit.unwrap_or(checked.hir.ty);
+        }
+        if checked
+            .as_ref()
+            .is_some_and(|checked| self.analyzer.types.kind(checked.hir.ty) == &TypeKind::Error)
+        {
+            return None;
+        }
         if environment.locals.contains_key(&name) {
             self.error(
                 DiagnosticCode("KLD0102"),
@@ -254,14 +279,29 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 format!("duplicate local `{name}`"),
             );
         }
-        let local = self.allocate_local(ty);
+        let local = self.allocate_local(
+            ty,
+            if is_var {
+                BindingMutability::Var
+            } else {
+                BindingMutability::Let
+            },
+        );
         environment.locals.insert(name, (local, ty));
-        Some(HirStmtKind::Let {
-            local,
-            initializer: checked.hir,
-        })
+        if is_var {
+            Some(HirStmtKind::Var {
+                local,
+                initializer: checked.map(|checked| checked.hir),
+            })
+        } else {
+            Some(HirStmtKind::Let {
+                local,
+                initializer: checked.expect("let initializer was checked").hir,
+            })
+        }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn check_assignment(
         &mut self,
         node: &SyntaxNode,
@@ -272,6 +312,43 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             .child_nodes()
             .filter(|child| child.kind == SyntaxKind::Name)
             .collect::<Vec<_>>();
+        if names.len() == 1 {
+            let name = self.analyzer.context.node_text(names[0])?;
+            let Some((local, ty)) = environment.locals.get(name).copied() else {
+                self.error(
+                    UNKNOWN_NAME_DIAGNOSTIC,
+                    names[0].span,
+                    format!("unknown local `{name}`"),
+                );
+                return None;
+            };
+            if self.local_mutability[local.0 as usize] != BindingMutability::Var {
+                self.error(
+                    DiagnosticCode("KLD2010"),
+                    place_node.span,
+                    format!("cannot rebind immutable local `{name}`"),
+                );
+            }
+            let value_node = expression_child(node)?;
+            let value = self.check_expression(value_node, Some(ty), environment);
+            return if let Some(Punct::Eq) = self.direct_punct(node) {
+                Some(HirStmtKind::Assign {
+                    target: HirPlace {
+                        base: local,
+                        fields: Vec::new(),
+                        span: place_node.span,
+                    },
+                    value: value.hir,
+                })
+            } else {
+                self.error(
+                    FEATURE_DIAGNOSTIC,
+                    node.span,
+                    "compound assignment requires an entity field".to_owned(),
+                );
+                None
+            };
+        }
         if names.len() != 2
             || place_node
                 .direct_token_ids()
@@ -447,7 +524,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             .unwrap_or("<error>")
             .to_owned();
         let binding_type = self.analyzer.types.intern(TypeKind::EntityRef(entity));
-        let binding = self.allocate_local(binding_type);
+        let binding = self.allocate_local(binding_type, BindingMutability::Let);
         let blocks = node
             .child_nodes()
             .filter(|child| child.kind == SyntaxKind::Block)
@@ -543,6 +620,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 }
             }
             SyntaxKind::UnaryExpr => self.check_unary(node, environment),
+            SyntaxKind::TakeExpr => self.check_take(node, environment),
             SyntaxKind::CallExpr => self.check_call(node, expected, environment),
             SyntaxKind::FieldExpr => self.check_field(node, environment),
             SyntaxKind::IndexExpr => {
@@ -635,10 +713,82 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                     constant_int: None,
                 }
             }
+            Some(TokenKind::String) => {
+                let text = self.analyzer.context.node_text(node).unwrap_or("");
+                let value = decode_string_literal(text).unwrap_or_default();
+                let ty = self.analyzer.types.intern(TypeKind::Text);
+                CheckedExpr {
+                    hir: HirExpr {
+                        ty,
+                        span: node.span,
+                        kind: HirExprKind::TextLiteral(value),
+                    },
+                    constant_int: None,
+                }
+            }
             _ => CheckedExpr {
                 hir: Self::error_expression(node.span),
                 constant_int: None,
             },
+        }
+    }
+
+    fn check_take(&mut self, node: &SyntaxNode, environment: &mut Environment) -> CheckedExpr {
+        let Some(place_node) = direct_child(node, SyntaxKind::Place) else {
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        let names = place_node
+            .child_nodes()
+            .filter(|child| child.kind == SyntaxKind::Name)
+            .collect::<Vec<_>>();
+        if names.len() != 1 {
+            self.error(
+                DiagnosticCode("KLD2009"),
+                node.span,
+                "`take` requires a named single-home local".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        }
+        let name = self
+            .analyzer
+            .context
+            .node_text(names[0])
+            .unwrap_or("<error>");
+        let Some((base, ty)) = environment.locals.get(name).copied() else {
+            self.error(
+                UNKNOWN_NAME_DIAGNOSTIC,
+                names[0].span,
+                format!("unknown value `{name}`"),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        if self.analyzer.types.storage_class(ty) != crate::StorageClass::SingleHome {
+            self.error(
+                DiagnosticCode("KLD2009"),
+                node.span,
+                "`take` requires a single-home value".to_owned(),
+            );
+        }
+        CheckedExpr {
+            hir: HirExpr {
+                ty,
+                span: node.span,
+                kind: HirExprKind::Take(HirPlace {
+                    base,
+                    fields: Vec::new(),
+                    span: place_node.span,
+                }),
+            },
+            constant_int: None,
         }
     }
 
@@ -759,6 +909,25 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             };
         }
 
+        if punct == Some(Punct::Plus) {
+            let lhs = self.check_expression(operands[0], None, environment);
+            if matches!(self.analyzer.types.kind(lhs.hir.ty), TypeKind::Text) {
+                let rhs = self.check_expression(operands[1], Some(lhs.hir.ty), environment);
+                return CheckedExpr {
+                    hir: HirExpr {
+                        ty: lhs.hir.ty,
+                        span: node.span,
+                        kind: HirExprKind::Binary {
+                            op: HirBinaryOp::TextConcat,
+                            lhs: Box::new(lhs.hir),
+                            rhs: Box::new(rhs.hir),
+                        },
+                    },
+                    constant_int: None,
+                };
+            }
+        }
+
         let lhs = self.check_expression(operands[0], Some(TypeStore::INT), environment);
         let rhs = self.check_expression(operands[1], Some(TypeStore::INT), environment);
         let op = punct
@@ -837,7 +1006,11 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         let lhs = self.check_expression(lhs_node, None, environment);
         let rhs = self.check_expression(rhs_node, Some(lhs.hir.ty), environment);
         match self.analyzer.types.kind(lhs.hir.ty) {
-            TypeKind::Int | TypeKind::Bool | TypeKind::EntityRef(_) | TypeKind::Error => {}
+            TypeKind::Int
+            | TypeKind::Bool
+            | TypeKind::Text
+            | TypeKind::EntityRef(_)
+            | TypeKind::Error => {}
             TypeKind::Link { .. } => self.error(
                 FEATURE_DIAGNOSTIC,
                 node.span,
@@ -846,7 +1019,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             _ => self.error(
                 TYPE_DIAGNOSTIC,
                 node.span,
-                "equality requires Int, Bool, or direct entity identity operands".to_owned(),
+                "equality requires Int, Bool, Text, or direct entity identity operands".to_owned(),
             ),
         }
         let op = comparison_operator(punct.unwrap_or(Punct::EqEq));
@@ -876,6 +1049,24 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 constant_int: None,
             };
         };
+        if let Some(method) = method_name(callee, &self.analyzer.context) {
+            return match method {
+                "copy" => self.check_copy_call(node, callee, environment),
+                "push" => self.check_list_push_call(node, callee, environment),
+                "remove" => self.check_list_remove_call(node, callee, environment),
+                _ => {
+                    self.error(
+                        UNKNOWN_NAME_DIAGNOSTIC,
+                        callee.span,
+                        format!("unknown method `{method}`"),
+                    );
+                    CheckedExpr {
+                        hir: Self::error_expression(node.span),
+                        constant_int: None,
+                    }
+                }
+            };
+        }
         let Some(name) = expression_name(callee, &self.analyzer.context).map(str::to_owned) else {
             self.error(
                 FEATURE_DIAGNOSTIC,
@@ -887,6 +1078,9 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 constant_int: None,
             };
         };
+        if name == "List" {
+            return self.check_list_constructor(node, expected);
+        }
         let arguments = node
             .child_nodes()
             .filter(|child| child.kind == SyntaxKind::Argument)
@@ -904,6 +1098,215 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         );
         CheckedExpr {
             hir: Self::error_expression(node.span),
+            constant_int: None,
+        }
+    }
+
+    fn check_list_constructor(
+        &mut self,
+        node: &SyntaxNode,
+        expected: Option<TypeId>,
+    ) -> CheckedExpr {
+        if node
+            .child_nodes()
+            .any(|child| child.kind == SyntaxKind::Argument)
+        {
+            self.error(
+                ARGUMENT_DIAGNOSTIC,
+                node.span,
+                "`List()` does not accept arguments".to_owned(),
+            );
+        }
+        let Some(ty) = expected else {
+            self.error(
+                TYPE_DIAGNOSTIC,
+                node.span,
+                "`List()` requires an expected `List[T]` type".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        if !matches!(self.analyzer.types.kind(ty), TypeKind::List(_)) {
+            self.error(
+                TYPE_DIAGNOSTIC,
+                node.span,
+                "`List()` requires an expected `List[T]` type".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        }
+        CheckedExpr {
+            hir: HirExpr {
+                ty,
+                span: node.span,
+                kind: HirExprKind::ListNew,
+            },
+            constant_int: None,
+        }
+    }
+
+    fn check_copy_call(
+        &mut self,
+        node: &SyntaxNode,
+        callee: &SyntaxNode,
+        environment: &mut Environment,
+    ) -> CheckedExpr {
+        let Some(base_node) = callee.child_nodes().find(|child| is_expression(child.kind)) else {
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        if node
+            .child_nodes()
+            .any(|child| child.kind == SyntaxKind::Argument)
+        {
+            self.error(
+                ARGUMENT_DIAGNOSTIC,
+                node.span,
+                "`.copy()` does not accept arguments".to_owned(),
+            );
+        }
+        let base = self.check_expression(base_node, None, environment);
+        if !self.analyzer.types.is_structurally_duplicable(base.hir.ty) {
+            self.error(
+                DiagnosticCode("KLD2006"),
+                base.hir.span,
+                "this value is not structurally duplicable".to_owned(),
+            );
+        }
+        CheckedExpr {
+            hir: HirExpr {
+                ty: base.hir.ty,
+                span: node.span,
+                kind: HirExprKind::Copy(Box::new(base.hir)),
+            },
+            constant_int: None,
+        }
+    }
+
+    fn check_list_push_call(
+        &mut self,
+        node: &SyntaxNode,
+        callee: &SyntaxNode,
+        environment: &mut Environment,
+    ) -> CheckedExpr {
+        let Some(base_node) = callee.child_nodes().find(|child| is_expression(child.kind)) else {
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        let base = self.check_expression(base_node, None, environment);
+        let Some(element) = (match self.analyzer.types.kind(base.hir.ty) {
+            TypeKind::List(element) => Some(*element),
+            _ => None,
+        }) else {
+            self.error(
+                TYPE_DIAGNOSTIC,
+                base.hir.span,
+                "`.push()` requires a List receiver".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        let arguments = node
+            .child_nodes()
+            .filter(|child| child.kind == SyntaxKind::Argument)
+            .collect::<Vec<_>>();
+        if arguments.len() != 1 {
+            self.error(
+                ARGUMENT_DIAGNOSTIC,
+                node.span,
+                "`.push()` requires exactly one argument".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        }
+        let value = expression_child(arguments[0])
+            .map(|value| self.check_expression(value, Some(element), environment))
+            .unwrap_or(CheckedExpr {
+                hir: Self::error_expression(arguments[0].span),
+                constant_int: None,
+            });
+        CheckedExpr {
+            hir: HirExpr {
+                ty: TypeStore::UNIT,
+                span: node.span,
+                kind: HirExprKind::ListPush {
+                    list: Box::new(base.hir),
+                    value: Box::new(value.hir),
+                },
+            },
+            constant_int: None,
+        }
+    }
+
+    fn check_list_remove_call(
+        &mut self,
+        node: &SyntaxNode,
+        callee: &SyntaxNode,
+        environment: &mut Environment,
+    ) -> CheckedExpr {
+        let Some(base_node) = callee.child_nodes().find(|child| is_expression(child.kind)) else {
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        let base = self.check_expression(base_node, None, environment);
+        let Some(element) = (match self.analyzer.types.kind(base.hir.ty) {
+            TypeKind::List(element) => Some(*element),
+            _ => None,
+        }) else {
+            self.error(
+                TYPE_DIAGNOSTIC,
+                base.hir.span,
+                "`.remove()` requires a List receiver".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        };
+        let arguments = node
+            .child_nodes()
+            .filter(|child| child.kind == SyntaxKind::Argument)
+            .collect::<Vec<_>>();
+        if arguments.len() != 1 {
+            self.error(
+                ARGUMENT_DIAGNOSTIC,
+                node.span,
+                "`.remove()` requires exactly one index argument".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        }
+        let index = expression_child(arguments[0])
+            .map(|index| self.check_expression(index, Some(TypeStore::INT), environment))
+            .unwrap_or(CheckedExpr {
+                hir: Self::error_expression(arguments[0].span),
+                constant_int: None,
+            });
+        CheckedExpr {
+            hir: HirExpr {
+                ty: element,
+                span: node.span,
+                kind: HirExprKind::ListRemove {
+                    list: Box::new(base.hir),
+                    index: Box::new(index.hir),
+                },
+            },
             constant_int: None,
         }
     }
@@ -1057,6 +1460,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn check_field(&mut self, node: &SyntaxNode, environment: &mut Environment) -> CheckedExpr {
         let children = node.child_nodes().collect::<Vec<_>>();
         let Some(base_node) = children
@@ -1076,6 +1480,36 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             .and_then(|name| self.analyzer.context.node_text(name))
             .unwrap_or("<error>")
             .to_owned();
+        if field_name == "byte_length" || field_name == "is_empty" {
+            let base = self.check_expression(base_node, None, environment);
+            if !matches!(self.analyzer.types.kind(base.hir.ty), TypeKind::Text) {
+                self.error(
+                    TYPE_DIAGNOSTIC,
+                    base.hir.span,
+                    "Text property requires a Text receiver".to_owned(),
+                );
+                return CheckedExpr {
+                    hir: Self::error_expression(node.span),
+                    constant_int: None,
+                };
+            }
+            return CheckedExpr {
+                hir: HirExpr {
+                    ty: if field_name == "byte_length" {
+                        TypeStore::INT
+                    } else {
+                        TypeStore::BOOL
+                    },
+                    span: node.span,
+                    kind: if field_name == "byte_length" {
+                        HirExprKind::TextByteLength(Box::new(base.hir))
+                    } else {
+                        HirExprKind::TextIsEmpty(Box::new(base.hir))
+                    },
+                },
+                constant_int: None,
+            };
+        }
         if expression_name(base_node, &self.analyzer.context) == Some("Int") {
             let value = match field_name.as_str() {
                 "MIN" => Some(i64::MIN),
@@ -1094,6 +1528,18 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             }
         }
         let base = self.check_expression(base_node, None, environment);
+        if matches!(self.analyzer.types.kind(base.hir.ty), TypeKind::List(_))
+            && field_name == "length"
+        {
+            return CheckedExpr {
+                hir: HirExpr {
+                    ty: TypeStore::INT,
+                    span: node.span,
+                    kind: HirExprKind::ListLength(Box::new(base.hir)),
+                },
+                constant_int: None,
+            };
+        }
         let definition = match *self.analyzer.types.kind(base.hir.ty) {
             TypeKind::Struct(definition) | TypeKind::EntityRef(definition) => definition,
             TypeKind::Link { entity, .. } => entity,
@@ -1196,10 +1642,11 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 .is_some_and(|text| parse_int_literal(text) == ParsedIntLiteral::IntMinMagnitude)
     }
 
-    fn allocate_local(&mut self, ty: TypeId) -> LocalId {
+    fn allocate_local(&mut self, ty: TypeId, mutability: BindingMutability) -> LocalId {
         let local = LocalId(self.next_local);
         self.next_local = self.next_local.saturating_add(1);
         self.local_types.push(ty);
+        self.local_mutability.push(mutability);
         local
     }
 
@@ -1255,6 +1702,11 @@ fn collect_block_calls(block: &HirBlock, calls: &mut BTreeSet<FunctionId>) {
     for statement in &block.statements {
         match &statement.kind {
             HirStmtKind::Let { initializer, .. } => collect_expr_calls(initializer, calls),
+            HirStmtKind::Var { initializer, .. } => {
+                if let Some(initializer) = initializer {
+                    collect_expr_calls(initializer, calls);
+                }
+            }
             HirStmtKind::Assign { value, .. } | HirStmtKind::CompoundAssign { value, .. } => {
                 collect_expr_calls(value, calls);
             }
@@ -1289,6 +1741,13 @@ fn collect_block_calls(block: &HirBlock, calls: &mut BTreeSet<FunctionId>) {
 
 fn collect_expr_calls(expression: &HirExpr, calls: &mut BTreeSet<FunctionId>) {
     match &expression.kind {
+        HirExprKind::Int(_)
+        | HirExprKind::Bool(_)
+        | HirExprKind::TextLiteral(_)
+        | HirExprKind::None
+        | HirExprKind::Local(_)
+        | HirExprKind::Take(_)
+        | HirExprKind::ListNew => {}
         HirExprKind::Call {
             function,
             arguments,
@@ -1313,7 +1772,18 @@ fn collect_expr_calls(expression: &HirExpr, calls: &mut BTreeSet<FunctionId>) {
                 collect_expr_calls(value, calls);
             }
         }
-        HirExprKind::Int(_) | HirExprKind::Bool(_) | HirExprKind::None | HirExprKind::Local(_) => {}
+        HirExprKind::Copy(value)
+        | HirExprKind::TextByteLength(value)
+        | HirExprKind::TextIsEmpty(value)
+        | HirExprKind::ListLength(value) => collect_expr_calls(value, calls),
+        HirExprKind::ListPush { list, value } => {
+            collect_expr_calls(list, calls);
+            collect_expr_calls(value, calls);
+        }
+        HirExprKind::ListRemove { list, index } => {
+            collect_expr_calls(list, calls);
+            collect_expr_calls(index, calls);
+        }
     }
 }
 
@@ -1373,6 +1843,18 @@ fn expression_name<'a>(
     direct_child(node, SyntaxKind::Name).and_then(|name| context.node_text(name))
 }
 
+fn method_name<'a>(
+    node: &SyntaxNode,
+    context: &'a crate::analyze::SyntaxContext<'_, '_>,
+) -> Option<&'a str> {
+    if node.kind != SyntaxKind::FieldExpr {
+        return None;
+    }
+    node.child_nodes()
+        .find(|child| child.kind == SyntaxKind::Name)
+        .and_then(|name| context.node_text(name))
+}
+
 fn int_binary_operator(punct: Punct) -> Option<IntBinaryOp> {
     Some(match punct {
         Punct::Plus | Punct::PlusEq => IntBinaryOp::Add,
@@ -1396,6 +1878,48 @@ fn comparison_operator(punct: Punct) -> CompareOp {
         Punct::GreaterEq => CompareOp::GreaterEq,
         _ => unreachable!("only comparison punctuation reaches comparison lowering"),
     }
+}
+
+fn decode_string_literal(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
+    let mut output = String::new();
+    let mut chars = body.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            output.push(character);
+            continue;
+        }
+        match chars.next()? {
+            '0' => output.push('\0'),
+            'n' => output.push('\n'),
+            'r' => output.push('\r'),
+            't' => output.push('\t'),
+            '\\' => output.push('\\'),
+            '"' => output.push('"'),
+            'u' => {
+                if chars.next()? != '{' {
+                    return None;
+                }
+                let mut digits = String::new();
+                loop {
+                    let digit = chars.next()?;
+                    if digit == '}' {
+                        break;
+                    }
+                    digits.push(digit);
+                    if digits.len() > 6 {
+                        return None;
+                    }
+                }
+                let scalar = u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)?;
+                output.push(scalar);
+            }
+            _ => return None,
+        }
+    }
+    Some(output)
 }
 
 fn block_definitely_returns(block: &SyntaxNode) -> bool {

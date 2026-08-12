@@ -29,7 +29,6 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
     let cases = [
         ("use game.io\nfn main() -> Int { return 0 }\n", "use"),
         ("enum E { A }\nfn main() -> Int { return 0 }\n", "enum"),
-        ("fn main() -> Int { var x = 0; return x }\n", "var"),
         (
             "fn main() -> Int { while true { break }; return 0 }\n",
             "while",
@@ -40,22 +39,6 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
         (
             "struct Box[T] { value: T }\nfn main() -> Int { return 0 }\n",
             "generic",
-        ),
-        (
-            "fn consume(take x: Int) -> Int { return x }\nfn main() -> Int { return consume(0) }\n",
-            "take",
-        ),
-        (
-            "fn main() -> Int { let text = \"x\"; return 0 }\n",
-            "string",
-        ),
-        (
-            "fn read(text: Text) -> Int { return 0 }\nfn main() -> Int { return 0 }\n",
-            "Text",
-        ),
-        (
-            "fn count(values: List) -> Int { return 0 }\nfn main() -> Int { return 0 }\n",
-            "List",
         ),
         ("fn main() -> Int raises Error { return 0 }\n", "raises"),
         (

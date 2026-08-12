@@ -1,5 +1,6 @@
 use crate::{
-    DefId, FieldId, FunctionId, HirLifecycleId, LocalId, ParameterIndex, TypeId, TypeStore,
+    BindingMutability, DefId, FieldId, FunctionId, HirLifecycleId, LocalId, ParameterIndex,
+    ParameterMode, TypeId, TypeStore,
 };
 use keld_numeric::{IntBinaryOp, IntUnaryOp};
 use keld_source::Span;
@@ -48,12 +49,14 @@ pub struct HirFunction {
     pub id: FunctionId,
     pub name: String,
     pub parameters: Vec<(LocalId, TypeId)>,
+    pub parameter_modes: Vec<ParameterMode>,
     pub parameter_names: Vec<String>,
     pub return_type: TypeId,
     pub effects: FunctionEffects,
     pub body: HirBlock,
     pub span: Span,
     pub local_types: Vec<TypeId>,
+    pub local_mutability: Vec<BindingMutability>,
 }
 
 #[derive(Clone, Debug)]
@@ -123,6 +126,7 @@ pub enum CompareOp {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HirBinaryOp {
     Int(IntBinaryOp),
+    TextConcat,
     And,
     Or,
     Compare(CompareOp),
@@ -132,8 +136,23 @@ pub enum HirBinaryOp {
 pub enum HirExprKind {
     Int(i64),
     Bool(bool),
+    TextLiteral(String),
+    TextByteLength(Box<HirExpr>),
+    TextIsEmpty(Box<HirExpr>),
     None,
     Local(LocalId),
+    Take(HirPlace),
+    Copy(Box<HirExpr>),
+    ListNew,
+    ListLength(Box<HirExpr>),
+    ListPush {
+        list: Box<HirExpr>,
+        value: Box<HirExpr>,
+    },
+    ListRemove {
+        list: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
     Unary {
         op: HirUnaryOp,
         value: Box<HirExpr>,
@@ -171,6 +190,10 @@ pub enum HirStmtKind {
     Let {
         local: LocalId,
         initializer: HirExpr,
+    },
+    Var {
+        local: LocalId,
+        initializer: Option<HirExpr>,
     },
     Assign {
         target: HirPlace,

@@ -1,6 +1,6 @@
 use crate::{
     AllocationSite, BlockId, ExitTarget, FlowBlock, FlowFunction, FlowModule, FlowOp, LifecycleId,
-    Terminator, ValueId,
+    Place, Terminator, ValueId,
 };
 use keld_semantics::{
     CompareOp, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle,
@@ -44,6 +44,7 @@ struct FunctionBuilder<'module> {
     lifecycle_parents: Vec<Option<LifecycleId>>,
     active_lifecycles: Vec<LifecycleId>,
     next_allocation_site: u32,
+    next_call: u32,
 }
 
 impl<'module> FunctionBuilder<'module> {
@@ -62,6 +63,7 @@ impl<'module> FunctionBuilder<'module> {
             lifecycle_parents: vec![None],
             active_lifecycles: Vec::new(),
             next_allocation_site: 0,
+            next_call: 0,
         }
     }
 
@@ -80,7 +82,9 @@ impl<'module> FunctionBuilder<'module> {
                 .iter()
                 .map(|(local, _)| *local)
                 .collect(),
+            parameter_modes: self.function.parameter_modes.clone(),
             local_types: self.function.local_types.clone(),
+            local_mutability: self.function.local_mutability.clone(),
             return_type: self.function.return_type,
             effects: self.function.effects.clone(),
             current_lifecycle: LifecycleId(0),
@@ -100,6 +104,7 @@ impl<'module> FunctionBuilder<'module> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_statement(&mut self, statement: &HirStmt) {
         match &statement.kind {
             HirStmtKind::Let { local, initializer } => {
@@ -111,7 +116,28 @@ impl<'module> FunctionBuilder<'module> {
                     });
                 }
             }
+            HirStmtKind::Var { local, initializer } => {
+                if let Some(initializer) = initializer
+                    && let Some(value) = self.lower_expression(initializer)
+                {
+                    self.emit(FlowOp::StoreLocal {
+                        local: *local,
+                        value,
+                        span: statement.span,
+                    });
+                }
+            }
             HirStmtKind::Assign { target, value } => {
+                if target.fields.is_empty() {
+                    if let Some(value) = self.lower_expression(value) {
+                        self.emit(FlowOp::StoreLocal {
+                            local: target.base,
+                            value,
+                            span: statement.span,
+                        });
+                    }
+                    return;
+                }
                 let entity = self.copy_local(target.base, statement.span);
                 if let Some(value) = self.lower_expression(value)
                     && let Some(field) = target.fields.first()
@@ -296,12 +322,151 @@ impl<'module> FunctionBuilder<'module> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_expression(&mut self, expression: &HirExpr) -> Option<ValueId> {
         match &expression.kind {
             HirExprKind::Int(value) => Some(self.lower_int(expression, *value)),
             HirExprKind::Bool(value) => Some(self.lower_bool(expression, *value)),
             HirExprKind::None => self.lower_none(expression),
             HirExprKind::Local(local) => Some(self.copy_local(*local, expression.span)),
+            HirExprKind::Take(place) => {
+                let local = place.base;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::TakeLocal {
+                    dst,
+                    local,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::Copy(value) => {
+                let source = self.lower_expression(value)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::CopyStorage {
+                    dst,
+                    source,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListNew => {
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListNew {
+                    dst,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::TextLiteral(value) => {
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ConstText {
+                    dst,
+                    value: value.clone(),
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListLength(list) => {
+                if let HirExprKind::Local(local) = &list.kind {
+                    let dst = self.new_value(expression.ty);
+                    self.emit(FlowOp::ListLengthLocal {
+                        dst,
+                        local: *local,
+                        span: expression.span,
+                    });
+                    return Some(dst);
+                }
+                let list = self.lower_expression(list)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListLength {
+                    dst,
+                    list,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListPush { list, value } => {
+                if let HirExprKind::Local(local) = &list.kind {
+                    let value = self.lower_expression(value)?;
+                    self.emit(FlowOp::ListPushLocal {
+                        local: *local,
+                        value,
+                        span: expression.span,
+                    });
+                    return Some(self.new_value(TypeStore::UNIT));
+                }
+                if let HirExprKind::Field { .. } = &list.kind {
+                    let place = place_for_argument(list)?;
+                    let list_value = self.lower_expression(list)?;
+                    let value = self.lower_expression(value)?;
+                    self.emit(FlowOp::ListPushPlace {
+                        list: list_value,
+                        place,
+                        value,
+                        span: expression.span,
+                    });
+                    return Some(self.new_value(TypeStore::UNIT));
+                }
+                let list = self.lower_expression(list)?;
+                let value = self.lower_expression(value)?;
+                self.emit(FlowOp::ListPush {
+                    list,
+                    value,
+                    span: expression.span,
+                });
+                Some(self.new_value(TypeStore::UNIT))
+            }
+            HirExprKind::ListRemove { list, index } => {
+                let index = self.lower_expression(index)?;
+                let dst = self.new_value(expression.ty);
+                if let HirExprKind::Local(local) = &list.kind {
+                    self.emit(FlowOp::ListRemoveLocal {
+                        dst,
+                        local: *local,
+                        index,
+                        span: expression.span,
+                    });
+                } else if let HirExprKind::Field { .. } = &list.kind {
+                    let place = place_for_argument(list)?;
+                    let list_value = self.lower_expression(list)?;
+                    self.emit(FlowOp::ListRemovePlace {
+                        dst,
+                        list: list_value,
+                        place,
+                        index,
+                        span: expression.span,
+                    });
+                } else {
+                    let list = self.lower_expression(list)?;
+                    self.emit(FlowOp::ListRemove {
+                        dst,
+                        list,
+                        index,
+                        span: expression.span,
+                    });
+                }
+                Some(dst)
+            }
+            HirExprKind::TextByteLength(text) => {
+                let text = self.lower_expression(text)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::TextByteLength {
+                    dst,
+                    text,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::TextIsEmpty(text) => {
+                let text = self.lower_expression(text)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::TextIsEmpty {
+                    dst,
+                    text,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
             HirExprKind::Unary { op, value } => self.lower_unary(expression, *op, value),
             HirExprKind::Binary { op, lhs, rhs } => self.lower_binary(expression, *op, lhs, rhs),
             HirExprKind::Field { base, field } => self.lower_field(expression, base, *field),
@@ -400,6 +565,12 @@ impl<'module> FunctionBuilder<'module> {
                 rhs,
                 span: expression.span,
             }),
+            HirBinaryOp::TextConcat => self.emit(FlowOp::TextConcat {
+                dst,
+                lhs,
+                rhs,
+                span: expression.span,
+            }),
             HirBinaryOp::Compare(op) => self.emit(FlowOp::Compare {
                 dst,
                 op,
@@ -407,7 +578,9 @@ impl<'module> FunctionBuilder<'module> {
                 rhs,
                 span: expression.span,
             }),
-            HirBinaryOp::And | HirBinaryOp::Or => unreachable!("handled before operand lowering"),
+            HirBinaryOp::And | HirBinaryOp::Or => {
+                unreachable!("handled before operand lowering")
+            }
         }
         Some(dst)
     }
@@ -462,17 +635,35 @@ impl<'module> FunctionBuilder<'module> {
         function: keld_semantics::FunctionId,
         arguments: &[(keld_semantics::ParameterIndex, HirExpr)],
     ) -> Option<ValueId> {
+        let call = self.next_call;
+        self.next_call = self.next_call.saturating_add(1);
+        self.emit(FlowOp::BeginCall {
+            call,
+            function,
+            span: expression.span,
+        });
         let mut lowered = Vec::with_capacity(arguments.len());
+        let mut argument_places = Vec::with_capacity(arguments.len());
         for (parameter, argument) in arguments {
             if let Some(value) = self.lower_expression(argument) {
                 lowered.push((*parameter, value));
+                argument_places.push((*parameter, place_for_argument(argument)));
+                self.emit(FlowOp::ReserveArgument {
+                    call,
+                    parameter: *parameter,
+                    value,
+                    place: place_for_argument(argument),
+                    span: argument.span,
+                });
             }
         }
         let dst = (expression.ty != TypeStore::UNIT).then(|| self.new_value(expression.ty));
         self.emit(FlowOp::Call {
+            call,
             dst,
             function,
             arguments: lowered,
+            argument_places,
             current_lifecycle: self.current_lifecycle(),
             span: expression.span,
         });
@@ -642,6 +833,26 @@ impl<'module> FunctionBuilder<'module> {
 
     fn current_is_open(&self) -> bool {
         !self.sealed[self.current.0 as usize]
+    }
+}
+
+fn place_for_argument(expression: &HirExpr) -> Option<Place> {
+    match &expression.kind {
+        HirExprKind::Local(local) => Some(Place {
+            base: *local,
+            fields: Vec::new(),
+        }),
+        HirExprKind::Field { base, field } => {
+            let mut place = place_for_argument(base)?;
+            place.fields.push(*field);
+            Some(place)
+        }
+        HirExprKind::Copy(value) => place_for_argument(value),
+        HirExprKind::Take(place) => Some(Place {
+            base: place.base,
+            fields: place.fields.clone(),
+        }),
+        _ => None,
     }
 }
 

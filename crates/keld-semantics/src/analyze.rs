@@ -1,8 +1,8 @@
 use crate::features;
 use crate::symbols::{FunctionSignature, ParameterSignature, RetirementSignature};
 use crate::{
-    DefId, Definition, DefinitionKind, FieldDefinition, FieldId, FunctionId, HirFunction, TypeId,
-    TypeKind, TypeStore, TypedModule,
+    DefId, Definition, DefinitionKind, FieldDefinition, FieldId, FunctionId, HirFunction,
+    ParameterMode, TypeId, TypeKind, TypeStore, TypedModule,
 };
 use keld_source::{Diagnostic, DiagnosticCode, SourceId, SourceText, Span, sort_diagnostics};
 use keld_syntax::{
@@ -193,6 +193,10 @@ impl<'source, 'syntax> Analyzer<'source, 'syntax> {
                 next_field = next_field.saturating_add(1);
             }
             self.definitions[index].fields = fields;
+            self.types.register_struct_fields(
+                self.definitions[index].id,
+                self.definitions[index].fields.iter().map(|field| field.ty),
+            );
         }
     }
 
@@ -247,9 +251,15 @@ impl<'source, 'syntax> Analyzer<'source, 'syntax> {
                     }
                     let ty = direct_child(parameter, SyntaxKind::Type)
                         .map_or(TypeStore::ERROR, |type_node| self.resolve_type(type_node));
+                    let mode = if self.context.has_direct_keyword(parameter, Keyword::Take) {
+                        ParameterMode::Take
+                    } else {
+                        ParameterMode::Loan
+                    };
                     parameters.push(ParameterSignature {
                         name: parameter_name,
                         ty,
+                        mode,
                     });
                 }
             }
@@ -337,17 +347,33 @@ impl<'source, 'syntax> Analyzer<'source, 'syntax> {
             });
         }
 
-        if optional {
-            self.error(
-                FEATURE_DIAGNOSTIC,
-                node.span,
-                "optional non-link types are not supported by the bootstrap compiler".to_owned(),
-            );
-        }
-        match name.as_str() {
+        let base = match name.as_str() {
             "Unit" => TypeStore::UNIT,
             "Bool" => TypeStore::BOOL,
             "Int" => TypeStore::INT,
+            "Text" => self.types.intern(TypeKind::Text),
+            "List" => {
+                let arguments = node
+                    .child_nodes()
+                    .find(|child| child.kind == SyntaxKind::TypeArgumentList)
+                    .map(|list| {
+                        list.child_nodes()
+                            .filter(|child| child.kind == SyntaxKind::Type)
+                            .map(|child| self.resolve_type(child))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if arguments.len() == 1 {
+                    self.types.intern(TypeKind::List(arguments[0]))
+                } else {
+                    self.error(
+                        TYPE_DIAGNOSTIC,
+                        node.span,
+                        "`List` requires exactly one element type".to_owned(),
+                    );
+                    TypeStore::ERROR
+                }
+            }
             _ => {
                 let Some(definition) = self.definition_names.get(&name).copied() else {
                     self.error(
@@ -362,6 +388,11 @@ impl<'source, 'syntax> Analyzer<'source, 'syntax> {
                     DefinitionKind::Entity => self.types.intern(TypeKind::EntityRef(definition)),
                 }
             }
+        };
+        if optional {
+            self.types.intern(TypeKind::Optional(base))
+        } else {
+            base
         }
     }
 

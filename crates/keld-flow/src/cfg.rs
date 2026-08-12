@@ -1,5 +1,8 @@
 use crate::{FlowOp, Terminator};
-use keld_semantics::{Definition, FunctionEffects, FunctionId, LocalId, TypeId, TypeStore};
+use keld_semantics::{
+    BindingMutability, Definition, FunctionEffects, FunctionId, LocalId, ParameterMode, TypeId,
+    TypeStore,
+};
 use keld_source::Span;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -40,7 +43,9 @@ pub struct FlowFunction {
     pub name: String,
     pub span: Span,
     pub parameters: Vec<LocalId>,
+    pub parameter_modes: Vec<ParameterMode>,
     pub local_types: Vec<TypeId>,
+    pub local_mutability: Vec<BindingMutability>,
     pub return_type: TypeId,
     pub effects: FunctionEffects,
     pub current_lifecycle: LifecycleId,

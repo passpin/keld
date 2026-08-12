@@ -1,9 +1,16 @@
 use crate::{Instruction, Terminator};
-use keld_semantics::{DefId, FieldId, FunctionId};
+use keld_semantics::{DefId, FieldId, FunctionId, ParameterMode};
 use keld_source::{SourceId, Span};
+use keld_storage::LoanEffect;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Register(pub u32);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArgumentSource {
+    pub base: Register,
+    pub fields: Vec<keld_semantics::FieldId>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ViewId(pub u32);
@@ -19,6 +26,8 @@ pub enum IrType {
     Struct(DefId),
     Entity(DefId),
     Link { entity: DefId, optional: bool },
+    Text,
+    List(Box<IrType>),
     Lifecycle,
 }
 
@@ -47,6 +56,8 @@ pub struct Function {
     pub id: FunctionId,
     pub span: Span,
     pub parameters: Vec<Register>,
+    pub parameter_modes: Vec<ParameterMode>,
+    pub parameter_effects: Vec<LoanEffect>,
     pub current_lifecycle: Register,
     pub register_types: Vec<IrType>,
     pub return_type: IrType,
@@ -101,6 +112,7 @@ impl TestModuleBuilder {
     /// Panics only if the synthetic zero-length source span cannot be represented.
     pub fn finish(self) -> Module {
         let span = Span::new(SourceId(0), 0, 0).expect("empty test span is valid");
+        let parameter_count = self.parameters.len();
         let register_count = self
             .parameters
             .iter()
@@ -144,6 +156,8 @@ impl TestModuleBuilder {
                     .into_iter()
                     .map(|(register, _)| register)
                     .collect(),
+                parameter_modes: vec![ParameterMode::Loan; parameter_count],
+                parameter_effects: vec![LoanEffect::Read; parameter_count],
                 current_lifecycle,
                 register_types,
                 return_type: IrType::Int,

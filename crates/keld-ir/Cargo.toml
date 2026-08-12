@@ -8,10 +8,10 @@ license.workspace = true
 [dependencies]
 keld-flow = { path = "../keld-flow" }
 keld-lifecycle = { path = "../keld-lifecycle" }
+keld-storage = { path = "../keld-storage" }
 keld-numeric = { path = "../keld-numeric" }
 keld-semantics = { path = "../keld-semantics" }
 keld-source = { path = "../keld-source" }
 
 [lints]
 workspace = true
-

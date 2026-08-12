@@ -27,6 +27,7 @@ pub(crate) fn dump(module: &FlowModule) -> String {
     output
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_operation(output: &mut String, operation: &FlowOp) {
     match operation {
         FlowOp::ConstInt { dst, value, .. } => {
@@ -34,6 +35,9 @@ fn write_operation(output: &mut String, operation: &FlowOp) {
         }
         FlowOp::ConstBool { dst, value, .. } => {
             write_line(output, format_args!("v{} = bool {value}", dst.0));
+        }
+        FlowOp::ConstText { dst, value, .. } => {
+            write_line(output, format_args!("v{} = text {:?}", dst.0, value));
         }
         FlowOp::ConstNoneLink { dst, entity, .. } => {
             write_line(output, format_args!("v{} = none d{}", dst.0, entity.0));
@@ -44,6 +48,25 @@ fn write_operation(output: &mut String, operation: &FlowOp) {
             output,
             format_args!("begin lifecycle l{} parent l{}", lifecycle.0, parent.0),
         ),
+        FlowOp::BeginCall { call, function, .. } => {
+            write_line(output, format_args!("begin call c{} f{}", call, function.0));
+        }
+        FlowOp::ReserveArgument {
+            call,
+            parameter,
+            value,
+            place,
+            ..
+        } => {
+            let suffix = place.as_ref().map_or_else(
+                || "temporary".to_owned(),
+                |place| format!("local n{} fields {}", place.base.0, place.fields.len()),
+            );
+            write_line(
+                output,
+                format_args!("reserve c{} p{} v{} {suffix}", call, parameter.0, value.0),
+            );
+        }
         FlowOp::CopyLocal { dst, local, .. } => {
             write_line(output, format_args!("v{} = local n{}", dst.0, local.0));
         }
@@ -75,10 +98,108 @@ fn write_operation(output: &mut String, operation: &FlowOp) {
                 rhs.0
             ),
         ),
+        FlowOp::TakeLocal { dst, local, .. } => {
+            write_line(output, format_args!("v{} = take local{}", dst.0, local.0));
+        }
+        FlowOp::CopyStorage { dst, source, .. } => {
+            write_line(
+                output,
+                format_args!("v{} = copy-storage v{}", dst.0, source.0),
+            );
+        }
+        FlowOp::ListNew { dst, .. } => {
+            write_line(output, format_args!("v{} = list-new", dst.0));
+        }
+        FlowOp::ListLength { dst, list, .. } => {
+            write_line(output, format_args!("v{} = list-length v{}", dst.0, list.0));
+        }
+        FlowOp::ListPush { list, value, .. } => {
+            write_line(output, format_args!("list-push v{} v{}", list.0, value.0));
+        }
+        FlowOp::ListPushPlace {
+            list, value, place, ..
+        } => {
+            write_line(
+                output,
+                format_args!(
+                    "list-push-place v{} local{} fields{} v{}",
+                    list.0,
+                    place.base.0,
+                    place.fields.len(),
+                    value.0
+                ),
+            );
+        }
+        FlowOp::ListLengthLocal { dst, local, .. } => {
+            write_line(
+                output,
+                format_args!("v{} = list-length local{}", dst.0, local.0),
+            );
+        }
+        FlowOp::ListPushLocal { local, value, .. } => {
+            write_line(
+                output,
+                format_args!("list-push local{} v{}", local.0, value.0),
+            );
+        }
+        FlowOp::ListRemove {
+            dst, list, index, ..
+        } => {
+            write_line(
+                output,
+                format_args!("v{} = list-remove v{} v{}", dst.0, list.0, index.0),
+            );
+        }
+        FlowOp::ListRemovePlace {
+            dst,
+            list,
+            place,
+            index,
+            ..
+        } => {
+            write_line(
+                output,
+                format_args!(
+                    "v{} = list-remove-place v{} local{} fields{} v{}",
+                    dst.0,
+                    list.0,
+                    place.base.0,
+                    place.fields.len(),
+                    index.0
+                ),
+            );
+        }
+        FlowOp::ListRemoveLocal {
+            dst, local, index, ..
+        } => {
+            write_line(
+                output,
+                format_args!("v{} = list-remove local{} v{}", dst.0, local.0, index.0),
+            );
+        }
+        FlowOp::TextByteLength { dst, text, .. } => {
+            write_line(
+                output,
+                format_args!("v{} = text-byte-length v{}", dst.0, text.0),
+            );
+        }
+        FlowOp::TextIsEmpty { dst, text, .. } => {
+            write_line(
+                output,
+                format_args!("v{} = text-is-empty v{}", dst.0, text.0),
+            );
+        }
+        FlowOp::TextConcat { dst, lhs, rhs, .. } => {
+            write_line(
+                output,
+                format_args!("v{} = text-concat v{} v{}", dst.0, lhs.0, rhs.0),
+            );
+        }
         _ => write_effect_operation(output, operation),
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn write_effect_operation(output: &mut String, operation: &FlowOp) {
     match operation {
         FlowOp::Phi { dst, inputs, .. } => {
@@ -162,10 +283,27 @@ fn write_effect_operation(output: &mut String, operation: &FlowOp) {
         }
         FlowOp::ConstInt { .. }
         | FlowOp::ConstBool { .. }
+        | FlowOp::ConstText { .. }
         | FlowOp::ConstNoneLink { .. }
         | FlowOp::BeginLifecycle { .. }
+        | FlowOp::BeginCall { .. }
+        | FlowOp::ReserveArgument { .. }
         | FlowOp::CopyLocal { .. }
         | FlowOp::StoreLocal { .. }
+        | FlowOp::TakeLocal { .. }
+        | FlowOp::CopyStorage { .. }
+        | FlowOp::ListNew { .. }
+        | FlowOp::ListLength { .. }
+        | FlowOp::ListPush { .. }
+        | FlowOp::ListPushPlace { .. }
+        | FlowOp::ListLengthLocal { .. }
+        | FlowOp::ListPushLocal { .. }
+        | FlowOp::ListRemove { .. }
+        | FlowOp::ListRemovePlace { .. }
+        | FlowOp::ListRemoveLocal { .. }
+        | FlowOp::TextByteLength { .. }
+        | FlowOp::TextIsEmpty { .. }
+        | FlowOp::TextConcat { .. }
         | FlowOp::UnaryInt { .. }
         | FlowOp::BinaryInt { .. }
         | FlowOp::Not { .. }

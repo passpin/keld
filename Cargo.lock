@@ -12,6 +12,7 @@ dependencies = [
  "keld-lifecycle",
  "keld-semantics",
  "keld-source",
+ "keld-storage",
  "keld-syntax",
 ]
 
@@ -35,6 +36,7 @@ dependencies = [
  "keld-runtime",
  "keld-semantics",
  "keld-source",
+ "keld-storage",
 ]
 
 [[package]]
@@ -46,6 +48,7 @@ dependencies = [
  "keld-numeric",
  "keld-semantics",
  "keld-source",
+ "keld-storage",
 ]
 
 [[package]]
@@ -77,6 +80,16 @@ dependencies = [
 [[package]]
 name = "keld-source"
 version = "0.1.0"
+
+[[package]]
+name = "keld-storage"
+version = "0.1.0"
+dependencies = [
+ "keld-flow",
+ "keld-lifecycle",
+ "keld-semantics",
+ "keld-source",
+]
 
 [[package]]
 name = "keld-syntax"

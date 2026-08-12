@@ -60,6 +60,7 @@ const fn runtime_name(kind: RuntimeFaultKind) -> &'static str {
         RuntimeFaultKind::DivisionByZero => "DivisionByZeroFault",
         RuntimeFaultKind::Shift => "ShiftFault",
         RuntimeFaultKind::Allocation => "AllocationFault",
+        RuntimeFaultKind::Bounds => "BoundsFault",
     }
 }
 
@@ -69,5 +70,6 @@ const fn runtime_message(kind: RuntimeFaultKind) -> &'static str {
         RuntimeFaultKind::DivisionByZero => "integer division or remainder by zero",
         RuntimeFaultKind::Shift => "invalid integer shift amount",
         RuntimeFaultKind::Allocation => "runtime allocation failed",
+        RuntimeFaultKind::Bounds => "list index is out of bounds",
     }
 }

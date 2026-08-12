@@ -1,11 +1,16 @@
 use crate::Value;
-use keld_ir::{Function, IrBlockId, Register, ViewId, ViewMode};
+use keld_ir::{ArgumentSource, Function, IrBlockId, Register, ViewId, ViewMode};
 use keld_runtime::EntityId;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ActiveView {
     pub entity: EntityId,
     pub mode: ViewMode,
+}
+
+pub(crate) struct LoanReturn {
+    pub source: ArgumentSource,
+    pub callee: Register,
 }
 
 pub(crate) struct Frame {
@@ -15,6 +20,7 @@ pub(crate) struct Frame {
     pub instruction: usize,
     pub predecessor: Option<IrBlockId>,
     pub return_destination: Option<Register>,
+    pub loan_returns: Vec<LoanReturn>,
     pub views: Vec<Option<ActiveView>>,
 }
 
@@ -22,6 +28,7 @@ impl Frame {
     pub fn new(
         function: &Function,
         return_destination: Option<Register>,
+        loan_returns: Vec<LoanReturn>,
     ) -> Result<Self, crate::value::CopyAllocation> {
         let mut registers = Vec::new();
         registers
@@ -54,6 +61,7 @@ impl Frame {
             instruction: 0,
             predecessor: None,
             return_destination,
+            loan_returns,
             views,
         })
     }

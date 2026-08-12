@@ -7,6 +7,7 @@ pub enum RuntimeFaultKind {
     DivisionByZero,
     Shift,
     Allocation,
+    Bounds,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

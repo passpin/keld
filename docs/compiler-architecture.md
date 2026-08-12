@@ -11,6 +11,7 @@ bytes
   -> TypedModule
   -> FlowModule
   -> VerifiedFlowModule
+  -> VerifiedStorageModule
   -> executable Module
   -> IR validation
   -> Interpreter
@@ -32,7 +33,8 @@ lowered or executed. `check` runs every static stage through IR validation.
 | `keld-semantics` | source plus successful `ParsedFile` | definitions, types, typed HIR, entrypoint contract | CFG scheduling, entity liveness, cleanup, or executable operations |
 | `keld-flow` | `TypedModule` | CFG with explicit evaluation order, locals, and provenance sites | deciding lifecycle safety, runtime storage, or backend layout |
 | `keld-lifecycle` | `FlowModule` | function effects, liveness facts, proof annotations, verified flow | executable instruction selection, slot mutation, or interpretation |
-| `keld-ir` | `VerifiedFlowModule` | executable IR, stable textual dump, validation diagnostics | source recovery, runtime policy, or executing unvalidated modules |
+| `keld-storage` | `VerifiedFlowModule` | single-home homes, CFG joins, loans, reservations, and storage summaries | entity liveness, runtime mutation, or backend policy |
+| `keld-ir` | `VerifiedStorageModule` | executable IR, stable textual dump, validation diagnostics | source recovery, runtime policy, or executing unvalidated modules |
 | `keld-runtime` | opaque branded identities, lifecycle IDs, type IDs, payloads | segmented entity store, weak links, deterministic cleanup | source-language types, IR, diagnostics, or user-visible control flow |
 | `keld-interpreter` | validated executable `Module` | explicit-frame execution result or classified fault | parsing, static recovery, accepting invalid IR, or language extensions |
 | `keld-cli` | OS arguments, selected file bytes | `Compilation`, CLI output, documented exit status | new syntax, type, lifecycle, numeric, or runtime semantics |
@@ -51,6 +53,7 @@ where validated executable IR and runtime storage meet.
 | `KLD0004` | parsed feature outside the bootstrap subset |
 | `KLD0101`-`KLD0199` | declarations, names, types, entrypoint, layout, returns, constants |
 | `KLD1001`-`KLD1009` | entity liveness, escape, lifecycle order, aliases, effects |
+| `KLD2001`-`KLD2009` | single-home transfers, homes, loans, reservations, and storage effects |
 | `KLD9001`-`KLD9005` | invalid executable views, registers, CFG, lifecycles, or module shape |
 
 Flow lowering and the runtime do not create Keld diagnostics. Runtime store

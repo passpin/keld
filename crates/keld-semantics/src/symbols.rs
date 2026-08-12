@@ -1,4 +1,4 @@
-use crate::{DefId, FunctionId, TypeId};
+use crate::{DefId, FunctionId, ParameterMode, TypeId};
 use keld_source::Span;
 use keld_syntax::SyntaxNode;
 
@@ -6,6 +6,7 @@ use keld_syntax::SyntaxNode;
 pub(crate) struct ParameterSignature {
     pub name: String,
     pub ty: TypeId,
+    pub mode: ParameterMode,
 }
 
 #[derive(Clone)]
