@@ -221,7 +221,7 @@ fn classify_value(
         ValueOrigin::Entity(_) => ValueStorage::EntityFlow,
         ValueOrigin::Local(local) | ValueOrigin::Borrowed(local) => ValueStorage::Loan(Place {
             base: *local,
-            fields: Vec::new(),
+            projections: Vec::new(),
         }),
         ValueOrigin::BorrowedPlace { place, .. } => ValueStorage::Loan(place.clone()),
         ValueOrigin::Owned => {
@@ -250,10 +250,11 @@ pub(crate) fn defined_value(operation: &FlowOp) -> Option<ValueId> {
         | FlowOp::CopyStorage { dst, .. }
         | FlowOp::ListNew { dst, .. }
         | FlowOp::ListLength { dst, .. }
-        | FlowOp::ListLengthLocal { dst, .. }
+        | FlowOp::ListIndex { dst, .. }
+        | FlowOp::ListGet { dst, .. }
         | FlowOp::ListRemove { dst, .. }
-        | FlowOp::ListRemovePlace { dst, .. }
-        | FlowOp::ListRemoveLocal { dst, .. }
+        | FlowOp::ListTryRemove { dst, .. }
+        | FlowOp::ListTryReserve { dst, .. }
         | FlowOp::TextByteLength { dst, .. }
         | FlowOp::TextIsEmpty { dst, .. }
         | FlowOp::TextConcat { dst, .. }
@@ -274,8 +275,12 @@ pub(crate) fn defined_value(operation: &FlowOp) -> Option<ValueId> {
         | FlowOp::ReserveArgument { .. }
         | FlowOp::StoreLocal { .. }
         | FlowOp::ListPush { .. }
-        | FlowOp::ListPushPlace { .. }
-        | FlowOp::ListPushLocal { .. }
+        | FlowOp::ListClear { .. }
+        | FlowOp::ListReserve { .. }
+        | FlowOp::BeginIndexedReplacement { .. }
+        | FlowOp::EndIndexedReplacement { .. }
+        | FlowOp::ListReplace { .. }
+        | FlowOp::ReplacePlace { .. }
         | FlowOp::Call { dst: None, .. }
         | FlowOp::WriteEntityField { .. }
         | FlowOp::Keep { .. }

@@ -134,3 +134,93 @@ fn take_lowers_to_an_explicit_local_transfer() {
 
     assert!(matches!(ops[0], FlowOp::TakeLocal { .. }));
 }
+
+#[test]
+fn indexed_replacement_materializes_target_before_rhs() {
+    let flow = lower_text_for_test(
+        "fn replacement() -> Int { return 9 }\nfn main() -> Int { let items: List[Int] = List(); items.push(0); let index = 0; items[index] = replacement(); return items[0] }\n",
+    )
+    .unwrap();
+    let ops = flow.function_named("main").unwrap().linear_ops();
+    let copy = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::CopyLocal { .. }))
+        .unwrap();
+    let begin = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::BeginIndexedReplacement { .. }))
+        .unwrap();
+    let call = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::Call { .. }))
+        .unwrap();
+    let replace = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::ListReplace { .. }))
+        .unwrap();
+
+    assert!(copy < begin && begin < call && call < replace);
+}
+
+#[test]
+fn nested_remove_is_complete_before_outer_push() {
+    let flow = lower_text_for_test(
+        "fn main() -> Int { let items: List[Int] = List(); items.push(1); items.push(items.remove(0)); return items[0] }\n",
+    )
+    .unwrap();
+    let ops = flow.function_named("main").unwrap().linear_ops();
+    let remove = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::ListRemove { .. }))
+        .unwrap();
+    let push = ops
+        .iter()
+        .rposition(|operation| matches!(operation, FlowOp::ListPush { .. }))
+        .unwrap();
+
+    assert!(remove < push);
+}
+
+#[test]
+fn nested_index_projections_preserve_index_evaluation_order() {
+    let flow = lower_text_for_test(
+        "fn main() -> Int { let row = 0; let column = 0; let matrix: List[List[Int]] = List(); return matrix[row][column] }\n",
+    )
+    .unwrap();
+    let indices = flow
+        .function_named("main")
+        .unwrap()
+        .linear_ops()
+        .iter()
+        .filter_map(|operation| match operation {
+            FlowOp::ListIndex { index, .. } => Some(*index),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(indices.len(), 2);
+    assert_ne!(indices[0], indices[1]);
+}
+
+#[test]
+fn struct_field_replacement_is_not_an_entity_view_write() {
+    let flow = lower_text_for_test(
+        "struct Holder { value: Text }\nfn replacement() -> Text { return \"new\" }\nfn main() -> Int { var holder = Holder(value: \"old\"); holder.value = replacement(); return holder.value.byte_length }\n",
+    )
+    .unwrap();
+    let ops = flow.function_named("main").unwrap().linear_ops();
+    let call = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::Call { .. }))
+        .unwrap();
+    let replacement = ops
+        .iter()
+        .position(|operation| matches!(operation, FlowOp::ReplacePlace { .. }))
+        .unwrap();
+
+    assert!(call < replacement);
+    assert!(
+        !ops.iter()
+            .any(|operation| matches!(operation, FlowOp::WriteEntityField { .. }))
+    );
+}

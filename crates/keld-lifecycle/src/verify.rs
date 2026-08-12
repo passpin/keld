@@ -361,13 +361,18 @@ impl Analyzer<'_> {
             | FlowOp::CopyStorage { .. }
             | FlowOp::ListNew { .. }
             | FlowOp::ListLength { .. }
+            | FlowOp::ListIndex { .. }
+            | FlowOp::ListGet { .. }
             | FlowOp::ListPush { .. }
-            | FlowOp::ListPushPlace { .. }
-            | FlowOp::ListLengthLocal { .. }
-            | FlowOp::ListPushLocal { .. }
             | FlowOp::ListRemove { .. }
-            | FlowOp::ListRemovePlace { .. }
-            | FlowOp::ListRemoveLocal { .. }
+            | FlowOp::ListTryRemove { .. }
+            | FlowOp::ListClear { .. }
+            | FlowOp::ListReserve { .. }
+            | FlowOp::ListTryReserve { .. }
+            | FlowOp::BeginIndexedReplacement { .. }
+            | FlowOp::EndIndexedReplacement { .. }
+            | FlowOp::ListReplace { .. }
+            | FlowOp::ReplacePlace { .. }
             | FlowOp::TextByteLength { .. }
             | FlowOp::TextIsEmpty { .. }
             | FlowOp::TextConcat { .. }

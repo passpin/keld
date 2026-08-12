@@ -65,7 +65,13 @@ fn write_operation(output: &mut String, operation: &FlowOp) {
         } => {
             let suffix = place.as_ref().map_or_else(
                 || "temporary".to_owned(),
-                |place| format!("local n{} fields {}", place.base.0, place.fields.len()),
+                |place| {
+                    format!(
+                        "local n{} projections {}",
+                        place.base.0,
+                        place.projections.len()
+                    )
+                },
             );
             write_line(
                 output,
@@ -115,73 +121,167 @@ fn write_operation(output: &mut String, operation: &FlowOp) {
         FlowOp::ListNew { dst, .. } => {
             write_line(output, format_args!("v{} = list-new", dst.0));
         }
-        FlowOp::ListLength { dst, list, .. } => {
-            write_line(output, format_args!("v{} = list-length v{}", dst.0, list.0));
-        }
-        FlowOp::ListPush { list, value, .. } => {
-            write_line(output, format_args!("list-push v{} v{}", list.0, value.0));
-        }
-        FlowOp::ListPushPlace {
-            list, value, place, ..
-        } => {
-            write_line(
-                output,
-                format_args!(
-                    "list-push-place v{} local{} fields{} v{}",
-                    list.0,
-                    place.base.0,
-                    place.fields.len(),
-                    value.0
-                ),
-            );
-        }
-        FlowOp::ListLengthLocal { dst, local, .. } => {
-            write_line(
-                output,
-                format_args!("v{} = list-length local{}", dst.0, local.0),
-            );
-        }
-        FlowOp::ListPushLocal { local, value, .. } => {
-            write_line(
-                output,
-                format_args!("list-push local{} v{}", local.0, value.0),
-            );
-        }
-        FlowOp::ListRemove {
-            dst, list, index, ..
-        } => {
-            write_line(
-                output,
-                format_args!("v{} = list-remove v{} v{}", dst.0, list.0, index.0),
-            );
-        }
-        FlowOp::ListRemovePlace {
+        FlowOp::ListLength { dst, receiver, .. } => write_line(
+            output,
+            format_args!(
+                "v{} = list-length v{} {}",
+                dst.0,
+                receiver.value.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListIndex {
             dst,
-            list,
-            place,
+            receiver,
             index,
             ..
-        } => {
+        } => write_line(
+            output,
+            format_args!(
+                "v{} = list-index v{} v{} {}",
+                dst.0,
+                receiver.value.0,
+                index.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListGet {
+            dst,
+            receiver,
+            index,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "v{} = list-get v{} v{} {}",
+                dst.0,
+                receiver.value.0,
+                index.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListPush {
+            receiver, value, ..
+        } => write_line(
+            output,
+            format_args!(
+                "list-push v{} v{} {}",
+                receiver.value.0,
+                value.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListRemove {
+            dst,
+            receiver,
+            index,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "v{} = list-remove v{} v{} {}",
+                dst.0,
+                receiver.value.0,
+                index.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListTryRemove {
+            dst,
+            receiver,
+            index,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "v{} = list-try-remove v{} v{} {}",
+                dst.0,
+                receiver.value.0,
+                index.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListClear { receiver, .. } => write_line(
+            output,
+            format_args!(
+                "list-clear v{} {}",
+                receiver.value.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListReserve {
+            receiver,
+            additional,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "list-reserve v{} v{} {}",
+                receiver.value.0,
+                additional.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ListTryReserve {
+            dst,
+            receiver,
+            additional,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "v{} = list-try-reserve v{} v{} {}",
+                dst.0,
+                receiver.value.0,
+                additional.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::BeginIndexedReplacement {
+            reservation,
+            list,
+            index,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "begin-indexed-replacement r{} local{} projections{} v{}",
+                reservation,
+                list.base.0,
+                list.projections.len(),
+                index.0
+            ),
+        ),
+        FlowOp::EndIndexedReplacement { reservation, .. } => {
             write_line(
                 output,
-                format_args!(
-                    "v{} = list-remove-place v{} local{} fields{} v{}",
-                    dst.0,
-                    list.0,
-                    place.base.0,
-                    place.fields.len(),
-                    index.0
-                ),
+                format_args!("end-indexed-replacement r{reservation}"),
             );
         }
-        FlowOp::ListRemoveLocal {
-            dst, local, index, ..
-        } => {
-            write_line(
-                output,
-                format_args!("v{} = list-remove local{} v{}", dst.0, local.0, index.0),
-            );
-        }
+        FlowOp::ListReplace {
+            receiver,
+            index,
+            value,
+            ..
+        } => write_line(
+            output,
+            format_args!(
+                "list-replace v{} v{} v{} {}",
+                receiver.value.0,
+                index.0,
+                value.0,
+                receiver_suffix(receiver)
+            ),
+        ),
+        FlowOp::ReplacePlace { place, value, .. } => write_line(
+            output,
+            format_args!(
+                "replace-place local{} projections{} v{}",
+                place.base.0,
+                place.projections.len(),
+                value.0
+            ),
+        ),
         FlowOp::TextByteLength { dst, text, .. } => {
             write_line(
                 output,
@@ -299,13 +399,18 @@ fn write_effect_operation(output: &mut String, operation: &FlowOp) {
         | FlowOp::CopyStorage { .. }
         | FlowOp::ListNew { .. }
         | FlowOp::ListLength { .. }
+        | FlowOp::ListIndex { .. }
+        | FlowOp::ListGet { .. }
         | FlowOp::ListPush { .. }
-        | FlowOp::ListPushPlace { .. }
-        | FlowOp::ListLengthLocal { .. }
-        | FlowOp::ListPushLocal { .. }
         | FlowOp::ListRemove { .. }
-        | FlowOp::ListRemovePlace { .. }
-        | FlowOp::ListRemoveLocal { .. }
+        | FlowOp::ListTryRemove { .. }
+        | FlowOp::ListClear { .. }
+        | FlowOp::ListReserve { .. }
+        | FlowOp::ListTryReserve { .. }
+        | FlowOp::BeginIndexedReplacement { .. }
+        | FlowOp::EndIndexedReplacement { .. }
+        | FlowOp::ListReplace { .. }
+        | FlowOp::ReplacePlace { .. }
         | FlowOp::TextByteLength { .. }
         | FlowOp::TextIsEmpty { .. }
         | FlowOp::TextConcat { .. }
@@ -316,6 +421,19 @@ fn write_effect_operation(output: &mut String, operation: &FlowOp) {
             unreachable!("primitive operations are formatted by write_operation")
         }
     }
+}
+
+fn receiver_suffix(receiver: &crate::StorageReceiver) -> String {
+    receiver.place.as_ref().map_or_else(
+        || "temporary".to_owned(),
+        |place| {
+            format!(
+                "local{} projections{}",
+                place.base.0,
+                place.projections.len()
+            )
+        },
+    )
 }
 
 fn write_terminator(output: &mut String, terminator: &Terminator) {

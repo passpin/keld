@@ -1,10 +1,12 @@
 use crate::{
-    AllocationSite, BlockId, ExitTarget, FlowBlock, FlowFunction, FlowModule, FlowOp, LifecycleId,
-    Place, StorageScopeId, Terminator, ValueId,
+    AllocationSite, BlockId, ExitTarget, FlowBlock, FlowFunction, FlowModule, FlowOp,
+    IndexIdentity, LifecycleId, Place, PlaceProjection, StorageReceiver, StorageScopeId,
+    Terminator, ValueId,
 };
 use keld_semantics::{
     CompareOp, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle,
-    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, TypeId, TypeKind, TypeStore, TypedModule,
+    HirPlace, HirProjection, HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, TypeId, TypeKind,
+    TypeStore, TypedModule,
 };
 use keld_source::Diagnostic;
 
@@ -48,6 +50,7 @@ struct FunctionBuilder<'module> {
     active_lifecycles: Vec<LifecycleId>,
     next_allocation_site: u32,
     next_call: u32,
+    next_reservation: u32,
 }
 
 impl<'module> FunctionBuilder<'module> {
@@ -71,6 +74,7 @@ impl<'module> FunctionBuilder<'module> {
             active_lifecycles: Vec::new(),
             next_allocation_site: 0,
             next_call: 0,
+            next_reservation: 0,
         }
     }
 
@@ -139,7 +143,7 @@ impl<'module> FunctionBuilder<'module> {
                 }
             }
             HirStmtKind::Assign { target, value } => {
-                if target.fields.is_empty() {
+                if target.projections.is_empty() {
                     if let Some(value) = self.lower_expression(value) {
                         self.emit(FlowOp::StoreLocal {
                             local: target.base,
@@ -149,30 +153,33 @@ impl<'module> FunctionBuilder<'module> {
                     }
                     return;
                 }
-                let entity = self.copy_local(target.base, statement.span);
-                if let Some(value) = self.lower_expression(value)
-                    && let Some(field) = target.fields.first()
-                {
-                    self.emit(FlowOp::WriteEntityField {
-                        entity,
-                        field: *field,
-                        value,
-                        span: statement.span,
-                    });
-                }
+                self.lower_assignment(target, value, statement.span);
             }
             HirStmtKind::CompoundAssign { target, op, value } => {
-                let entity = self.copy_local(target.base, statement.span);
-                let Some(field) = target.fields.first().copied() else {
+                let Some((base, base_ty, mut place, final_projection)) =
+                    self.lower_target_prefix(target)
+                else {
+                    return;
+                };
+                let Some(HirProjection::Field(field)) = final_projection else {
                     return;
                 };
                 let old = self.new_value(TypeStore::INT);
-                self.emit(FlowOp::ReadEntityField {
-                    dst: old,
-                    entity,
-                    field,
-                    span: statement.span,
-                });
+                if matches!(self.module.types.kind(base_ty), TypeKind::EntityRef(_)) {
+                    self.emit(FlowOp::ReadEntityField {
+                        dst: old,
+                        entity: base,
+                        field,
+                        span: statement.span,
+                    });
+                } else {
+                    self.emit(FlowOp::ReadStructField {
+                        dst: old,
+                        base,
+                        field,
+                        span: statement.span,
+                    });
+                }
                 if let Some(rhs) = self.lower_expression(value) {
                     let result = self.new_value(TypeStore::INT);
                     self.emit(FlowOp::BinaryInt {
@@ -182,12 +189,21 @@ impl<'module> FunctionBuilder<'module> {
                         rhs,
                         span: statement.span,
                     });
-                    self.emit(FlowOp::WriteEntityField {
-                        entity,
-                        field,
-                        value: result,
-                        span: statement.span,
-                    });
+                    if matches!(self.module.types.kind(base_ty), TypeKind::EntityRef(_)) {
+                        self.emit(FlowOp::WriteEntityField {
+                            entity: base,
+                            field,
+                            value: result,
+                            span: statement.span,
+                        });
+                    } else {
+                        place.projections.push(PlaceProjection::Field(field));
+                        self.emit(FlowOp::ReplacePlace {
+                            place,
+                            value: result,
+                            span: statement.span,
+                        });
+                    }
                 }
             }
             HirStmtKind::Expr(expression) => {
@@ -404,84 +420,101 @@ impl<'module> FunctionBuilder<'module> {
                 Some(dst)
             }
             HirExprKind::ListLength(list) => {
-                if let HirExprKind::Local(local) = &list.kind {
-                    let dst = self.new_value(expression.ty);
-                    self.emit(FlowOp::ListLengthLocal {
-                        dst,
-                        local: *local,
-                        span: expression.span,
-                    });
-                    return Some(dst);
-                }
-                let list = self.lower_expression(list)?;
+                let receiver = self.lower_storage_receiver(list)?;
                 let dst = self.new_value(expression.ty);
                 self.emit(FlowOp::ListLength {
                     dst,
-                    list,
+                    receiver,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListIndex { list, index } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let index_value = self.lower_expression(index)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListIndex {
+                    dst,
+                    receiver,
+                    index: index_value,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListGet { list, index } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let index_value = self.lower_expression(index)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListGet {
+                    dst,
+                    receiver,
+                    index: index_value,
                     span: expression.span,
                 });
                 Some(dst)
             }
             HirExprKind::ListPush { list, value } => {
-                if let HirExprKind::Local(local) = &list.kind {
-                    let value = self.lower_expression(value)?;
-                    self.emit(FlowOp::ListPushLocal {
-                        local: *local,
-                        value,
-                        span: expression.span,
-                    });
-                    return Some(self.new_value(TypeStore::UNIT));
-                }
-                if let HirExprKind::Field { .. } = &list.kind {
-                    let place = place_for_argument(list)?;
-                    let list_value = self.lower_expression(list)?;
-                    let value = self.lower_expression(value)?;
-                    self.emit(FlowOp::ListPushPlace {
-                        list: list_value,
-                        place,
-                        value,
-                        span: expression.span,
-                    });
-                    return Some(self.new_value(TypeStore::UNIT));
-                }
-                let list = self.lower_expression(list)?;
+                let receiver = self.lower_storage_receiver(list)?;
                 let value = self.lower_expression(value)?;
                 self.emit(FlowOp::ListPush {
-                    list,
+                    receiver,
                     value,
                     span: expression.span,
                 });
                 Some(self.new_value(TypeStore::UNIT))
             }
             HirExprKind::ListRemove { list, index } => {
+                let receiver = self.lower_storage_receiver(list)?;
                 let index = self.lower_expression(index)?;
                 let dst = self.new_value(expression.ty);
-                if let HirExprKind::Local(local) = &list.kind {
-                    self.emit(FlowOp::ListRemoveLocal {
-                        dst,
-                        local: *local,
-                        index,
-                        span: expression.span,
-                    });
-                } else if let HirExprKind::Field { .. } = &list.kind {
-                    let place = place_for_argument(list)?;
-                    let list_value = self.lower_expression(list)?;
-                    self.emit(FlowOp::ListRemovePlace {
-                        dst,
-                        list: list_value,
-                        place,
-                        index,
-                        span: expression.span,
-                    });
-                } else {
-                    let list = self.lower_expression(list)?;
-                    self.emit(FlowOp::ListRemove {
-                        dst,
-                        list,
-                        index,
-                        span: expression.span,
-                    });
-                }
+                self.emit(FlowOp::ListRemove {
+                    dst,
+                    receiver,
+                    index,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListTryRemove { list, index } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let index = self.lower_expression(index)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListTryRemove {
+                    dst,
+                    receiver,
+                    index,
+                    span: expression.span,
+                });
+                Some(dst)
+            }
+            HirExprKind::ListClear(list) => {
+                let receiver = self.lower_storage_receiver(list)?;
+                self.emit(FlowOp::ListClear {
+                    receiver,
+                    span: expression.span,
+                });
+                Some(self.new_value(TypeStore::UNIT))
+            }
+            HirExprKind::ListReserve { list, additional } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let additional = self.lower_expression(additional)?;
+                self.emit(FlowOp::ListReserve {
+                    receiver,
+                    additional,
+                    span: expression.span,
+                });
+                Some(self.new_value(TypeStore::UNIT))
+            }
+            HirExprKind::ListTryReserve { list, additional } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let additional = self.lower_expression(additional)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListTryReserve {
+                    dst,
+                    receiver,
+                    additional,
+                    span: expression.span,
+                });
                 Some(dst)
             }
             HirExprKind::TextByteLength(text) => {
@@ -682,14 +715,14 @@ impl<'module> FunctionBuilder<'module> {
         let mut lowered = Vec::with_capacity(arguments.len());
         let mut argument_places = Vec::with_capacity(arguments.len());
         for (parameter, argument) in arguments {
-            if let Some(value) = self.lower_expression(argument) {
+            if let Some((value, place)) = self.lower_value_with_place(argument) {
                 lowered.push((*parameter, value));
-                argument_places.push((*parameter, place_for_argument(argument)));
+                argument_places.push((*parameter, place.clone()));
                 self.emit(FlowOp::ReserveArgument {
                     call,
                     parameter: *parameter,
                     value,
-                    place: place_for_argument(argument),
+                    place,
                     span: argument.span,
                 });
             }
@@ -705,6 +738,206 @@ impl<'module> FunctionBuilder<'module> {
             span: expression.span,
         });
         dst
+    }
+
+    fn lower_assignment(&mut self, target: &HirPlace, value: &HirExpr, span: keld_source::Span) {
+        let Some((base, base_ty, mut place, final_projection)) = self.lower_target_prefix(target)
+        else {
+            return;
+        };
+        match final_projection {
+            Some(HirProjection::Field(field))
+                if matches!(self.module.types.kind(base_ty), TypeKind::EntityRef(_)) =>
+            {
+                if let Some(value) = self.lower_expression(value) {
+                    self.emit(FlowOp::WriteEntityField {
+                        entity: base,
+                        field,
+                        value,
+                        span,
+                    });
+                }
+            }
+            Some(HirProjection::Field(field)) => {
+                place.projections.push(PlaceProjection::Field(field));
+                if let Some(value) = self.lower_expression(value) {
+                    self.emit(FlowOp::ReplacePlace { place, value, span });
+                }
+            }
+            Some(HirProjection::Index(index)) => {
+                let Some(index_value) = self.lower_expression(&index) else {
+                    return;
+                };
+                let reservation = self.next_reservation;
+                self.next_reservation = self.next_reservation.saturating_add(1);
+                self.emit(FlowOp::BeginIndexedReplacement {
+                    reservation,
+                    list: place.clone(),
+                    index: index_value,
+                    span,
+                });
+                let Some(value) = self.lower_expression(value) else {
+                    return;
+                };
+                self.emit(FlowOp::ListReplace {
+                    receiver: StorageReceiver {
+                        value: base,
+                        place: Some(place),
+                    },
+                    index: index_value,
+                    value,
+                    span,
+                });
+                self.emit(FlowOp::EndIndexedReplacement { reservation, span });
+            }
+            None => {}
+        }
+    }
+
+    fn lower_target_prefix(
+        &mut self,
+        target: &HirPlace,
+    ) -> Option<(ValueId, TypeId, Place, Option<HirProjection>)> {
+        let mut value = self.copy_local(target.base, target.span);
+        let mut ty = *self.function.local_types.get(target.base.0 as usize)?;
+        let mut place = Place {
+            base: target.base,
+            projections: Vec::new(),
+        };
+        let final_projection = target.projections.last().cloned();
+        for projection in target
+            .projections
+            .iter()
+            .take(target.projections.len().saturating_sub(1))
+        {
+            match projection {
+                HirProjection::Field(field) => {
+                    let dst = self.new_value(self.field_type(ty, *field));
+                    if matches!(self.module.types.kind(ty), TypeKind::Struct(_)) {
+                        self.emit(FlowOp::ReadStructField {
+                            dst,
+                            base: value,
+                            field: *field,
+                            span: target.span,
+                        });
+                    } else {
+                        self.emit(FlowOp::ReadEntityField {
+                            dst,
+                            entity: value,
+                            field: *field,
+                            span: target.span,
+                        });
+                    }
+                    value = dst;
+                    ty = self.field_type(ty, *field);
+                    place.projections.push(PlaceProjection::Field(*field));
+                }
+                HirProjection::Index(index) => {
+                    let index_value = self.lower_expression(index)?;
+                    let element = match self.module.types.kind(ty) {
+                        TypeKind::List(element) => *element,
+                        _ => return None,
+                    };
+                    let dst = self.new_value(element);
+                    self.emit(FlowOp::ListIndex {
+                        dst,
+                        receiver: StorageReceiver {
+                            value,
+                            place: Some(place.clone()),
+                        },
+                        index: index_value,
+                        span: target.span,
+                    });
+                    value = dst;
+                    ty = element;
+                    place
+                        .projections
+                        .push(PlaceProjection::Index(index_identity(index, index_value)));
+                }
+            }
+        }
+        Some((value, ty, place, final_projection))
+    }
+
+    fn field_type(&self, ty: TypeId, field: keld_semantics::FieldId) -> TypeId {
+        let definition = match self.module.types.kind(ty) {
+            TypeKind::Struct(definition) | TypeKind::EntityRef(definition) => *definition,
+            _ => return TypeStore::ERROR,
+        };
+        self.module
+            .definitions
+            .get(definition.0 as usize)
+            .and_then(|definition| {
+                definition
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.id == field)
+            })
+            .map_or(TypeStore::ERROR, |field| field.ty)
+    }
+
+    fn lower_storage_receiver(&mut self, expression: &HirExpr) -> Option<StorageReceiver> {
+        let (value, place) = self.lower_value_with_place(expression)?;
+        Some(StorageReceiver { value, place })
+    }
+
+    fn lower_value_with_place(&mut self, expression: &HirExpr) -> Option<(ValueId, Option<Place>)> {
+        match &expression.kind {
+            HirExprKind::Local(local) => Some((
+                self.copy_local(*local, expression.span),
+                Some(Place {
+                    base: *local,
+                    projections: Vec::new(),
+                }),
+            )),
+            HirExprKind::Field { base, field } => {
+                let (base_value, base_place) = self.lower_value_with_place(base)?;
+                let dst = self.new_value(expression.ty);
+                if matches!(self.module.types.kind(base.ty), TypeKind::Struct(_)) {
+                    self.emit(FlowOp::ReadStructField {
+                        dst,
+                        base: base_value,
+                        field: *field,
+                        span: expression.span,
+                    });
+                } else {
+                    self.emit(FlowOp::ReadEntityField {
+                        dst,
+                        entity: base_value,
+                        field: *field,
+                        span: expression.span,
+                    });
+                }
+                let place = base_place.map(|mut place| {
+                    place.projections.push(PlaceProjection::Field(*field));
+                    place
+                });
+                Some((dst, place))
+            }
+            HirExprKind::ListIndex { list, index } => {
+                let receiver = self.lower_storage_receiver(list)?;
+                let index_value = self.lower_expression(index)?;
+                let dst = self.new_value(expression.ty);
+                self.emit(FlowOp::ListIndex {
+                    dst,
+                    receiver: receiver.clone(),
+                    index: index_value,
+                    span: expression.span,
+                });
+                let place = receiver.place.map(|mut place| {
+                    place
+                        .projections
+                        .push(PlaceProjection::Index(index_identity(index, index_value)));
+                    place
+                });
+                Some((dst, place))
+            }
+            HirExprKind::Take(place) => Some((
+                self.lower_expression(expression)?,
+                Some(place_from_hir(place)),
+            )),
+            _ => Some((self.lower_expression(expression)?, None)),
+        }
     }
 
     fn lower_struct(
@@ -911,23 +1144,24 @@ impl<'module> FunctionBuilder<'module> {
     }
 }
 
-fn place_for_argument(expression: &HirExpr) -> Option<Place> {
-    match &expression.kind {
-        HirExprKind::Local(local) => Some(Place {
-            base: *local,
-            fields: Vec::new(),
-        }),
-        HirExprKind::Field { base, field } => {
-            let mut place = place_for_argument(base)?;
-            place.fields.push(*field);
-            Some(place)
-        }
-        HirExprKind::Copy(value) => place_for_argument(value),
-        HirExprKind::Take(place) => Some(Place {
-            base: place.base,
-            fields: place.fields.clone(),
-        }),
-        _ => None,
+fn place_from_hir(place: &HirPlace) -> Place {
+    Place {
+        base: place.base,
+        projections: place
+            .projections
+            .iter()
+            .filter_map(|projection| match projection {
+                HirProjection::Field(field) => Some(PlaceProjection::Field(*field)),
+                HirProjection::Index(_) => None,
+            })
+            .collect(),
+    }
+}
+
+fn index_identity(index: &HirExpr, value: ValueId) -> IndexIdentity {
+    match index.kind {
+        HirExprKind::Int(constant) => IndexIdentity::Constant(constant),
+        _ => IndexIdentity::Value(value),
     }
 }
 

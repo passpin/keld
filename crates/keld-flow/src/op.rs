@@ -10,9 +10,27 @@ pub enum ExitTarget {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PlaceProjection {
+    Field(FieldId),
+    Index(IndexIdentity),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexIdentity {
+    Constant(i64),
+    Value(ValueId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Place {
     pub base: LocalId,
-    pub fields: Vec<FieldId>,
+    pub projections: Vec<PlaceProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorageReceiver {
+    pub value: ValueId,
+    pub place: Option<Place>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,47 +98,72 @@ pub enum FlowOp {
     },
     ListLength {
         dst: ValueId,
-        list: ValueId,
+        receiver: StorageReceiver,
+        span: Span,
+    },
+    ListIndex {
+        dst: ValueId,
+        receiver: StorageReceiver,
+        index: ValueId,
+        span: Span,
+    },
+    ListGet {
+        dst: ValueId,
+        receiver: StorageReceiver,
+        index: ValueId,
         span: Span,
     },
     ListPush {
-        list: ValueId,
-        value: ValueId,
-        span: Span,
-    },
-    ListPushPlace {
-        list: ValueId,
-        place: Place,
-        value: ValueId,
-        span: Span,
-    },
-    ListLengthLocal {
-        dst: ValueId,
-        local: LocalId,
-        span: Span,
-    },
-    ListPushLocal {
-        local: LocalId,
+        receiver: StorageReceiver,
         value: ValueId,
         span: Span,
     },
     ListRemove {
         dst: ValueId,
-        list: ValueId,
+        receiver: StorageReceiver,
         index: ValueId,
         span: Span,
     },
-    ListRemovePlace {
+    ListTryRemove {
         dst: ValueId,
-        list: ValueId,
+        receiver: StorageReceiver,
+        index: ValueId,
+        span: Span,
+    },
+    ListClear {
+        receiver: StorageReceiver,
+        span: Span,
+    },
+    ListReserve {
+        receiver: StorageReceiver,
+        additional: ValueId,
+        span: Span,
+    },
+    ListTryReserve {
+        dst: ValueId,
+        receiver: StorageReceiver,
+        additional: ValueId,
+        span: Span,
+    },
+    BeginIndexedReplacement {
+        reservation: u32,
+        list: Place,
+        index: ValueId,
+        span: Span,
+    },
+    EndIndexedReplacement {
+        reservation: u32,
+        span: Span,
+    },
+    ListReplace {
+        receiver: StorageReceiver,
+        index: ValueId,
+        value: ValueId,
+        span: Span,
+    },
+    ReplacePlace {
         place: Place,
-        index: ValueId,
-        span: Span,
-    },
-    ListRemoveLocal {
-        dst: ValueId,
-        local: LocalId,
-        index: ValueId,
+        value: ValueId,
         span: Span,
     },
     TextByteLength {

@@ -3,7 +3,7 @@ use crate::{
     IrType, Module, Register, RegisterStorage, Terminator, ViewId, ViewMode,
 };
 use keld_flow::FlowModule;
-use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, ValueId};
+use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection, ValueId};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{CompareOp, DefinitionKind, LocalId, TypeId, TypeKind, TypeStore};
 use keld_storage::{
@@ -393,78 +393,70 @@ impl<'flow> FunctionLowerer<'flow> {
                 dst: self.registers.value(*dst),
                 span: *span,
             }),
-            FlowOp::ListLength { dst, list, span } => output.push(Instruction::ListLength {
+            FlowOp::ListLength {
+                dst,
+                receiver,
+                span,
+            } => output.push(Instruction::ListLength {
                 dst: self.registers.value(*dst),
-                list: self.registers.value(*list),
+                list: self.registers.value(receiver.value),
                 span: *span,
             }),
-            FlowOp::ListPush { list, value, span } => output.push(Instruction::ListPush {
-                list: self.registers.value(*list),
-                value: self.registers.value(*value),
-                span: *span,
-            }),
-            FlowOp::ListPushPlace {
-                list,
-                place,
+            FlowOp::ListPush {
+                receiver,
                 value,
                 span,
-            } => output.push(Instruction::ListPushPlace {
-                list: self.registers.value(*list),
-                source: ArgumentSource {
-                    base: self.registers.local(place.base),
-                    fields: place.fields.clone(),
-                },
-                value: self.registers.value(*value),
-                span: *span,
-            }),
-            FlowOp::ListLengthLocal { dst, local, span } => output.push(Instruction::ListLength {
-                dst: self.registers.value(*dst),
-                list: self.registers.local(*local),
-                span: *span,
-            }),
-            FlowOp::ListPushLocal { local, value, span } => output.push(Instruction::ListPush {
-                list: self.registers.local(*local),
-                value: self.registers.value(*value),
-                span: *span,
-            }),
+            } => {
+                if let Some(place) = &receiver.place {
+                    output.push(Instruction::ListPushPlace {
+                        list: self.registers.value(receiver.value),
+                        source: self.argument_source(place),
+                        value: self.registers.value(*value),
+                        span: *span,
+                    });
+                } else {
+                    output.push(Instruction::ListPush {
+                        list: self.registers.value(receiver.value),
+                        value: self.registers.value(*value),
+                        span: *span,
+                    });
+                }
+            }
             FlowOp::ListRemove {
                 dst,
-                list,
+                receiver,
                 index,
                 span,
-            } => output.push(Instruction::ListRemove {
-                dst: self.registers.value(*dst),
-                list: self.registers.value(*list),
-                index: self.registers.value(*index),
-                span: *span,
-            }),
-            FlowOp::ListRemovePlace {
-                dst,
-                list,
-                place,
-                index,
-                span,
-            } => output.push(Instruction::ListRemovePlace {
-                dst: self.registers.value(*dst),
-                list: self.registers.value(*list),
-                source: ArgumentSource {
-                    base: self.registers.local(place.base),
-                    fields: place.fields.clone(),
-                },
-                index: self.registers.value(*index),
-                span: *span,
-            }),
-            FlowOp::ListRemoveLocal {
-                dst,
-                local,
-                index,
-                span,
-            } => output.push(Instruction::ListRemove {
-                dst: self.registers.value(*dst),
-                list: self.registers.local(*local),
-                index: self.registers.value(*index),
-                span: *span,
-            }),
+            } => {
+                if let Some(place) = &receiver.place {
+                    output.push(Instruction::ListRemovePlace {
+                        dst: self.registers.value(*dst),
+                        list: self.registers.value(receiver.value),
+                        source: self.argument_source(place),
+                        index: self.registers.value(*index),
+                        span: *span,
+                    });
+                } else {
+                    output.push(Instruction::ListRemove {
+                        dst: self.registers.value(*dst),
+                        list: self.registers.value(receiver.value),
+                        index: self.registers.value(*index),
+                        span: *span,
+                    });
+                }
+            }
+            FlowOp::ListIndex { .. }
+            | FlowOp::ListGet { .. }
+            | FlowOp::ListTryRemove { .. }
+            | FlowOp::ListClear { .. }
+            | FlowOp::ListReserve { .. }
+            | FlowOp::ListTryReserve { .. }
+            | FlowOp::BeginIndexedReplacement { .. }
+            | FlowOp::EndIndexedReplacement { .. }
+            | FlowOp::ListReplace { .. }
+            | FlowOp::ReplacePlace { .. } => {
+                unimplemented!("List projection IR lowering is implemented in the next milestone")
+            }
             FlowOp::TextByteLength { dst, text, span } => {
                 output.push(Instruction::TextByteLength {
                     dst: self.registers.value(*dst),
@@ -627,7 +619,7 @@ impl<'flow> FunctionLowerer<'flow> {
                             *parameter,
                             place.as_ref().map(|place| ArgumentSource {
                                 base: self.registers.local(place.base),
-                                fields: place.fields.clone(),
+                                fields: place_fields(place),
                             }),
                         )
                     })
@@ -663,13 +655,18 @@ impl<'flow> FunctionLowerer<'flow> {
             | FlowOp::CopyStorage { .. }
             | FlowOp::ListNew { .. }
             | FlowOp::ListLength { .. }
+            | FlowOp::ListIndex { .. }
+            | FlowOp::ListGet { .. }
             | FlowOp::ListPush { .. }
-            | FlowOp::ListPushPlace { .. }
-            | FlowOp::ListLengthLocal { .. }
-            | FlowOp::ListPushLocal { .. }
             | FlowOp::ListRemove { .. }
-            | FlowOp::ListRemovePlace { .. }
-            | FlowOp::ListRemoveLocal { .. }
+            | FlowOp::ListTryRemove { .. }
+            | FlowOp::ListClear { .. }
+            | FlowOp::ListReserve { .. }
+            | FlowOp::ListTryReserve { .. }
+            | FlowOp::BeginIndexedReplacement { .. }
+            | FlowOp::EndIndexedReplacement { .. }
+            | FlowOp::ListReplace { .. }
+            | FlowOp::ReplacePlace { .. }
             | FlowOp::TextByteLength { .. }
             | FlowOp::TextIsEmpty { .. }
             | FlowOp::TextConcat { .. }
@@ -695,6 +692,13 @@ impl<'flow> FunctionLowerer<'flow> {
             .iter()
             .map(|(field, value)| (*field, self.registers.value(*value)))
             .collect()
+    }
+
+    fn argument_source(&self, place: &Place) -> ArgumentSource {
+        ArgumentSource {
+            base: self.registers.local(place.base),
+            fields: place_fields(place),
+        }
     }
 
     fn read_entity(
@@ -862,6 +866,21 @@ impl<'flow> FunctionLowerer<'flow> {
             keld_flow::Terminator::Unreachable => Terminator::Unreachable,
         }
     }
+}
+
+fn place_fields(place: &Place) -> Vec<keld_semantics::FieldId> {
+    place
+        .projections
+        .iter()
+        .map(|projection| match projection {
+            PlaceProjection::Field(field) => *field,
+            PlaceProjection::Index(_) => {
+                unimplemented!(
+                    "indexed ArgumentSource lowering is implemented in the next milestone"
+                )
+            }
+        })
+        .collect()
 }
 
 fn map_type(types: &TypeStore, ty: TypeId) -> IrType {

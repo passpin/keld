@@ -1,6 +1,9 @@
 use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, cleanup, cleanup::ValueOrigin};
 use crate::{EmptyReason, Home};
-use keld_flow::{BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, Place, Terminator};
+use keld_flow::{
+    BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, IndexIdentity, Place, PlaceProjection,
+    StorageReceiver, Terminator, ValueId,
+};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{
     FieldId, FunctionId, LocalId, ParameterMode, StorageClass, TypeId, TypeKind, TypeStore,
@@ -13,6 +16,7 @@ const MOVED: DiagnosticCode = DiagnosticCode("KLD2002");
 const BORROWED: DiagnosticCode = DiagnosticCode("KLD2003");
 const PARTIAL_MOVE: DiagnosticCode = DiagnosticCode("KLD2004");
 const CONFLICTING_LOANS: DiagnosticCode = DiagnosticCode("KLD2005");
+const INDEXED_REPLACEMENT: DiagnosticCode = DiagnosticCode("KLD2007");
 const MAYBE_LIVE: DiagnosticCode = DiagnosticCode("KLD2008");
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -119,6 +123,7 @@ struct HomeState {
     borrowed: BTreeSet<LocalId>,
     origins: Vec<ValueOrigin>,
     pending: Vec<PendingCall>,
+    indexed: Vec<IndexedReservation>,
     cleanup_orders: Vec<crate::state::ScopeCleanupState>,
 }
 
@@ -134,6 +139,12 @@ struct Reservation {
     parameter: keld_semantics::ParameterIndex,
     place: Place,
     effect: LoanEffect,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IndexedReservation {
+    reservation: u32,
+    list: Place,
 }
 
 fn verify_function(
@@ -252,8 +263,8 @@ fn update_cleanup_state(
             }
         }
         FlowOp::ListPush { value, .. }
-        | FlowOp::ListPushPlace { value, .. }
-        | FlowOp::ListPushLocal { value, .. }
+        | FlowOp::ListReplace { value, .. }
+        | FlowOp::ReplacePlace { value, .. }
         | FlowOp::WriteEntityField { value, .. } => deactivate_temporary(*value),
         FlowOp::ConstructStruct { fields, .. } | FlowOp::AllocateEntity { fields, .. } => {
             for (_, value) in fields {
@@ -458,21 +469,22 @@ fn infer_summary(
                 | FlowOp::ListNew { dst, .. }
                 | FlowOp::ConstructStruct { dst, .. }
                 | FlowOp::AllocateEntity { dst, .. } => origins[dst.0 as usize] = None,
-                FlowOp::ListLengthLocal { local, .. } => mark(*local, LoanEffect::Read),
-                FlowOp::ListPushLocal { local, .. } | FlowOp::ListRemoveLocal { local, .. } => {
-                    mark(*local, LoanEffect::Structural);
+                FlowOp::ListLength { receiver, .. }
+                | FlowOp::ListIndex { receiver, .. }
+                | FlowOp::ListGet { receiver, .. } => {
+                    mark_receiver(&mut mark, &origins, receiver, LoanEffect::Read);
                 }
-                FlowOp::ListLength { list, .. } => {
-                    if let Some(local) = origins.get(list.0 as usize).copied().flatten() {
-                        mark(local, LoanEffect::Read);
-                    }
+                FlowOp::ListPush { receiver, .. }
+                | FlowOp::ListRemove { receiver, .. }
+                | FlowOp::ListTryRemove { receiver, .. }
+                | FlowOp::ListClear { receiver, .. }
+                | FlowOp::ListReserve { receiver, .. }
+                | FlowOp::ListTryReserve { receiver, .. }
+                | FlowOp::ListReplace { receiver, .. } => {
+                    mark_receiver(&mut mark, &origins, receiver, LoanEffect::Structural);
                 }
-                FlowOp::ListPush { list, .. } | FlowOp::ListRemove { list, .. } => {
-                    if let Some(local) = origins.get(list.0 as usize).copied().flatten() {
-                        mark(local, LoanEffect::Structural);
-                    }
-                }
-                FlowOp::ListPushPlace { place, .. } | FlowOp::ListRemovePlace { place, .. } => {
+                FlowOp::ReplacePlace { place, .. }
+                | FlowOp::BeginIndexedReplacement { list: place, .. } => {
                     mark(place.base, LoanEffect::Structural);
                 }
                 FlowOp::Call {
@@ -517,6 +529,19 @@ fn infer_summary(
     summary
 }
 
+fn mark_receiver(
+    mark: &mut impl FnMut(LocalId, LoanEffect),
+    origins: &[Option<LocalId>],
+    receiver: &StorageReceiver,
+    effect: LoanEffect,
+) {
+    if let Some(place) = &receiver.place {
+        mark(place.base, effect);
+    } else if let Some(local) = origins.get(receiver.value.0 as usize).copied().flatten() {
+        mark(local, effect);
+    }
+}
+
 fn initial_state(flow: &FlowModule, function: &FlowFunction) -> HomeState {
     let mut homes = function
         .local_types
@@ -551,6 +576,7 @@ fn initial_state(flow: &FlowModule, function: &FlowFunction) -> HomeState {
         borrowed,
         origins: vec![ValueOrigin::Unknown; function.value_types.len()],
         pending: Vec::new(),
+        indexed: Vec::new(),
         cleanup_orders,
     }
 }
@@ -605,23 +631,34 @@ fn transfer_operation(
                 return;
             }
             let effect = parameter_effect(flow, summaries, current.function, *parameter);
-            if current.reservations.iter().any(|existing| {
-                places_overlap(&existing.place, place) && effects_conflict(existing.effect, effect)
-            }) {
+            if current
+                .reservations
+                .iter()
+                .any(|existing| reservation_conflicts(existing, place, effect))
+            {
                 diagnostics.push(error(
                     CONFLICTING_LOANS,
                     *span,
                     "these arguments may access the same storage incompatibly",
                 ));
             }
+            if matches!(effect, LoanEffect::Structural | LoanEffect::Take)
+                && state
+                    .indexed
+                    .iter()
+                    .any(|reservation| indexed_destination_conflict(&reservation.list, place))
+            {
+                diagnostics.push(error(
+                    INDEXED_REPLACEMENT,
+                    *span,
+                    "the right-hand side accesses an indexed replacement destination",
+                ));
+            }
             if state.pending.len() > 1
                 && state.pending[..state.pending.len() - 1]
                     .iter()
                     .flat_map(|parent| parent.reservations.iter())
-                    .any(|existing| {
-                        places_overlap(&existing.place, place)
-                            && effects_conflict(existing.effect, effect)
-                    })
+                    .any(|existing| reservation_conflicts(existing, place, effect))
             {
                 diagnostics.push(error(
                     CONFLICTING_LOANS,
@@ -664,7 +701,7 @@ fn transfer_operation(
                         state,
                         Place {
                             base: *local,
-                            fields: Vec::new(),
+                            projections: Vec::new(),
                         },
                         LoanEffect::Read,
                         *span,
@@ -700,7 +737,7 @@ fn transfer_operation(
                     state,
                     Place {
                         base: *local,
-                        fields: Vec::new(),
+                        projections: Vec::new(),
                     },
                     LoanEffect::Take,
                     *span,
@@ -734,61 +771,57 @@ fn transfer_operation(
         | FlowOp::AllocateEntity { dst, .. } => {
             state.origins[dst.0 as usize] = ValueOrigin::Owned;
         }
-        FlowOp::ListLength { dst, list, span } => {
+        FlowOp::ListLength {
+            dst,
+            receiver,
+            span,
+            ..
+        }
+        | FlowOp::ListGet {
+            dst,
+            receiver,
+            span,
+            ..
+        } => {
             state.origins[dst.0 as usize] = ValueOrigin::Implicit;
-            let origin = state
-                .origins
-                .get(list.0 as usize)
-                .cloned()
-                .unwrap_or(ValueOrigin::Unknown);
-            check_origin_access(
+            check_receiver_access(
                 flow,
                 function,
                 state,
-                &origin,
+                receiver,
                 LoanEffect::Read,
                 *span,
                 diagnostics,
                 summaries,
             );
         }
-        FlowOp::ListPush { list, value, span } => {
-            require_consumable_element(
-                flow,
-                function.value_types[list.0 as usize],
-                state
-                    .origins
-                    .get(value.0 as usize)
-                    .cloned()
-                    .unwrap_or(ValueOrigin::Unknown),
-                *span,
-                diagnostics,
-            );
-            let origin = state
-                .origins
-                .get(list.0 as usize)
-                .cloned()
-                .unwrap_or(ValueOrigin::Unknown);
-            check_origin_access(
+        FlowOp::ListIndex {
+            dst,
+            receiver,
+            index,
+            span,
+        } => {
+            state.origins[dst.0 as usize] =
+                list_index_origin(flow, function, state, receiver, *index);
+            check_receiver_access(
                 flow,
                 function,
                 state,
-                &origin,
-                LoanEffect::Structural,
+                receiver,
+                LoanEffect::Read,
                 *span,
                 diagnostics,
                 summaries,
             );
         }
-        FlowOp::ListPushPlace {
-            list,
-            place,
+        FlowOp::ListPush {
+            receiver,
             value,
             span,
         } => {
             require_consumable_element(
                 flow,
-                function.value_types[list.0 as usize],
+                function.value_types[receiver.value.0 as usize],
                 state
                     .origins
                     .get(value.0 as usize)
@@ -797,93 +830,137 @@ fn transfer_operation(
                 *span,
                 diagnostics,
             );
-            check_place_access(
+            check_receiver_access(
                 flow,
                 function,
                 state,
-                place,
+                receiver,
                 LoanEffect::Structural,
                 *span,
                 diagnostics,
                 summaries,
-            );
-        }
-        FlowOp::ListLengthLocal { dst, local, span } => {
-            state.origins[dst.0 as usize] = ValueOrigin::Implicit;
-            if !state.borrowed.contains(local) {
-                let _ = require_live(&state.homes[local.0 as usize], *span, diagnostics);
-            }
-            check_pending_access(
-                state,
-                Place {
-                    base: *local,
-                    fields: Vec::new(),
-                },
-                LoanEffect::Read,
-                *span,
-                diagnostics,
-                summaries,
-                flow,
-            );
-        }
-        FlowOp::ListPushLocal { local, value, span } => {
-            require_consumable_element(
-                flow,
-                function.local_types[local.0 as usize],
-                state
-                    .origins
-                    .get(value.0 as usize)
-                    .cloned()
-                    .unwrap_or(ValueOrigin::Unknown),
-                *span,
-                diagnostics,
-            );
-            if !state.borrowed.contains(local) {
-                let _ = require_live(&state.homes[local.0 as usize], *span, diagnostics);
-            }
-            check_pending_access(
-                state,
-                Place {
-                    base: *local,
-                    fields: Vec::new(),
-                },
-                LoanEffect::Structural,
-                *span,
-                diagnostics,
-                summaries,
-                flow,
             );
         }
         FlowOp::ListRemove {
-            dst, list, span, ..
-        } => {
-            state.origins[dst.0 as usize] =
-                list_remove_origin(flow, function.value_types[list.0 as usize]);
-            let origin = state
-                .origins
-                .get(list.0 as usize)
-                .cloned()
-                .unwrap_or(ValueOrigin::Unknown);
-            check_origin_access(
-                flow,
-                function,
-                state,
-                &origin,
-                LoanEffect::Structural,
-                *span,
-                diagnostics,
-                summaries,
-            );
-        }
-        FlowOp::ListRemovePlace {
             dst,
-            list,
-            place,
+            receiver,
+            span,
+            ..
+        }
+        | FlowOp::ListTryRemove {
+            dst,
+            receiver,
             span,
             ..
         } => {
             state.origins[dst.0 as usize] =
-                list_remove_origin(flow, function.value_types[list.0 as usize]);
+                list_remove_origin(flow, function.value_types[receiver.value.0 as usize]);
+            check_receiver_access(
+                flow,
+                function,
+                state,
+                receiver,
+                LoanEffect::Structural,
+                *span,
+                diagnostics,
+                summaries,
+            );
+        }
+        FlowOp::ListClear { receiver, span }
+        | FlowOp::ListReserve { receiver, span, .. }
+        | FlowOp::ListTryReserve { receiver, span, .. } => {
+            if let FlowOp::ListTryReserve { dst, .. } = operation {
+                state.origins[dst.0 as usize] = ValueOrigin::Implicit;
+            }
+            check_receiver_access(
+                flow,
+                function,
+                state,
+                receiver,
+                LoanEffect::Structural,
+                *span,
+                diagnostics,
+                summaries,
+            );
+        }
+        FlowOp::BeginIndexedReplacement {
+            reservation,
+            list,
+            index: _,
+            span,
+        } => {
+            check_place_access(
+                flow,
+                function,
+                state,
+                list,
+                LoanEffect::Structural,
+                *span,
+                diagnostics,
+                summaries,
+            );
+            state.indexed.push(IndexedReservation {
+                reservation: *reservation,
+                list: list.clone(),
+            });
+        }
+        FlowOp::EndIndexedReplacement { reservation, span } => {
+            if state
+                .indexed
+                .last()
+                .is_none_or(|current| current.reservation != *reservation)
+            {
+                diagnostics.push(error(
+                    INDEXED_REPLACEMENT,
+                    *span,
+                    "indexed replacement reservation does not match its active destination",
+                ));
+            } else {
+                state.indexed.pop();
+            }
+        }
+        FlowOp::ListReplace {
+            receiver,
+            value,
+            span,
+            ..
+        } => {
+            require_consumable_element(
+                flow,
+                function.value_types[receiver.value.0 as usize],
+                state
+                    .origins
+                    .get(value.0 as usize)
+                    .cloned()
+                    .unwrap_or(ValueOrigin::Unknown),
+                *span,
+                diagnostics,
+            );
+            check_receiver_access_without_indexed(
+                flow,
+                function,
+                state,
+                receiver,
+                LoanEffect::Structural,
+                *span,
+                diagnostics,
+                summaries,
+            );
+        }
+        FlowOp::ReplacePlace { place, value, span } => {
+            if let Some(ty) = place_type(flow, function, place) {
+                require_consumable_value(
+                    flow,
+                    ty,
+                    state
+                        .origins
+                        .get(value.0 as usize)
+                        .cloned()
+                        .unwrap_or(ValueOrigin::Unknown),
+                    *span,
+                    diagnostics,
+                );
+            }
             check_place_access(
                 flow,
                 function,
@@ -893,27 +970,6 @@ fn transfer_operation(
                 *span,
                 diagnostics,
                 summaries,
-            );
-        }
-        FlowOp::ListRemoveLocal {
-            dst, local, span, ..
-        } => {
-            let ty = function.local_types[local.0 as usize];
-            state.origins[dst.0 as usize] = list_remove_origin(flow, ty);
-            if !state.borrowed.contains(local) {
-                let _ = require_live(&state.homes[local.0 as usize], *span, diagnostics);
-            }
-            check_pending_access(
-                state,
-                Place {
-                    base: *local,
-                    fields: Vec::new(),
-                },
-                LoanEffect::Structural,
-                *span,
-                diagnostics,
-                summaries,
-                flow,
             );
         }
         FlowOp::TextByteLength { dst, text, span } | FlowOp::TextIsEmpty { dst, text, span } => {
@@ -968,7 +1024,7 @@ fn transfer_operation(
                 state,
                 Place {
                     base: *local,
-                    fields: Vec::new(),
+                    projections: Vec::new(),
                 },
                 LoanEffect::Structural,
                 *span,
@@ -1318,14 +1374,14 @@ fn access_place(origin: &ValueOrigin) -> Option<(Place, bool)> {
         ValueOrigin::Local(local) => Some((
             Place {
                 base: *local,
-                fields: Vec::new(),
+                projections: Vec::new(),
             },
             false,
         )),
         ValueOrigin::Borrowed(local) | ValueOrigin::Entity(local) => Some((
             Place {
                 base: *local,
-                fields: Vec::new(),
+                projections: Vec::new(),
             },
             true,
         )),
@@ -1373,21 +1429,144 @@ fn check_place_access(
     diagnostics: &mut Vec<Diagnostic>,
     summaries: &[FunctionStorageSummary],
 ) {
+    check_place_access_inner(
+        flow,
+        function,
+        state,
+        place,
+        effect,
+        span,
+        diagnostics,
+        summaries,
+        true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_place_access_inner(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    state: &HomeState,
+    place: &Place,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    _summaries: &[FunctionStorageSummary],
+    check_indexed: bool,
+) {
     let base_type = function.local_types[place.base.0 as usize];
     if flow.types.storage_class(base_type) == StorageClass::SingleHome
         && !state.borrowed.contains(&place.base)
     {
         let _ = require_live(&state.homes[place.base.0 as usize], span, diagnostics);
     }
-    check_pending_access(
+    check_pending_access_inner(state, place, effect, span, diagnostics, check_indexed);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_place_access_without_indexed(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    state: &HomeState,
+    place: &Place,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    summaries: &[FunctionStorageSummary],
+) {
+    check_place_access_inner(
+        flow,
+        function,
         state,
-        place.clone(),
+        place,
         effect,
         span,
         diagnostics,
         summaries,
-        flow,
+        false,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_receiver_access(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    state: &HomeState,
+    receiver: &StorageReceiver,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    summaries: &[FunctionStorageSummary],
+) {
+    if let Some(place) = &receiver.place {
+        check_place_access(
+            flow,
+            function,
+            state,
+            place,
+            effect,
+            span,
+            diagnostics,
+            summaries,
+        );
+    } else {
+        let origin = state
+            .origins
+            .get(receiver.value.0 as usize)
+            .cloned()
+            .unwrap_or(ValueOrigin::Unknown);
+        check_origin_access(
+            flow,
+            function,
+            state,
+            &origin,
+            effect,
+            span,
+            diagnostics,
+            summaries,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_receiver_access_without_indexed(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    state: &HomeState,
+    receiver: &StorageReceiver,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    summaries: &[FunctionStorageSummary],
+) {
+    if let Some(place) = &receiver.place {
+        check_place_access_without_indexed(
+            flow,
+            function,
+            state,
+            place,
+            effect,
+            span,
+            diagnostics,
+            summaries,
+        );
+    } else {
+        let origin = state
+            .origins
+            .get(receiver.value.0 as usize)
+            .cloned()
+            .unwrap_or(ValueOrigin::Unknown);
+        check_origin_access(
+            flow,
+            function,
+            state,
+            &origin,
+            effect,
+            span,
+            diagnostics,
+            summaries,
+        );
+    }
 }
 
 fn function_return_type(flow: &FlowModule, function: FunctionId) -> TypeId {
@@ -1429,7 +1608,7 @@ fn read_field_origin(
         Some(ValueOrigin::Local(local)) => ValueOrigin::BorrowedPlace {
             place: Place {
                 base: local,
-                fields: vec![field],
+                projections: vec![PlaceProjection::Field(field)],
             },
             loaned: false,
         },
@@ -1437,13 +1616,13 @@ fn read_field_origin(
             ValueOrigin::BorrowedPlace {
                 place: Place {
                     base: local,
-                    fields: vec![field],
+                    projections: vec![PlaceProjection::Field(field)],
                 },
                 loaned: true,
             }
         }
         Some(ValueOrigin::BorrowedPlace { mut place, loaned }) => {
-            place.fields.push(field);
+            place.projections.push(PlaceProjection::Field(field));
             ValueOrigin::BorrowedPlace { place, loaned }
         }
         Some(
@@ -1465,6 +1644,66 @@ fn list_remove_origin(flow: &FlowModule, list: TypeId) -> ValueOrigin {
     } else {
         ValueOrigin::Implicit
     }
+}
+
+fn list_index_origin(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    state: &HomeState,
+    receiver: &StorageReceiver,
+    index: ValueId,
+) -> ValueOrigin {
+    let Some(TypeKind::List(element)) = function
+        .value_types
+        .get(receiver.value.0 as usize)
+        .map(|ty| flow.types.kind(*ty))
+    else {
+        return ValueOrigin::Unknown;
+    };
+    if flow.types.storage_class(*element) != StorageClass::SingleHome {
+        return ValueOrigin::Implicit;
+    }
+    let (mut place, loaned) = receiver
+        .place
+        .clone()
+        .map(|place| {
+            let loaned = state.borrowed.contains(&place.base);
+            (place, loaned)
+        })
+        .or_else(|| {
+            state
+                .origins
+                .get(receiver.value.0 as usize)
+                .and_then(access_place)
+        })
+        .unwrap_or((
+            Place {
+                base: LocalId(u32::MAX),
+                projections: Vec::new(),
+            },
+            true,
+        ));
+    if place.base.0 == u32::MAX {
+        return ValueOrigin::BorrowedUnknown;
+    }
+    place
+        .projections
+        .push(PlaceProjection::Index(IndexIdentity::Value(index)));
+    ValueOrigin::BorrowedPlace { place, loaned }
+}
+
+fn place_type(flow: &FlowModule, function: &FlowFunction, place: &Place) -> Option<TypeId> {
+    let mut current = *function.local_types.get(place.base.0 as usize)?;
+    for projection in &place.projections {
+        current = match projection {
+            PlaceProjection::Field(field) => field_type(flow, current, *field)?,
+            PlaceProjection::Index(_) => match flow.types.kind(current) {
+                TypeKind::List(element) => *element,
+                _ => return None,
+            },
+        };
+    }
+    Some(current)
 }
 
 fn require_consumable_element(
@@ -1538,6 +1777,11 @@ fn join_states(left: &HomeState, right: &HomeState) -> HomeState {
         } else {
             Vec::new()
         },
+        indexed: if left.indexed == right.indexed {
+            left.indexed.clone()
+        } else {
+            Vec::new()
+        },
         cleanup_orders: cleanup::join_cleanup_orders(&left.cleanup_orders, &right.cleanup_orders),
     }
 }
@@ -1579,8 +1823,27 @@ fn effects_conflict(left: LoanEffect, right: LoanEffect) -> bool {
 }
 
 fn places_overlap(left: &Place, right: &Place) -> bool {
-    left.base == right.base
-        && (left.fields.starts_with(&right.fields) || right.fields.starts_with(&left.fields))
+    if left.base != right.base {
+        return false;
+    }
+    let shared = left
+        .projections
+        .iter()
+        .zip(&right.projections)
+        .take_while(|(left, right)| projections_overlap(left, right))
+        .count();
+    shared == left.projections.len().min(right.projections.len())
+}
+
+fn projections_overlap(left: &PlaceProjection, right: &PlaceProjection) -> bool {
+    match (left, right) {
+        (PlaceProjection::Field(left), PlaceProjection::Field(right)) => left == right,
+        (PlaceProjection::Index(left), PlaceProjection::Index(right)) => match (left, right) {
+            (IndexIdentity::Constant(left), IndexIdentity::Constant(right)) => left == right,
+            _ => true,
+        },
+        _ => false,
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -1593,18 +1856,76 @@ fn check_pending_access(
     _summaries: &[FunctionStorageSummary],
     _flow: &FlowModule,
 ) {
-    let Some(pending) = state.pending.last() else {
-        return;
-    };
-    if pending.reservations.iter().any(|reservation| {
-        places_overlap(&reservation.place, &place) && effects_conflict(reservation.effect, effect)
-    }) {
+    check_pending_access_inner(state, &place, effect, span, diagnostics, true);
+}
+
+fn check_pending_access_inner(
+    state: &HomeState,
+    place: &Place,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    check_indexed: bool,
+) {
+    let call_conflict = state.pending.last().is_some_and(|pending| {
+        pending
+            .reservations
+            .iter()
+            .any(|reservation| reservation_conflicts(reservation, place, effect))
+    });
+    let indexed_conflict = check_indexed
+        && matches!(effect, LoanEffect::Structural | LoanEffect::Take)
+        && state
+            .indexed
+            .iter()
+            .any(|reservation| indexed_destination_conflict(&reservation.list, place));
+    if call_conflict || indexed_conflict {
         diagnostics.push(error(
-            CONFLICTING_LOANS,
+            if indexed_conflict {
+                INDEXED_REPLACEMENT
+            } else {
+                CONFLICTING_LOANS
+            },
             span,
-            "argument evaluation conflicts with a pending storage reservation",
+            if indexed_conflict {
+                "the right-hand side accesses an indexed replacement destination"
+            } else {
+                "argument evaluation conflicts with a pending storage reservation"
+            },
         ));
     }
+}
+
+fn indexed_destination_conflict(list: &Place, access: &Place) -> bool {
+    list.base == access.base
+        && access.projections.len() <= list.projections.len()
+        && list
+            .projections
+            .iter()
+            .zip(&access.projections)
+            .all(|(list, access)| projections_overlap(list, access))
+}
+
+fn reservation_conflicts(reservation: &Reservation, access: &Place, effect: LoanEffect) -> bool {
+    if !places_overlap(&reservation.place, access) {
+        return false;
+    }
+    if effect == LoanEffect::Read
+        && reservation.effect == LoanEffect::Structural
+        && is_strict_prefix(access, &reservation.place)
+    {
+        return false;
+    }
+    effects_conflict(reservation.effect, effect)
+}
+
+fn is_strict_prefix(prefix: &Place, descendant: &Place) -> bool {
+    prefix.projections.len() < descendant.projections.len()
+        && prefix
+            .projections
+            .iter()
+            .zip(&descendant.projections)
+            .all(|(prefix, descendant)| projections_overlap(prefix, descendant))
 }
 
 fn require_live(home: &Home, span: Span, diagnostics: &mut Vec<Diagnostic>) -> bool {
