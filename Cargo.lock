@@ -12,6 +12,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keld-ir"
+version = "0.1.0"
+dependencies = [
+ "keld-flow",
+ "keld-lifecycle",
+ "keld-numeric",
+ "keld-semantics",
+ "keld-source",
+]
+
+[[package]]
 name = "keld-lifecycle"
 version = "0.1.0"
 dependencies = [

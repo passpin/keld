@@ -1,0 +1,515 @@
+use crate::{
+    Function, Instruction, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module,
+    Register, Terminator, ViewId, ViewMode,
+};
+use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, ValueId};
+use keld_lifecycle::VerifiedFlowModule;
+use keld_semantics::{CompareOp, DefinitionKind, LocalId, TypeId, TypeKind, TypeStore};
+use std::collections::BTreeMap;
+
+#[must_use]
+pub fn lower(verified: &VerifiedFlowModule) -> Module {
+    let flow = &verified.flow;
+    Module {
+        definitions: flow
+            .definitions
+            .iter()
+            .map(|definition| IrDefinition {
+                id: definition.id,
+                kind: match definition.kind {
+                    DefinitionKind::Struct => IrDefinitionKind::Struct,
+                    DefinitionKind::Entity => IrDefinitionKind::Entity,
+                },
+                fields: definition
+                    .fields
+                    .iter()
+                    .map(|field| (field.id, map_type(&flow.types, field.ty)))
+                    .collect(),
+            })
+            .collect(),
+        functions: flow
+            .functions
+            .iter()
+            .map(|function| FunctionLowerer::new(function, &flow.types).lower())
+            .collect(),
+        main: flow.main,
+    }
+}
+
+struct Registers {
+    values: Vec<Register>,
+    locals: Vec<Register>,
+    lifecycles: Vec<Register>,
+    identity_conditions: BTreeMap<keld_flow::BlockId, Register>,
+    types: Vec<IrType>,
+}
+
+impl Registers {
+    fn new(function: &FlowFunction, types: &TypeStore) -> Self {
+        let mut register_types = Vec::new();
+        let mut push = |ty| {
+            let register = Register(
+                u32::try_from(register_types.len()).expect("verified register count fits in u32"),
+            );
+            register_types.push(ty);
+            register
+        };
+        let values = function
+            .value_types
+            .iter()
+            .map(|ty| push(map_type(types, *ty)))
+            .collect();
+        let locals = function
+            .local_types
+            .iter()
+            .map(|ty| push(map_type(types, *ty)))
+            .collect();
+        let lifecycles = function
+            .lifecycle_parents
+            .iter()
+            .map(|_| push(IrType::Lifecycle))
+            .collect();
+        let identity_conditions = function
+            .blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block.terminator,
+                    keld_flow::Terminator::BranchIdentity { .. }
+                )
+            })
+            .map(|block| (block.id, push(IrType::Bool)))
+            .collect();
+        Self {
+            values,
+            locals,
+            lifecycles,
+            identity_conditions,
+            types: register_types,
+        }
+    }
+
+    fn value(&self, value: ValueId) -> Register {
+        self.values[value.0 as usize]
+    }
+
+    fn local(&self, local: LocalId) -> Register {
+        self.locals[local.0 as usize]
+    }
+
+    fn lifecycle(&self, lifecycle: LifecycleId) -> Register {
+        self.lifecycles[lifecycle.0 as usize]
+    }
+}
+
+struct FunctionLowerer<'flow> {
+    function: &'flow FlowFunction,
+    types: &'flow TypeStore,
+    registers: Registers,
+    next_view: u32,
+}
+
+impl<'flow> FunctionLowerer<'flow> {
+    fn new(function: &'flow FlowFunction, types: &'flow TypeStore) -> Self {
+        Self {
+            function,
+            types,
+            registers: Registers::new(function, types),
+            next_view: 0,
+        }
+    }
+
+    fn lower(mut self) -> Function {
+        let blocks = self
+            .function
+            .blocks
+            .iter()
+            .map(|block| {
+                let mut instructions = Vec::new();
+                for operation in &block.operations {
+                    self.operation(operation, &mut instructions);
+                }
+                let terminator = self.terminator(block.id, &block.terminator, &mut instructions);
+                IrBlock {
+                    id: IrBlockId(block.id.0),
+                    instructions,
+                    terminator,
+                }
+            })
+            .collect();
+        Function {
+            id: self.function.id,
+            span: self.function.span,
+            parameters: self
+                .function
+                .parameters
+                .iter()
+                .map(|local| self.registers.local(*local))
+                .collect(),
+            current_lifecycle: self.registers.lifecycle(self.function.current_lifecycle),
+            register_types: self.registers.types,
+            return_type: map_type(self.types, self.function.return_type),
+            blocks,
+            entry: IrBlockId(self.function.entry.0),
+        }
+    }
+
+    fn operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
+        match operation {
+            FlowOp::ConstInt { dst, value, span } => output.push(Instruction::ConstInt {
+                dst: self.registers.value(*dst),
+                value: *value,
+                span: *span,
+            }),
+            FlowOp::ConstBool { dst, value, span } => output.push(Instruction::ConstBool {
+                dst: self.registers.value(*dst),
+                value: *value,
+                span: *span,
+            }),
+            FlowOp::ConstNoneLink { dst, entity, span } => {
+                output.push(Instruction::ConstNoneLink {
+                    dst: self.registers.value(*dst),
+                    entity: *entity,
+                    span: *span,
+                });
+            }
+            FlowOp::BeginLifecycle {
+                lifecycle,
+                parent,
+                span,
+            } => output.push(Instruction::BeginLifecycle {
+                dst: self.registers.lifecycle(*lifecycle),
+                parent: self.registers.lifecycle(*parent),
+                span: *span,
+            }),
+            FlowOp::CopyLocal { dst, local, span } => output.push(Instruction::Copy {
+                dst: self.registers.value(*dst),
+                src: self.registers.local(*local),
+                span: *span,
+            }),
+            FlowOp::StoreLocal { local, value, span } => output.push(Instruction::Copy {
+                dst: self.registers.local(*local),
+                src: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::UnaryInt {
+                dst,
+                op,
+                value,
+                span,
+            } => output.push(Instruction::CheckedUnaryInt {
+                dst: self.registers.value(*dst),
+                op: *op,
+                src: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::BinaryInt {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => output.push(Instruction::CheckedBinaryInt {
+                dst: self.registers.value(*dst),
+                op: *op,
+                lhs: self.registers.value(*lhs),
+                rhs: self.registers.value(*rhs),
+                span: *span,
+            }),
+            FlowOp::Not { dst, value, span } => output.push(Instruction::Not {
+                dst: self.registers.value(*dst),
+                src: self.registers.value(*value),
+                span: *span,
+            }),
+            FlowOp::Compare {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => output.push(Instruction::Compare {
+                dst: self.registers.value(*dst),
+                op: *op,
+                lhs: self.registers.value(*lhs),
+                rhs: self.registers.value(*rhs),
+                span: *span,
+            }),
+            _ => self.effect_operation(operation, output),
+        }
+    }
+
+    fn effect_operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
+        match operation {
+            FlowOp::Phi { dst, inputs, span } => output.push(Instruction::Phi {
+                dst: self.registers.value(*dst),
+                inputs: inputs
+                    .iter()
+                    .map(|(block, value)| (IrBlockId(block.0), self.registers.value(*value)))
+                    .collect(),
+                span: *span,
+            }),
+            FlowOp::ConstructStruct {
+                dst,
+                definition,
+                fields,
+                span,
+            } => output.push(Instruction::ConstructStruct {
+                dst: self.registers.value(*dst),
+                definition: *definition,
+                fields: self.fields(fields),
+                span: *span,
+            }),
+            FlowOp::AllocateEntity {
+                dst,
+                definition,
+                fields,
+                lifecycle,
+                span,
+                ..
+            } => output.push(Instruction::AllocateEntity {
+                dst: self.registers.value(*dst),
+                definition: *definition,
+                fields: self.fields(fields),
+                lifecycle: self.registers.lifecycle(*lifecycle),
+                span: *span,
+            }),
+            FlowOp::EntityToLink { dst, entity, span } => {
+                output.push(Instruction::EntityToLink {
+                    dst: self.registers.value(*dst),
+                    entity: self.registers.value(*entity),
+                    span: *span,
+                });
+            }
+            FlowOp::ReadStructField {
+                dst,
+                base,
+                field,
+                span,
+            } => output.push(Instruction::ReadStructField {
+                dst: self.registers.value(*dst),
+                base: self.registers.value(*base),
+                field: *field,
+                span: *span,
+            }),
+            _ => self.entity_operation(operation, output),
+        }
+    }
+
+    fn entity_operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
+        match operation {
+            FlowOp::ReadEntityField {
+                dst,
+                entity,
+                field,
+                span,
+            } => self.read_entity(*dst, *entity, *field, *span, output),
+            FlowOp::WriteEntityField {
+                entity,
+                field,
+                value,
+                span,
+            } => self.write_entity(*entity, *field, *value, *span, output),
+            FlowOp::Call {
+                dst,
+                function,
+                arguments,
+                current_lifecycle,
+                span,
+            } => output.push(Instruction::Call {
+                dst: dst.map(|value| self.registers.value(value)),
+                function: *function,
+                arguments: arguments
+                    .iter()
+                    .map(|(parameter, value)| (*parameter, self.registers.value(*value)))
+                    .collect(),
+                current_lifecycle: self.registers.lifecycle(*current_lifecycle),
+                span: *span,
+            }),
+            FlowOp::Keep {
+                entity,
+                target,
+                span,
+            } => output.push(Instruction::KeepEntity {
+                entity: self.registers.value(*entity),
+                lifecycle: self.registers.lifecycle(*target),
+                span: *span,
+            }),
+            FlowOp::Retire { entity, span } => output.push(Instruction::RetireEntity {
+                entity: self.registers.value(*entity),
+                span: *span,
+            }),
+            FlowOp::ReadUncheckedLinkField { .. } => {
+                unreachable!("verified flow cannot contain an unchecked link read")
+            }
+            FlowOp::ConstInt { .. }
+            | FlowOp::ConstBool { .. }
+            | FlowOp::ConstNoneLink { .. }
+            | FlowOp::BeginLifecycle { .. }
+            | FlowOp::CopyLocal { .. }
+            | FlowOp::StoreLocal { .. }
+            | FlowOp::UnaryInt { .. }
+            | FlowOp::BinaryInt { .. }
+            | FlowOp::Not { .. }
+            | FlowOp::Compare { .. }
+            | FlowOp::Phi { .. }
+            | FlowOp::ConstructStruct { .. }
+            | FlowOp::AllocateEntity { .. }
+            | FlowOp::EntityToLink { .. }
+            | FlowOp::ReadStructField { .. } => {
+                unreachable!("non-entity flow operation handled before entity_operation")
+            }
+        }
+    }
+
+    fn fields(
+        &self,
+        fields: &[(keld_semantics::FieldId, ValueId)],
+    ) -> Vec<(keld_semantics::FieldId, Register)> {
+        fields
+            .iter()
+            .map(|(field, value)| (*field, self.registers.value(*value)))
+            .collect()
+    }
+
+    fn read_entity(
+        &mut self,
+        dst: ValueId,
+        entity: ValueId,
+        field: keld_semantics::FieldId,
+        span: keld_source::Span,
+        output: &mut Vec<Instruction>,
+    ) {
+        let view = self.new_view();
+        output.push(Instruction::OpenView {
+            view,
+            entity: self.registers.value(entity),
+            mode: ViewMode::Read,
+            span,
+        });
+        output.push(Instruction::ReadField {
+            dst: self.registers.value(dst),
+            view,
+            field,
+            span,
+        });
+        output.push(Instruction::CloseView { view, span });
+    }
+
+    fn write_entity(
+        &mut self,
+        entity: ValueId,
+        field: keld_semantics::FieldId,
+        value: ValueId,
+        span: keld_source::Span,
+        output: &mut Vec<Instruction>,
+    ) {
+        let view = self.new_view();
+        output.push(Instruction::OpenView {
+            view,
+            entity: self.registers.value(entity),
+            mode: ViewMode::Edit,
+            span,
+        });
+        output.push(Instruction::WriteField {
+            view,
+            field,
+            value: self.registers.value(value),
+            span,
+        });
+        output.push(Instruction::CloseView { view, span });
+    }
+
+    fn new_view(&mut self) -> ViewId {
+        let view = ViewId(self.next_view);
+        self.next_view = self.next_view.saturating_add(1);
+        view
+    }
+
+    fn terminator(
+        &self,
+        block: keld_flow::BlockId,
+        terminator: &keld_flow::Terminator,
+        output: &mut Vec<Instruction>,
+    ) -> Terminator {
+        match terminator {
+            keld_flow::Terminator::Goto(target) => Terminator::Goto(IrBlockId(target.0)),
+            keld_flow::Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            } => Terminator::Branch {
+                condition: self.registers.value(*condition),
+                then_block: IrBlockId(then_block.0),
+                else_block: IrBlockId(else_block.0),
+            },
+            keld_flow::Terminator::BranchIdentity {
+                lhs,
+                rhs,
+                equal,
+                not_equal,
+            } => {
+                let condition = self.registers.identity_conditions[&block];
+                output.push(Instruction::Compare {
+                    dst: condition,
+                    op: CompareOp::Eq,
+                    lhs: self.registers.value(*lhs),
+                    rhs: self.registers.value(*rhs),
+                    span: self.function.span,
+                });
+                Terminator::Branch {
+                    condition,
+                    then_block: IrBlockId(equal.0),
+                    else_block: IrBlockId(not_equal.0),
+                }
+            }
+            keld_flow::Terminator::ResolveLink {
+                link,
+                bind_local,
+                live,
+                absent,
+                span,
+            } => Terminator::ResolveLink {
+                link: self.registers.value(*link),
+                live_value: self.registers.local(*bind_local),
+                live: IrBlockId(live.0),
+                absent: IrBlockId(absent.0),
+                span: *span,
+            },
+            keld_flow::Terminator::ExitScopes { lifecycles, next } => {
+                for lifecycle in lifecycles {
+                    output.push(Instruction::EndLifecycle {
+                        lifecycle: self.registers.lifecycle(*lifecycle),
+                        span: self.function.span,
+                    });
+                }
+                match next {
+                    ExitTarget::Goto(target) => Terminator::Goto(IrBlockId(target.0)),
+                    ExitTarget::Return(value) => {
+                        Terminator::Return(value.map(|value| self.registers.value(value)))
+                    }
+                }
+            }
+            keld_flow::Terminator::Return(value) => {
+                Terminator::Return(value.map(|value| self.registers.value(value)))
+            }
+            keld_flow::Terminator::Unreachable => Terminator::Unreachable,
+        }
+    }
+}
+
+fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
+    match types.kind(ty) {
+        TypeKind::Unit => IrType::Unit,
+        TypeKind::Bool => IrType::Bool,
+        TypeKind::Int => IrType::Int,
+        TypeKind::Struct(definition) => IrType::Struct(*definition),
+        TypeKind::EntityRef(definition) => IrType::Entity(*definition),
+        TypeKind::Link { entity, optional } => IrType::Link {
+            entity: *entity,
+            optional: *optional,
+        },
+        TypeKind::Optional(_) | TypeKind::Error => {
+            unreachable!("verified bootstrap flow contains only executable types")
+        }
+    }
+}

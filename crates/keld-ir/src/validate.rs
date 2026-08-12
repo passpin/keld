@@ -1,0 +1,1241 @@
+use crate::{
+    Function, Instruction, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module, Register,
+    Terminator, ViewId, ViewMode,
+};
+use keld_semantics::{CompareOp, DefId, FieldId};
+use keld_source::{Diagnostic, DiagnosticCode, Span};
+use std::collections::{BTreeMap, BTreeSet};
+
+const VIEW_ERROR: &str = "KLD9001";
+const REGISTER_ERROR: &str = "KLD9002";
+const CFG_ERROR: &str = "KLD9003";
+const LIFECYCLE_ERROR: &str = "KLD9004";
+const MODULE_ERROR: &str = "KLD9005";
+
+#[must_use]
+pub fn validate(module: &Module) -> Vec<Diagnostic> {
+    let mut sink = DiagnosticSink::default();
+    validate_module_shape(module, &mut sink);
+    for function in &module.functions {
+        FunctionValidator::new(module, function, &mut sink).validate();
+    }
+    sink.finish()
+}
+
+#[derive(Default)]
+struct DiagnosticSink {
+    diagnostics: Vec<Diagnostic>,
+    seen: BTreeSet<(&'static str, keld_source::SourceId, u32, u32)>,
+}
+
+impl DiagnosticSink {
+    fn error(&mut self, code: &'static str, span: Span, message: impl Into<String>) {
+        let key = (code, span.source(), span.start().0, span.end().0);
+        if self.seen.insert(key) {
+            let mut diagnostic = Diagnostic::error(DiagnosticCode(code), span, message);
+            diagnostic.help = Some("rebuild executable IR from verified Keld flow".to_owned());
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    fn finish(mut self) -> Vec<Diagnostic> {
+        keld_source::sort_diagnostics(&mut self.diagnostics);
+        self.diagnostics
+    }
+}
+
+fn validate_module_shape(module: &Module, sink: &mut DiagnosticSink) {
+    for (index, definition) in module.definitions.iter().enumerate() {
+        if definition.id.0 as usize != index {
+            sink.error(
+                MODULE_ERROR,
+                module_span(module),
+                "definition IDs must be contiguous and source ordered",
+            );
+        }
+        let mut fields = BTreeSet::new();
+        for (field, ty) in &definition.fields {
+            if !fields.insert(*field) {
+                sink.error(
+                    MODULE_ERROR,
+                    module_span(module),
+                    "definition contains a duplicate field ID",
+                );
+            }
+            validate_named_type(module, ty, module_span(module), sink);
+        }
+    }
+    for (index, function) in module.functions.iter().enumerate() {
+        if function.id.0 as usize != index {
+            sink.error(
+                MODULE_ERROR,
+                function.span,
+                "function IDs must be contiguous and source ordered",
+            );
+        }
+    }
+    let Some(main) = module.functions.get(module.main.0 as usize) else {
+        sink.error(
+            MODULE_ERROR,
+            module_span(module),
+            "module main function does not exist",
+        );
+        return;
+    };
+    if main.return_type != IrType::Int {
+        sink.error(MODULE_ERROR, main.span, "main must return Int");
+    }
+}
+
+fn validate_named_type(module: &Module, ty: &IrType, span: Span, sink: &mut DiagnosticSink) {
+    let (definition, expected_kind) = match ty {
+        IrType::Struct(definition) => (*definition, IrDefinitionKind::Struct),
+        IrType::Entity(definition)
+        | IrType::Link {
+            entity: definition, ..
+        } => (*definition, IrDefinitionKind::Entity),
+        IrType::Unit | IrType::Bool | IrType::Int | IrType::Lifecycle => return,
+    };
+    if module
+        .definitions
+        .get(definition.0 as usize)
+        .is_none_or(|candidate| candidate.id != definition || candidate.kind != expected_kind)
+    {
+        sink.error(
+            REGISTER_ERROR,
+            span,
+            "IR type references an unknown or incompatible definition",
+        );
+    }
+}
+
+fn module_span(module: &Module) -> Span {
+    module.functions.first().map_or_else(
+        || Span::new(keld_source::SourceId(0), 0, 0).expect("empty fallback span is valid"),
+        |function| function.span,
+    )
+}
+
+struct FunctionValidator<'module, 'sink> {
+    module: &'module Module,
+    function: &'module Function,
+    sink: &'sink mut DiagnosticSink,
+    predecessors: Vec<Vec<IrBlockId>>,
+    incoming_definitions: Vec<BTreeSet<Register>>,
+    outgoing_definitions: Vec<BTreeSet<Register>>,
+    incoming_lifecycles: Vec<BTreeSet<Register>>,
+}
+
+impl<'module, 'sink> FunctionValidator<'module, 'sink> {
+    fn new(
+        module: &'module Module,
+        function: &'module Function,
+        sink: &'sink mut DiagnosticSink,
+    ) -> Self {
+        let block_count = function.blocks.len();
+        Self {
+            module,
+            function,
+            sink,
+            predecessors: vec![Vec::new(); block_count],
+            incoming_definitions: vec![BTreeSet::new(); block_count],
+            outgoing_definitions: vec![BTreeSet::new(); block_count],
+            incoming_lifecycles: vec![BTreeSet::new(); block_count],
+        }
+    }
+
+    fn validate(&mut self) {
+        self.validate_shape();
+        if self.function.blocks.is_empty()
+            || self.function.entry.0 as usize >= self.function.blocks.len()
+        {
+            return;
+        }
+        self.build_predecessors();
+        self.compute_definition_dataflow();
+        self.compute_lifecycle_dataflow();
+        for block in &self.function.blocks {
+            self.validate_block(block.id);
+        }
+    }
+
+    fn validate_shape(&mut self) {
+        if self.function.blocks.is_empty() {
+            self.sink.error(
+                CFG_ERROR,
+                self.function.span,
+                "function must contain an entry block",
+            );
+        }
+        if self.function.entry.0 as usize >= self.function.blocks.len() {
+            self.sink.error(
+                CFG_ERROR,
+                self.function.span,
+                "function entry block is outside the block table",
+            );
+        }
+        for (index, block) in self.function.blocks.iter().enumerate() {
+            if block.id.0 as usize != index {
+                self.sink.error(
+                    CFG_ERROR,
+                    self.function.span,
+                    "block IDs must be contiguous",
+                );
+            }
+        }
+        for ty in &self.function.register_types {
+            validate_named_type(self.module, ty, self.function.span, self.sink);
+        }
+        validate_named_type(
+            self.module,
+            &self.function.return_type,
+            self.function.span,
+            self.sink,
+        );
+        let mut predefined = BTreeSet::new();
+        for parameter in &self.function.parameters {
+            self.check_register(*parameter, self.function.span);
+            if !predefined.insert(*parameter) {
+                self.sink.error(
+                    REGISTER_ERROR,
+                    self.function.span,
+                    "function parameter register is duplicated",
+                );
+            }
+        }
+        self.expect_type(
+            self.function.current_lifecycle,
+            &IrType::Lifecycle,
+            self.function.span,
+        );
+        if !predefined.insert(self.function.current_lifecycle) {
+            self.sink.error(
+                REGISTER_ERROR,
+                self.function.span,
+                "current lifecycle register overlaps a source parameter",
+            );
+        }
+        self.validate_unique_definitions(&predefined);
+    }
+
+    fn validate_unique_definitions(&mut self, predefined: &BTreeSet<Register>) {
+        let mut defined = predefined.clone();
+        for block in &self.function.blocks {
+            for instruction in &block.instructions {
+                if let Some(destination) = instruction_destination(instruction)
+                    && !defined.insert(destination)
+                {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        instruction_span(instruction),
+                        "register is defined more than once",
+                    );
+                }
+            }
+            if let Terminator::ResolveLink {
+                live_value, span, ..
+            } = block.terminator
+                && !defined.insert(live_value)
+            {
+                self.sink.error(
+                    REGISTER_ERROR,
+                    span,
+                    "link resolution destination is defined more than once",
+                );
+            }
+        }
+    }
+
+    fn build_predecessors(&mut self) {
+        for block in &self.function.blocks {
+            for target in terminator_targets(&block.terminator) {
+                let Some(predecessors) = self.predecessors.get_mut(target.0 as usize) else {
+                    self.sink.error(
+                        CFG_ERROR,
+                        terminator_span(&block.terminator, self.function.span),
+                        "terminator targets a block outside the function",
+                    );
+                    continue;
+                };
+                predecessors.push(block.id);
+            }
+        }
+        for predecessors in &mut self.predecessors {
+            predecessors.sort_unstable();
+        }
+    }
+
+    fn compute_definition_dataflow(&mut self) {
+        let predefined = self
+            .function
+            .parameters
+            .iter()
+            .copied()
+            .chain(std::iter::once(self.function.current_lifecycle))
+            .collect::<BTreeSet<_>>();
+        let mut universe = predefined.clone();
+        for block in &self.function.blocks {
+            for instruction in &block.instructions {
+                if let Some(destination) = instruction_destination(instruction) {
+                    universe.insert(destination);
+                }
+            }
+            if let Terminator::ResolveLink { live_value, .. } = block.terminator {
+                universe.insert(live_value);
+            }
+        }
+        for block in &self.function.blocks {
+            self.incoming_definitions[block.id.0 as usize] = if block.id == self.function.entry {
+                predefined.clone()
+            } else {
+                universe.clone()
+            };
+            let mut outgoing = self.incoming_definitions[block.id.0 as usize].clone();
+            add_block_definitions(block, &mut outgoing);
+            self.outgoing_definitions[block.id.0 as usize] = outgoing;
+        }
+
+        let iteration_limit = self
+            .function
+            .blocks
+            .len()
+            .saturating_mul(self.function.register_types.len().saturating_add(1));
+        for _ in 0..=iteration_limit {
+            let mut changed = false;
+            for block in &self.function.blocks {
+                let index = block.id.0 as usize;
+                let incoming = if block.id == self.function.entry {
+                    predefined.clone()
+                } else {
+                    self.intersect_predecessor_definitions(block.id)
+                };
+                let mut outgoing = incoming.clone();
+                add_block_definitions(block, &mut outgoing);
+                changed |= incoming != self.incoming_definitions[index]
+                    || outgoing != self.outgoing_definitions[index];
+                self.incoming_definitions[index] = incoming;
+                self.outgoing_definitions[index] = outgoing;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn intersect_predecessor_definitions(&self, block: IrBlockId) -> BTreeSet<Register> {
+        let mut edges = self.predecessors[block.0 as usize]
+            .iter()
+            .map(|predecessor| {
+                let mut definitions = self.outgoing_definitions[predecessor.0 as usize].clone();
+                if let Terminator::ResolveLink {
+                    live_value, live, ..
+                } = self.function.blocks[predecessor.0 as usize].terminator
+                    && live == block
+                {
+                    definitions.insert(live_value);
+                }
+                definitions
+            });
+        let Some(first) = edges.next() else {
+            return BTreeSet::new();
+        };
+        edges.fold(first, |current, edge| {
+            current.intersection(&edge).copied().collect()
+        })
+    }
+
+    fn compute_lifecycle_dataflow(&mut self) {
+        let all_lifecycles = self
+            .function
+            .register_types
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| *ty == &IrType::Lifecycle)
+            .map(|(index, _)| Register(u32::try_from(index).expect("register index fits in u32")))
+            .collect::<BTreeSet<_>>();
+        let root = BTreeSet::from([self.function.current_lifecycle]);
+        let mut outgoing = vec![BTreeSet::new(); self.function.blocks.len()];
+        for block in &self.function.blocks {
+            self.incoming_lifecycles[block.id.0 as usize] = if block.id == self.function.entry {
+                root.clone()
+            } else {
+                all_lifecycles.clone()
+            };
+            outgoing[block.id.0 as usize] = transfer_lifecycles(
+                &self.incoming_lifecycles[block.id.0 as usize],
+                &block.instructions,
+            );
+        }
+        let iteration_limit = self
+            .function
+            .blocks
+            .len()
+            .saturating_mul(all_lifecycles.len().saturating_add(1));
+        for _ in 0..=iteration_limit {
+            let mut changed = false;
+            for block in &self.function.blocks {
+                let index = block.id.0 as usize;
+                let incoming = if block.id == self.function.entry {
+                    root.clone()
+                } else {
+                    intersect_sets(
+                        self.predecessors[index]
+                            .iter()
+                            .map(|predecessor| outgoing[predecessor.0 as usize].clone()),
+                    )
+                };
+                let next = transfer_lifecycles(&incoming, &block.instructions);
+                changed |= incoming != self.incoming_lifecycles[index] || next != outgoing[index];
+                self.incoming_lifecycles[index] = incoming;
+                outgoing[index] = next;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn validate_block(&mut self, block_id: IrBlockId) {
+        let block = &self.function.blocks[block_id.0 as usize];
+        let mut available = self.incoming_definitions[block_id.0 as usize].clone();
+        let mut active_lifecycles = self.incoming_lifecycles[block_id.0 as usize].clone();
+        let mut views = BTreeMap::<ViewId, (ViewMode, DefId)>::new();
+        let mut passed_phi_group = false;
+
+        self.validate_lifecycle_join(block_id);
+        for instruction in &block.instructions {
+            let span = instruction_span(instruction);
+            if matches!(instruction, Instruction::Phi { .. }) {
+                if passed_phi_group || block_id == self.function.entry {
+                    self.sink.error(
+                        CFG_ERROR,
+                        span,
+                        "Phi instructions must form the leading group of a non-entry block",
+                    );
+                }
+                self.validate_phi(block_id, instruction);
+            } else {
+                passed_phi_group = true;
+                for register in instruction_uses(instruction) {
+                    self.require_available(register, &available, span);
+                }
+            }
+
+            if is_structural(instruction) && !views.is_empty() {
+                self.sink.error(
+                    VIEW_ERROR,
+                    span,
+                    "structural operation cannot execute while a field view is open",
+                );
+            }
+            self.validate_instruction(instruction, &mut views, &mut active_lifecycles);
+            if let Some(destination) = instruction_destination(instruction) {
+                available.insert(destination);
+            }
+        }
+        let terminator_span = terminator_span(&block.terminator, self.function.span);
+        if !views.is_empty() {
+            self.sink.error(
+                VIEW_ERROR,
+                terminator_span,
+                "all field views must close before a terminator",
+            );
+        }
+        for register in terminator_uses(&block.terminator) {
+            self.require_available(register, &available, terminator_span);
+        }
+        self.validate_terminator(&block.terminator, &active_lifecycles);
+    }
+
+    fn validate_lifecycle_join(&mut self, block: IrBlockId) {
+        let predecessors = &self.predecessors[block.0 as usize];
+        let Some(first) = predecessors.first() else {
+            return;
+        };
+        let first_state = transfer_lifecycles(
+            &self.incoming_lifecycles[first.0 as usize],
+            &self.function.blocks[first.0 as usize].instructions,
+        );
+        if predecessors.iter().skip(1).any(|predecessor| {
+            transfer_lifecycles(
+                &self.incoming_lifecycles[predecessor.0 as usize],
+                &self.function.blocks[predecessor.0 as usize].instructions,
+            ) != first_state
+        }) {
+            self.sink.error(
+                LIFECYCLE_ERROR,
+                self.function.span,
+                "control-flow join has inconsistent active lifecycles",
+            );
+        }
+    }
+
+    fn validate_phi(&mut self, block: IrBlockId, instruction: &Instruction) {
+        let Instruction::Phi { dst, inputs, span } = instruction else {
+            return;
+        };
+        let expected = self.predecessors[block.0 as usize]
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let actual = inputs
+            .iter()
+            .map(|(predecessor, _)| *predecessor)
+            .collect::<BTreeSet<_>>();
+        if inputs.len() != expected.len() || actual != expected {
+            self.sink.error(
+                CFG_ERROR,
+                *span,
+                "Phi must have exactly one input from every predecessor",
+            );
+        }
+        let destination_type = self.register_type(*dst, *span).cloned();
+        for (predecessor, register) in inputs {
+            let Some(predecessor_block) = self.function.blocks.get(predecessor.0 as usize) else {
+                self.sink
+                    .error(CFG_ERROR, *span, "Phi references an unknown predecessor");
+                continue;
+            };
+            let mut edge_available = self.outgoing_definitions[predecessor.0 as usize].clone();
+            if let Terminator::ResolveLink {
+                live_value, live, ..
+            } = predecessor_block.terminator
+                && live == block
+            {
+                edge_available.insert(live_value);
+            }
+            self.require_available(*register, &edge_available, *span);
+            if let Some(destination_type) = &destination_type
+                && self.register_type(*register, *span) != Some(destination_type)
+            {
+                self.sink.error(
+                    REGISTER_ERROR,
+                    *span,
+                    "Phi input type does not match its destination",
+                );
+            }
+        }
+    }
+
+    fn validate_instruction(
+        &mut self,
+        instruction: &Instruction,
+        views: &mut BTreeMap<ViewId, (ViewMode, DefId)>,
+        active_lifecycles: &mut BTreeSet<Register>,
+    ) {
+        let span = instruction_span(instruction);
+        match instruction {
+            Instruction::ConstInt { dst, .. } => self.expect_type(*dst, &IrType::Int, span),
+            Instruction::ConstBool { dst, .. } => self.expect_type(*dst, &IrType::Bool, span),
+            Instruction::ConstNoneLink { dst, entity, .. } => self.expect_type(
+                *dst,
+                &IrType::Link {
+                    entity: *entity,
+                    optional: true,
+                },
+                span,
+            ),
+            Instruction::Copy { dst, src, .. } => self.expect_same_type(*dst, *src, span),
+            Instruction::CheckedUnaryInt { dst, src, .. } => {
+                self.expect_type(*dst, &IrType::Int, span);
+                self.expect_type(*src, &IrType::Int, span);
+            }
+            Instruction::CheckedBinaryInt { dst, lhs, rhs, .. } => {
+                self.expect_type(*dst, &IrType::Int, span);
+                self.expect_type(*lhs, &IrType::Int, span);
+                self.expect_type(*rhs, &IrType::Int, span);
+            }
+            Instruction::Not { dst, src, .. } => {
+                self.expect_type(*dst, &IrType::Bool, span);
+                self.expect_type(*src, &IrType::Bool, span);
+            }
+            Instruction::Compare {
+                dst, op, lhs, rhs, ..
+            } => self.validate_compare(*dst, *op, *lhs, *rhs, span),
+            Instruction::Phi { dst, .. } => {
+                self.check_register(*dst, span);
+            }
+            Instruction::ConstructStruct {
+                dst,
+                definition,
+                fields,
+                ..
+            } => {
+                self.expect_type(*dst, &IrType::Struct(*definition), span);
+                self.validate_fields(*definition, IrDefinitionKind::Struct, fields, span);
+            }
+            Instruction::ReadStructField {
+                dst, base, field, ..
+            } => self.validate_struct_read(*dst, *base, *field, span),
+            _ => self.validate_effect_instruction(instruction, views, active_lifecycles),
+        }
+    }
+
+    fn validate_effect_instruction(
+        &mut self,
+        instruction: &Instruction,
+        views: &mut BTreeMap<ViewId, (ViewMode, DefId)>,
+        active_lifecycles: &mut BTreeSet<Register>,
+    ) {
+        let span = instruction_span(instruction);
+        match instruction {
+            Instruction::BeginLifecycle { dst, parent, .. } => {
+                self.expect_type(*dst, &IrType::Lifecycle, span);
+                self.expect_type(*parent, &IrType::Lifecycle, span);
+                if !active_lifecycles.contains(parent) || active_lifecycles.contains(dst) {
+                    self.sink.error(
+                        LIFECYCLE_ERROR,
+                        span,
+                        "lifecycle begin requires a live parent and an inactive destination",
+                    );
+                }
+                active_lifecycles.insert(*dst);
+            }
+            Instruction::EndLifecycle { lifecycle, .. } => {
+                self.expect_type(*lifecycle, &IrType::Lifecycle, span);
+                if *lifecycle == self.function.current_lifecycle
+                    || !active_lifecycles.remove(lifecycle)
+                {
+                    self.sink.error(
+                        LIFECYCLE_ERROR,
+                        span,
+                        "only an active non-root lifecycle can end",
+                    );
+                }
+            }
+            Instruction::AllocateEntity {
+                dst,
+                definition,
+                fields,
+                lifecycle,
+                ..
+            } => {
+                self.expect_type(*dst, &IrType::Entity(*definition), span);
+                self.require_active_lifecycle(*lifecycle, active_lifecycles, span);
+                self.validate_fields(*definition, IrDefinitionKind::Entity, fields, span);
+            }
+            Instruction::EntityToLink { dst, entity, .. } => {
+                let Some(IrType::Entity(definition)) = self.register_type(*entity, span).cloned()
+                else {
+                    self.sink
+                        .error(REGISTER_ERROR, span, "link conversion requires an entity");
+                    return;
+                };
+                match self.register_type(*dst, span) {
+                    Some(IrType::Link { entity, .. }) if *entity == definition => {}
+                    _ => self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "link result type does not match the entity",
+                    ),
+                }
+            }
+            _ => self.validate_view_instruction(instruction, views, active_lifecycles),
+        }
+    }
+
+    fn validate_view_instruction(
+        &mut self,
+        instruction: &Instruction,
+        views: &mut BTreeMap<ViewId, (ViewMode, DefId)>,
+        active_lifecycles: &BTreeSet<Register>,
+    ) {
+        let span = instruction_span(instruction);
+        match instruction {
+            Instruction::OpenView {
+                view, entity, mode, ..
+            } => self.open_view(*view, *entity, *mode, span, views),
+            Instruction::ReadField {
+                dst, view, field, ..
+            } => {
+                self.validate_view_read(*dst, *view, *field, span, views);
+            }
+            Instruction::WriteField {
+                view, field, value, ..
+            } => self.validate_view_write(*view, *field, *value, span, views),
+            Instruction::CloseView { view, .. } => {
+                if views.remove(view).is_none() {
+                    self.sink
+                        .error(VIEW_ERROR, span, "cannot close an unknown field view");
+                }
+            }
+            Instruction::KeepEntity {
+                entity, lifecycle, ..
+            } => {
+                self.expect_entity(*entity, span);
+                self.require_active_lifecycle(*lifecycle, active_lifecycles, span);
+            }
+            Instruction::RetireEntity { entity, .. } => self.expect_entity(*entity, span),
+            Instruction::Call {
+                dst,
+                function,
+                arguments,
+                current_lifecycle,
+                ..
+            } => self.validate_call(
+                *dst,
+                *function,
+                arguments,
+                *current_lifecycle,
+                active_lifecycles,
+                span,
+            ),
+            Instruction::ConstInt { .. }
+            | Instruction::ConstBool { .. }
+            | Instruction::ConstNoneLink { .. }
+            | Instruction::Copy { .. }
+            | Instruction::CheckedUnaryInt { .. }
+            | Instruction::CheckedBinaryInt { .. }
+            | Instruction::Not { .. }
+            | Instruction::Compare { .. }
+            | Instruction::Phi { .. }
+            | Instruction::ConstructStruct { .. }
+            | Instruction::ReadStructField { .. }
+            | Instruction::BeginLifecycle { .. }
+            | Instruction::EndLifecycle { .. }
+            | Instruction::AllocateEntity { .. }
+            | Instruction::EntityToLink { .. } => {
+                unreachable!("instruction handled before validate_view_instruction")
+            }
+        }
+    }
+
+    fn validate_compare(
+        &mut self,
+        dst: Register,
+        op: CompareOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) {
+        self.expect_type(dst, &IrType::Bool, span);
+        self.expect_same_type(lhs, rhs, span);
+        if matches!(
+            op,
+            CompareOp::Less | CompareOp::LessEq | CompareOp::Greater | CompareOp::GreaterEq
+        ) {
+            self.expect_type(lhs, &IrType::Int, span);
+        } else if !matches!(
+            self.register_type(lhs, span),
+            Some(IrType::Int | IrType::Bool | IrType::Entity(_))
+        ) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "equality comparison requires Int, Bool, or entity operands",
+            );
+        }
+    }
+
+    fn validate_fields(
+        &mut self,
+        definition: DefId,
+        kind: IrDefinitionKind,
+        fields: &[(FieldId, Register)],
+        span: Span,
+    ) {
+        let Some(definition) = self.definition(definition, kind, span).cloned() else {
+            return;
+        };
+        let expected = definition
+            .fields
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        let actual = fields
+            .iter()
+            .map(|(field, _)| *field)
+            .collect::<BTreeSet<_>>();
+        if actual.len() != fields.len()
+            || actual != expected.keys().copied().collect::<BTreeSet<_>>()
+        {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "constructor must supply every declared field exactly once",
+            );
+        }
+        for (field, register) in fields {
+            if let Some(expected) = expected.get(field) {
+                self.expect_type(*register, expected, span);
+            }
+        }
+    }
+
+    fn validate_struct_read(&mut self, dst: Register, base: Register, field: FieldId, span: Span) {
+        let Some(IrType::Struct(definition)) = self.register_type(base, span).cloned() else {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "struct field read requires a struct base",
+            );
+            return;
+        };
+        if let Some(field_type) = self.field_type(definition, field, span).cloned() {
+            self.expect_type(dst, &field_type, span);
+        }
+    }
+
+    fn open_view(
+        &mut self,
+        view: ViewId,
+        entity: Register,
+        mode: ViewMode,
+        span: Span,
+        views: &mut BTreeMap<ViewId, (ViewMode, DefId)>,
+    ) {
+        let Some(IrType::Entity(definition)) = self.register_type(entity, span).cloned() else {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "field view requires an entity register",
+            );
+            return;
+        };
+        if views.insert(view, (mode, definition)).is_some() {
+            self.sink
+                .error(VIEW_ERROR, span, "field view ID is already open");
+        }
+    }
+
+    fn validate_view_read(
+        &mut self,
+        dst: Register,
+        view: ViewId,
+        field: FieldId,
+        span: Span,
+        views: &BTreeMap<ViewId, (ViewMode, DefId)>,
+    ) {
+        let Some((_, definition)) = views.get(&view) else {
+            self.sink
+                .error(VIEW_ERROR, span, "read uses an unknown field view");
+            return;
+        };
+        if let Some(field_type) = self.field_type(*definition, field, span).cloned() {
+            self.expect_type(dst, &field_type, span);
+        }
+    }
+
+    fn validate_view_write(
+        &mut self,
+        view: ViewId,
+        field: FieldId,
+        value: Register,
+        span: Span,
+        views: &BTreeMap<ViewId, (ViewMode, DefId)>,
+    ) {
+        let Some((mode, definition)) = views.get(&view) else {
+            self.sink
+                .error(VIEW_ERROR, span, "write uses an unknown field view");
+            return;
+        };
+        if *mode != ViewMode::Edit {
+            self.sink
+                .error(VIEW_ERROR, span, "writing requires an edit view");
+        }
+        if let Some(field_type) = self.field_type(*definition, field, span).cloned() {
+            self.expect_type(value, &field_type, span);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_call(
+        &mut self,
+        dst: Option<Register>,
+        function: keld_semantics::FunctionId,
+        arguments: &[(keld_semantics::ParameterIndex, Register)],
+        current_lifecycle: Register,
+        active_lifecycles: &BTreeSet<Register>,
+        span: Span,
+    ) {
+        self.require_active_lifecycle(current_lifecycle, active_lifecycles, span);
+        let Some(callee) = self.module.functions.get(function.0 as usize).cloned() else {
+            self.sink
+                .error(REGISTER_ERROR, span, "call targets an unknown function");
+            return;
+        };
+        let actual = arguments
+            .iter()
+            .map(|(parameter, _)| parameter.0)
+            .collect::<BTreeSet<_>>();
+        let expected = (0..callee.parameters.len())
+            .map(|index| u32::try_from(index).expect("parameter index fits in u32"))
+            .collect::<BTreeSet<_>>();
+        if actual.len() != arguments.len() || actual != expected {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "call must supply every parameter exactly once",
+            );
+        }
+        for (parameter, argument) in arguments {
+            if let Some(callee_register) = callee.parameters.get(parameter.0 as usize)
+                && let Some(expected_type) = callee.register_types.get(callee_register.0 as usize)
+            {
+                self.expect_type(*argument, expected_type, span);
+            }
+        }
+        match (&callee.return_type, dst) {
+            (IrType::Unit, None) => {}
+            (IrType::Unit, Some(_)) | (_, None) => self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "call result presence does not match the callee return type",
+            ),
+            (return_type, Some(destination)) => self.expect_type(destination, return_type, span),
+        }
+    }
+
+    fn validate_terminator(
+        &mut self,
+        terminator: &Terminator,
+        active_lifecycles: &BTreeSet<Register>,
+    ) {
+        let span = terminator_span(terminator, self.function.span);
+        match terminator {
+            Terminator::Goto(_) | Terminator::Unreachable | Terminator::Fault { .. } => {}
+            Terminator::Branch { condition, .. } => {
+                self.expect_type(*condition, &IrType::Bool, span);
+            }
+            Terminator::ResolveLink {
+                link, live_value, ..
+            } => {
+                let Some(IrType::Link { entity, .. }) = self.register_type(*link, span).cloned()
+                else {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "link resolution requires a link register",
+                    );
+                    return;
+                };
+                self.expect_type(*live_value, &IrType::Entity(entity), span);
+            }
+            Terminator::Return(value) => match (&self.function.return_type, value) {
+                (IrType::Unit, None) => {}
+                (IrType::Unit, Some(_)) | (_, None) => self.sink.error(
+                    REGISTER_ERROR,
+                    span,
+                    "return value presence does not match the function return type",
+                ),
+                (return_type, Some(value)) => self.expect_type(*value, return_type, span),
+            },
+        }
+        if matches!(terminator, Terminator::Return(_))
+            && active_lifecycles != &BTreeSet::from([self.function.current_lifecycle])
+        {
+            self.sink.error(
+                LIFECYCLE_ERROR,
+                span,
+                "function return must end every explicit lifecycle",
+            );
+        }
+    }
+
+    fn definition(
+        &mut self,
+        definition: DefId,
+        expected_kind: IrDefinitionKind,
+        span: Span,
+    ) -> Option<&IrDefinition> {
+        let candidate = self.module.definitions.get(definition.0 as usize);
+        if candidate
+            .is_none_or(|candidate| candidate.id != definition || candidate.kind != expected_kind)
+        {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "operation references an unknown or incompatible definition",
+            );
+            None
+        } else {
+            candidate
+        }
+    }
+
+    fn field_type(&mut self, definition: DefId, field: FieldId, span: Span) -> Option<&IrType> {
+        let Some(definition) = self.module.definitions.get(definition.0 as usize) else {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "field owner definition does not exist",
+            );
+            return None;
+        };
+        let field_type = definition
+            .fields
+            .iter()
+            .find_map(|(candidate, ty)| (*candidate == field).then_some(ty));
+        if field_type.is_none() {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "field ID does not exist on this definition",
+            );
+        }
+        field_type
+    }
+
+    fn require_available(
+        &mut self,
+        register: Register,
+        available: &BTreeSet<Register>,
+        span: Span,
+    ) {
+        self.check_register(register, span);
+        if !available.contains(&register) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "register use is not dominated by its definition",
+            );
+        }
+    }
+
+    fn check_register(&mut self, register: Register, span: Span) {
+        if register.0 as usize >= self.function.register_types.len() {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "register is outside the contiguous type table",
+            );
+        }
+    }
+
+    fn register_type(&self, register: Register, _span: Span) -> Option<&IrType> {
+        self.function.register_types.get(register.0 as usize)
+    }
+
+    fn expect_type(&mut self, register: Register, expected: &IrType, span: Span) {
+        self.check_register(register, span);
+        if self.register_type(register, span) != Some(expected) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "register type does not match the operation",
+            );
+        }
+    }
+
+    fn expect_same_type(&mut self, lhs: Register, rhs: Register, span: Span) {
+        self.check_register(lhs, span);
+        self.check_register(rhs, span);
+        if self.register_type(lhs, span) != self.register_type(rhs, span) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "operation registers have incompatible types",
+            );
+        }
+    }
+
+    fn expect_entity(&mut self, register: Register, span: Span) {
+        self.check_register(register, span);
+        if !matches!(self.register_type(register, span), Some(IrType::Entity(_))) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "operation requires an entity register",
+            );
+        }
+    }
+
+    fn require_active_lifecycle(
+        &mut self,
+        lifecycle: Register,
+        active: &BTreeSet<Register>,
+        span: Span,
+    ) {
+        self.expect_type(lifecycle, &IrType::Lifecycle, span);
+        if !active.contains(&lifecycle) {
+            self.sink.error(
+                LIFECYCLE_ERROR,
+                span,
+                "operation requires an active lifecycle",
+            );
+        }
+    }
+}
+
+fn add_block_definitions(block: &crate::IrBlock, definitions: &mut BTreeSet<Register>) {
+    for instruction in &block.instructions {
+        if let Some(destination) = instruction_destination(instruction) {
+            definitions.insert(destination);
+        }
+    }
+}
+
+fn transfer_lifecycles(
+    incoming: &BTreeSet<Register>,
+    instructions: &[Instruction],
+) -> BTreeSet<Register> {
+    let mut active = incoming.clone();
+    for instruction in instructions {
+        match instruction {
+            Instruction::BeginLifecycle { dst, .. } => {
+                active.insert(*dst);
+            }
+            Instruction::EndLifecycle { lifecycle, .. } => {
+                active.remove(lifecycle);
+            }
+            _ => {}
+        }
+    }
+    active
+}
+
+fn intersect_sets(mut sets: impl Iterator<Item = BTreeSet<Register>>) -> BTreeSet<Register> {
+    let Some(first) = sets.next() else {
+        return BTreeSet::new();
+    };
+    sets.fold(first, |current, next| {
+        current.intersection(&next).copied().collect()
+    })
+}
+
+fn instruction_destination(instruction: &Instruction) -> Option<Register> {
+    match instruction {
+        Instruction::ConstInt { dst, .. }
+        | Instruction::ConstBool { dst, .. }
+        | Instruction::ConstNoneLink { dst, .. }
+        | Instruction::Copy { dst, .. }
+        | Instruction::CheckedUnaryInt { dst, .. }
+        | Instruction::CheckedBinaryInt { dst, .. }
+        | Instruction::Not { dst, .. }
+        | Instruction::Compare { dst, .. }
+        | Instruction::Phi { dst, .. }
+        | Instruction::ConstructStruct { dst, .. }
+        | Instruction::ReadStructField { dst, .. }
+        | Instruction::BeginLifecycle { dst, .. }
+        | Instruction::AllocateEntity { dst, .. }
+        | Instruction::EntityToLink { dst, .. }
+        | Instruction::ReadField { dst, .. } => Some(*dst),
+        Instruction::Call { dst, .. } => *dst,
+        Instruction::EndLifecycle { .. }
+        | Instruction::OpenView { .. }
+        | Instruction::WriteField { .. }
+        | Instruction::CloseView { .. }
+        | Instruction::KeepEntity { .. }
+        | Instruction::RetireEntity { .. } => None,
+    }
+}
+
+fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
+    match instruction {
+        Instruction::ConstInt { .. }
+        | Instruction::ConstBool { .. }
+        | Instruction::ConstNoneLink { .. }
+        | Instruction::Phi { .. }
+        | Instruction::ReadField { .. }
+        | Instruction::CloseView { .. } => Vec::new(),
+        Instruction::Copy { src, .. }
+        | Instruction::CheckedUnaryInt { src, .. }
+        | Instruction::Not { src, .. } => vec![*src],
+        Instruction::CheckedBinaryInt { lhs, rhs, .. } | Instruction::Compare { lhs, rhs, .. } => {
+            vec![*lhs, *rhs]
+        }
+        Instruction::ConstructStruct { fields, .. } => {
+            fields.iter().map(|(_, register)| *register).collect()
+        }
+        Instruction::ReadStructField { base, .. } => vec![*base],
+        Instruction::BeginLifecycle { parent, .. } => vec![*parent],
+        Instruction::EndLifecycle { lifecycle, .. } => vec![*lifecycle],
+        Instruction::AllocateEntity {
+            fields, lifecycle, ..
+        } => fields
+            .iter()
+            .map(|(_, register)| *register)
+            .chain(std::iter::once(*lifecycle))
+            .collect(),
+        Instruction::EntityToLink { entity, .. }
+        | Instruction::OpenView { entity, .. }
+        | Instruction::RetireEntity { entity, .. } => vec![*entity],
+        Instruction::WriteField { value, .. } => vec![*value],
+        Instruction::KeepEntity {
+            entity, lifecycle, ..
+        } => vec![*entity, *lifecycle],
+        Instruction::Call {
+            arguments,
+            current_lifecycle,
+            ..
+        } => arguments
+            .iter()
+            .map(|(_, register)| *register)
+            .chain(std::iter::once(*current_lifecycle))
+            .collect(),
+    }
+}
+
+fn terminator_uses(terminator: &Terminator) -> Vec<Register> {
+    match terminator {
+        Terminator::Branch { condition, .. } => vec![*condition],
+        Terminator::ResolveLink { link, .. } => vec![*link],
+        Terminator::Return(Some(value)) => vec![*value],
+        Terminator::Goto(_)
+        | Terminator::Return(None)
+        | Terminator::Fault { .. }
+        | Terminator::Unreachable => Vec::new(),
+    }
+}
+
+fn is_structural(instruction: &Instruction) -> bool {
+    matches!(
+        instruction,
+        Instruction::BeginLifecycle { .. }
+            | Instruction::EndLifecycle { .. }
+            | Instruction::AllocateEntity { .. }
+            | Instruction::KeepEntity { .. }
+            | Instruction::RetireEntity { .. }
+            | Instruction::Call { .. }
+    )
+}
+
+fn terminator_targets(terminator: &Terminator) -> Vec<IrBlockId> {
+    match terminator {
+        Terminator::Goto(block) => vec![*block],
+        Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } => vec![*then_block, *else_block],
+        Terminator::ResolveLink { live, absent, .. } => vec![*live, *absent],
+        Terminator::Return(_) | Terminator::Fault { .. } | Terminator::Unreachable => Vec::new(),
+    }
+}
+
+fn instruction_span(instruction: &Instruction) -> Span {
+    match instruction {
+        Instruction::ConstInt { span, .. }
+        | Instruction::ConstBool { span, .. }
+        | Instruction::ConstNoneLink { span, .. }
+        | Instruction::Copy { span, .. }
+        | Instruction::CheckedUnaryInt { span, .. }
+        | Instruction::CheckedBinaryInt { span, .. }
+        | Instruction::Not { span, .. }
+        | Instruction::Compare { span, .. }
+        | Instruction::Phi { span, .. }
+        | Instruction::ConstructStruct { span, .. }
+        | Instruction::ReadStructField { span, .. }
+        | Instruction::BeginLifecycle { span, .. }
+        | Instruction::EndLifecycle { span, .. }
+        | Instruction::AllocateEntity { span, .. }
+        | Instruction::EntityToLink { span, .. }
+        | Instruction::OpenView { span, .. }
+        | Instruction::ReadField { span, .. }
+        | Instruction::WriteField { span, .. }
+        | Instruction::CloseView { span, .. }
+        | Instruction::KeepEntity { span, .. }
+        | Instruction::RetireEntity { span, .. }
+        | Instruction::Call { span, .. } => *span,
+    }
+}
+
+fn terminator_span(terminator: &Terminator, fallback: Span) -> Span {
+    match terminator {
+        Terminator::ResolveLink { span, .. } | Terminator::Fault { span, .. } => *span,
+        Terminator::Goto(_)
+        | Terminator::Branch { .. }
+        | Terminator::Return(_)
+        | Terminator::Unreachable => fallback,
+    }
+}
