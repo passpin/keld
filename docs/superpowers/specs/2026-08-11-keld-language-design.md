@@ -873,7 +873,8 @@ The planned Rust workspace uses small crates with one owner each:
 
 ```text
 crates/keld-cli/           command-line interface and diagnostics output
-crates/keld-syntax/        source text, lexer, lossless parser, syntax tree
+crates/keld-source/        normalized source text, spans, and diagnostics
+crates/keld-syntax/        lexer, lossless parser, and syntax tree
 crates/keld-semantics/     names, types, visible effects
 crates/keld-flow/          typed control-flow representation
 crates/keld-storage/       single-home state, loans, and value cleanup
