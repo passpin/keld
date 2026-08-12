@@ -1,16 +1,18 @@
 # Keld Language Design
 
-Status: corrected baseline awaiting written-spec review
+Status: approved language baseline; implementation not started
 
 Date: 2026-08-11
+
+Last revised: 2026-08-12
 
 Working language version: 0.1 design core
 
 ## 1. Purpose
 
 Keld is a statically typed, high-level language for native applications whose
-central feature is deterministic, memory-safe management of mutable entity
-graphs without tracing garbage collection or reference counting.
+central feature is deterministic, memory-safe management of values and mutable
+entity graphs without tracing garbage collection or reference counting.
 
 Keld targets:
 
@@ -39,9 +41,13 @@ rules below are the basis for later preservation and progress proofs.
 - The command-line tool is `keld`.
 - Types are decided at compile time, with strong local inference.
 - Keld is a high-level application language, not a systems language.
-- Ordinary source has no ownership tokens, borrow operators, lifetime
-  parameters, allocators, retain/release operations, slots, or generations.
-- The memory model is Custody Ledger Memory with acyclic lifecycle groups.
+- Ordinary source has no borrow operators, lifetime parameters, allocators,
+  retain/release operations, slots, or generations. Whole-value storage transfer
+  is the one explicit operation, written `take`.
+- Entity memory uses Custody Ledger Memory with acyclic lifecycle groups.
+- `List[T]`, `Text`, and aggregates containing them are single-home values.
+- Default integer arithmetic is checked in every build; runtime faults never
+  rely on backend undefined behavior.
 - Sequential execution is the first semantic and implementation core.
 - Native ahead-of-time compilation is primary.
 - WebAssembly is a secondary output target.
@@ -55,14 +61,21 @@ rules below are the basis for later preservation and progress proofs.
 ### 3.1 Values
 
 Values have structural identity. Examples include numbers, booleans, structs,
-enums, tuples, and immutable text values.
+enums, `List[T]`, and immutable `Text` values.
 
 The compiler may place a value inline, on the stack, in registers, or in hidden
 storage. This placement is not observable in safe Keld.
 
-Copying a copyable value creates an independent value. Keld 0.1 does not permit
-resource-owning values inside entity fields; resource types are deferred until a
-restricted cleanup ABI is specified.
+Implicit-copy values duplicate normally. Managed storage values are
+single-home: named transfer uses `take`, independent duplication uses `.copy()`,
+and ordinary function parameters create compiler-checked call loans. List and
+Text may appear inside structs and entity fields because their cleanup is
+compiler-generated, non-throwing, and non-reentrant.
+
+External resources such as files and sockets remain deferred. Keld 0.1 does not
+permit them inside entity fields or provide user-defined destruction. The
+normative value-storage rules are in
+[`docs/spec/storage-values.md`](../../spec/storage-values.md).
 
 ### 3.2 Entities
 
@@ -308,9 +321,9 @@ previously kept in an ancestor are no longer members and survive.
 
 Cleanup code cannot create entities, resolve links, move lifecycle membership,
 retire another entity, call user or foreign code, or re-enter the store. Keld
-0.1 has no arbitrary user-defined entity destructor and forbids
-resource-owning entity fields. Entity cleanup recursively releases plain value
-storage and links without callbacks.
+0.1 has no arbitrary user-defined entity destructor and forbids external
+resource-owning entity fields. Entity cleanup recursively releases links and
+compiler-managed List, Text, and aggregate storage without callbacks.
 
 A later resource design may add trusted, non-reentrant cleanup intrinsics. Such
 intrinsics are not part of Keld 0.1 and cannot be assumed by its compiler or
@@ -336,6 +349,12 @@ A conforming safe implementation must maintain all of these invariants:
     flow.
 12. Safe code cannot construct a raw address, counterfeit link, or store brand.
 13. In the sequential core, all mutation occurs on the owning task.
+14. Every initialized single-home value has exactly one cleanup home.
+15. A moved or uninitialized place cannot be read, loaned, copied, or moved.
+16. Incompatible loans and transfers cannot overlap at a call.
+17. Every accepted numeric operation either returns its specified value or
+    reaches its specified Keld fault before executing an invalid target
+    operation.
 
 Consequences:
 
@@ -344,6 +363,8 @@ Consequences:
 - double retirement is rejected statically or trapped as a compiler/runtime bug;
 - link cycles do not retain entities;
 - entity reclamation is deterministic; and
+- single-home storage cannot be aliased, implicitly copied, or destroyed twice;
+- integer edge behavior is identical across debug and optimized builds; and
 - unsynchronized cross-task mutation is impossible in the sequential core.
 
 ## 6. Static Semantics
@@ -358,9 +379,16 @@ View[T, access]
 Link[T, optionality]
 Lifecycle[identity, parent, state]
 Access[store, mode, extent]
+Home[T, place, state]
+Loan[place, effect, call]
+OwnedTemporary[T]
 ```
 
 These forms appear in compiler IR and diagnostics, never as source annotations.
+`Home` state is `Empty(reason)`, `Live`, or `MaybeLive`; empty reasons include
+`Uninitialized` and `Moved`. A `Loan` is bounded to one call or immediate built-in
+operation. `OwnedTemporary` has cleanup responsibility until it transfers into a
+new home or consuming parameter.
 
 ### 6.2 Lifecycle order
 
@@ -443,7 +471,10 @@ Typed functions carry inferred semantic effects. Initial internal effects are:
 pure
 reads(parameter set)
 edits(parameter set)
-allocates(current lifecycle)
+structural(parameter set)
+takes(parameter set)
+allocates_storage
+allocates_entity(current lifecycle)
 retires(parameter)
 retires_any(type, store)
 io
@@ -454,6 +485,12 @@ unsafe
 Local access and allocation effects are inferred. Public declarations display
 application-visible effects that can change control flow or liveness. Full
 summaries are serialized in compiled module metadata.
+
+For List and Text parameters, `reads`, `edits`, and `structural` describe
+call-scoped loans. `takes` corresponds to a declared `take` parameter. The
+compiler checks the complete call argument set for overlapping loans, transfers,
+and entity retirement before entering the callee. An entity-field loan carries
+identity provenance and a field path, never a payload address across the call.
 
 A public function that can end the lifetime of an entity parameter must
 declare that semantic effect:
@@ -537,16 +574,17 @@ Keld uses static, strong typing with bidirectional local inference.
 
 Keld 0.1 core type categories:
 
-- primitives: `Bool`, fixed-width integers, platform-independent `Int`, and
-  floating-point values;
-- value aggregates: `struct`, tuples, and arrays;
+- primitives: `Bool`, `I8` through `I64`, `U8` through `U64`, `F32`, and `F64`;
+- platform-independent aliases: `Int` is `I64` and `UInt` is `U64`;
+- managed storage: single-home `List[T]` and immutable single-home `Text`;
+- value aggregates: `struct`;
 - algebraic variants: `enum`;
 - identity-bearing records: `entity`;
 - persistent identity relationships: `link T` and `link T?`;
-- absence: `T?`;
-- functions.
+- absence: `T?`.
 
-Closures and interfaces are planned language features but remain reserved and
+Named functions can be called but are not first-class values. Function types,
+closures, and interfaces are planned language features but remain reserved and
 ungrammatical in Keld 0.1.
 
 Rules:
@@ -556,9 +594,16 @@ Rules:
   clause means `Unit`.
 - There is no implicit null.
 - Pattern matching is exhaustive.
-- Numeric widening is permitted only when lossless and unambiguous.
+- Numeric widening is permitted only in a typed conversion context when every
+  source value is representable. Differently typed non-literal operands do not
+  trigger implicit integer promotion.
 - Narrowing is explicit and checked unless inside an unsafe boundary.
 - Dynamic typing is absent from the initial language.
+
+Default integer arithmetic, conversion, shift, bounds, and capacity behavior is
+defined by [`docs/spec/numeric-safety.md`](../../spec/numeric-safety.md). Map,
+Set, Slice, iterator, and `for` semantics remain deferred until List passes its
+storage-model verification milestone.
 
 Generics use a hybrid compilation model:
 
@@ -592,9 +637,14 @@ not required. Every exit edge receives compiler-generated lifecycle cleanup.
 Future lexical resource types must define their own non-throwing exit operation
 before this rule is extended to them.
 
-Fatal invariant failures abort the process. Fatal abort does not promise user
-cleanup. Allocation exhaustion is fatal in Keld 0.1 and follows the same rule.
-Destructors cannot fail.
+Safe-operation faults are non-catchable termination. The initial fault kinds
+cover arithmetic overflow, integer division by zero, invalid shifts,
+out-of-range conversions, bounds, capacity, and allocation. Their
+conditions are deterministic for fixed inputs except that allocation depends on
+target resource availability. A fault reports its kind and source location,
+remains memory safe, and does not promise user cleanup. Expected failure uses an
+optional checked operation or a typed error-producing API. Destructors cannot
+fail.
 
 ## 9. Concurrency Boundary
 
@@ -707,17 +757,10 @@ error[KLD1008]: `selected` may have been retired by this operation
   resolve a persistent link after the call to obtain a new live reference
 ```
 
-### KLD1009: resource-owning entity field
-
-```text
-error[KLD1009]: resource-owning fields are not supported in Keld 0.1 entities
-  keep this resource in lexical value storage
-```
-
 Diagnostics must include the operation that created the restriction, the use
 that violates it, and one concrete repair when one is mechanically known.
 
-## 12. Normative Grammar
+## 12. Normative Language Specifications
 
 Keld syntax is defined by two normative files:
 
@@ -725,6 +768,14 @@ Keld syntax is defined by two normative files:
   statement termination, precedence, and semantic parsing restrictions.
 - [`docs/spec/keld.ebnf`](../../spec/keld.ebnf) defines the Keld 0.1 core
   productions.
+
+Two additional normative files define operations whose safety cannot be
+expressed by grammar:
+
+- [`docs/spec/numeric-safety.md`](../../spec/numeric-safety.md) defines numeric
+  types, arithmetic, sizes, faults, and backend obligations.
+- [`docs/spec/storage-values.md`](../../spec/storage-values.md) defines
+  single-home values, `take`, loans, fields, List, and Text.
 
 Examples in this design document are explanatory. When an example and the
 normative grammar differ, the grammar controls and the example must be corrected.
@@ -735,6 +786,7 @@ The core grammar resolves these previously ambiguous cases:
 - newlines or explicit semicolons produce normalized statement terminators;
 - `link Enemy?` means optional link storage, not a link to an optional entity;
 - `when` validates a link or optional value exactly once;
+- `take` transfers a whole named single-home local or consuming parameter;
 - `retires parameter` and `retires any Type` are part of function syntax; and
 - entity `==` and `!=` compare identity and can refine alias facts.
 
@@ -752,10 +804,16 @@ Source
        names
        types
        error effects
+       storage classes and parameter effects
   -> Typed Flow IR
        explicit evaluation order
        branches, loops, and calls
+       place identity and initialization state
        direct-reference provenance
+  -> Storage Verifier
+       transfer and use-state checks
+       whole-call loan conflicts
+       value cleanup on every exit
   -> Lifecycle Planner
        lifecycle tree
        entity states
@@ -765,6 +823,7 @@ Source
        cleanup on every exit
   -> Executable IR
        explicit store and lifecycle operations
+       explicit checked numeric and container operations
        no unresolved memory decisions
   -> Interpreter or LLVM Lowering
   -> Native object or WebAssembly object
@@ -772,10 +831,13 @@ Source
 
 Ownership of decisions is strict:
 
-- Module semantics owns names, types, and visible effects.
-- Typed Flow IR owns source evaluation order and control-flow identity.
+- Module semantics owns names, types, storage classes, and visible effects.
+- Typed Flow IR owns source evaluation order, control-flow identity, places, and
+  definite initialization state.
+- The storage verifier proves transfers and loans and creates value cleanup
+  paths.
 - The lifecycle planner proves memory operations and creates cleanup paths.
-- Executable IR owns the exact runtime operation sequence.
+- Executable IR owns the exact runtime operation sequence, including faults.
 - The interpreter defines executable-IR behavior for tests.
 - LLVM lowering emits already-proven operations and makes no lifecycle policy.
 
@@ -792,10 +854,11 @@ crates/keld-cli/           command-line interface and diagnostics output
 crates/keld-syntax/        source text, lexer, lossless parser, syntax tree
 crates/keld-semantics/     names, types, visible effects
 crates/keld-flow/          typed control-flow representation
+crates/keld-storage/       single-home state, loans, and value cleanup
 crates/keld-lifecycle/     Custody Ledger verification and cleanup planning
 crates/keld-ir/            executable IR and validation
 crates/keld-interpreter/   semantic oracle
-crates/keld-runtime/       slots, generations, lifecycle membership, cleanup
+crates/keld-runtime/       storage allocation, faults, slots, and lifecycles
 crates/keld-backend-llvm/  LLVM-only lowering and object emission
 tests/                     cross-stage and end-to-end programs
 docs/spec/                 normative grammar and language rules
@@ -830,6 +893,8 @@ Backend rules:
 - Isolate all LLVM dependencies inside `keld-backend-llvm`.
 - Use the LLVM C API where it covers the required functionality.
 - Emit aliasing metadata only from lifecycle facts already proven by Keld.
+- Lower checked arithmetic, conversion, bounds, capacity, and address-size
+  operations without invoking LLVM undefined behavior on a Keld faulting input.
 - Preserve source locations through executable IR and backend lowering.
 - Differential-test interpreter and compiled output.
 - Do not serialize LLVM bitcode as Keld's stable package representation.
@@ -846,6 +911,7 @@ Included source features:
 
 - modules with one source file;
 - `Int`, `Bool`, structs, and entities;
+- checked `Int` arithmetic, division, remainder, shifts, and conversions;
 - local `let` bindings;
 - functions with explicit parameter and return types;
 - `lifecycle`, entity construction, `link`, `when`, `keep`, and `retire`;
@@ -892,8 +958,34 @@ Done criteria:
 14. A broad `retires any T` call invalidates every compatible live proof and
     allows references to be reacquired from links afterward.
 15. No executable IR contains a `View` that crosses a structural operation.
+16. Constant evaluation, the interpreter, and executable IR agree on overflow,
+    zero division, `Int.MIN / -1`, `Int.MIN % -1`, and invalid shifts.
 
-## 17. Verification Strategy
+## 17. Storage Model Milestone
+
+The second executable milestone proves single-home storage before LLVM lowering.
+Its implementation order is fixed:
+
+1. Add place-state analysis for empty, live, maybe-live, loaned, and moved values,
+   with hidden local drop flags only at non-uniform joins.
+2. Implement whole-local `take`, explicit `.copy()`, normal loan parameters,
+   consuming parameters, owned returns, and aggregate cleanup.
+3. Implement `List[Int]`, including checked indexing, growth, removal, and
+   deterministic cleanup.
+4. Implement `List[List[Int]]` and pass the List state, alias, structural-copy,
+   removal, fault, and differential test matrix.
+5. Add immutable Text under the same state rules.
+6. Add `List[List[Text]]` only after the List-only checks pass.
+
+Map, Set, Slice, iterator protocols, and `for` remain unavailable throughout
+this milestone. LLVM work does not begin until both the Custody Ledger milestone
+and this storage milestone pass their normative verification requirements.
+
+Done criteria are the compile-pass, compile-fail, cleanup, bounds, capacity, and
+cross-engine cases in `docs/spec/storage-values.md`, plus the size and allocation
+cases in `docs/spec/numeric-safety.md`.
+
+## 18. Verification Strategy
 
 Verification proceeds in layers:
 
@@ -914,7 +1006,7 @@ Verification proceeds in layers:
 No milestone is complete solely because the compiler builds. Its language-level
 done criteria and negative safety tests must pass.
 
-## 18. Non-Goals for Version 0.1
+## 19. Non-Goals for Version 0.1
 
 - Transparent reclamation of arbitrary unstructured object graphs.
 - Making every reference permanently valid.
@@ -922,21 +1014,25 @@ done criteria and negative safety tests must pass.
 - Supporting raw-pointer programming in ordinary modules.
 - Matching low-level ownership-tree performance for every workload.
 - Providing a tracing collector or reference-counted fallback.
-- Resource-owning entity fields before a restricted cleanup ABI exists.
+- External resource-owning entity fields before a restricted cleanup ABI exists.
+- Map, Set, Slice, or iterator semantics before List verification is complete.
 - Arbitrary user-defined entity destructors.
 - Claiming worldwide novelty or formal correctness before evidence exists.
 
-## 19. Design Summary
+## 20. Design Summary
 
-Keld separates three concerns:
+Keld separates four concerns:
 
+- managed value storage has one home, explicit whole-value transfer, and
+  compiler-inferred call loans;
 - identity is represented by copyable, non-owning links;
 - lifetime is determined by deterministic, acyclic lifecycles; and
 - direct access is bounded by compiler-generated windows.
 
-Programmers see entities, links, lifecycles, `keep`, `retire`, and explicit
-handling of missing dynamic targets. They do not manage slots, generations,
-guards, custody tokens, or allocators.
+Programmers see `take` only when choosing to transfer named managed storage.
+They also see entities, links, lifecycles, `keep`, `retire`, and explicit
+handling of missing dynamic targets. They do not write borrow or lifetime
+annotations or manage slots, generations, guards, custody tokens, or allocators.
 
 This separation is the language's defining memory-model decision. All compiler,
 runtime, backend, and diagnostic work must preserve it.

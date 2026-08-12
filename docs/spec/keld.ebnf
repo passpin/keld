@@ -41,7 +41,7 @@ extern_function_decl
                     [ return_clause ], [ raises_clause ] ;
 
 parameter_list    = "(", [ parameter, { ",", parameter }, [ "," ] ], ")" ;
-parameter         = IDENT, ":", type ;
+parameter         = [ "take" ], IDENT, ":", type ;
 return_clause     = "->", type ;
 raises_clause     = "raises", type, { ",", type } ;
 retires_clause    = "retires", retirement_target,
@@ -51,8 +51,7 @@ retirement_target = IDENT | "any", type ;
 type              = link_type | value_type, [ "?" ] ;
 link_type         = "link", link_target, [ "?" ] ;
 link_target       = path, [ type_arguments ] ;
-value_type        = path, [ type_arguments ]
-                  | "(", type_list, ")" ;
+value_type        = path, [ type_arguments ] ;
 type_list         = type, { ",", type }, [ "," ] ;
 
 block             = "{", { TERM },
@@ -100,11 +99,13 @@ expression        = logical_or ;
 logical_or        = logical_and, { "||", logical_and } ;
 logical_and       = equality, { "&&", equality } ;
 equality          = comparison, [ ( "==" | "!=" ), comparison ] ;
-comparison        = additive,
-                    [ ( "<" | "<=" | ">" | ">=" ), additive ] ;
+comparison        = shift,
+                    [ ( "<" | "<=" | ">" | ">=" ), shift ] ;
+shift             = additive, { ( "<<" | ">>" ), additive } ;
 additive          = multiplicative, { ( "+" | "-" ), multiplicative } ;
 multiplicative    = unary, { ( "*" | "/" | "%" ), unary } ;
-unary             = ( "!" | "-" ), unary | postfix ;
+unary             = ( "!" | "-" ), unary | take_expression | postfix ;
+take_expression   = "take", place ;
 postfix           = primary, { call_suffix | field_suffix | index_suffix } ;
 
 call_suffix       = "(", [ argument, { ",", argument }, [ "," ] ], ")" ;

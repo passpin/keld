@@ -37,7 +37,7 @@ any       as        break     continue  else      entity
 enum      extern    false     fn        handle    if
 in        keep      let       lifecycle link      match
 module    none      pub       raises    retire    retires
-return    struct    true      try       unsafe    use
+return    struct    take      true      try       unsafe    use
 var       when      while
 ```
 
@@ -55,6 +55,9 @@ async await dynamic impl interface resource shared
 - An unterminated block comment is a lexical error.
 - Comments otherwise behave as whitespace.
 - Newlines inside block comments participate in statement termination.
+
+Adjacent operator characters use longest-token matching, so `<<`, `>>`, `<=`,
+and `>=` are each one token.
 
 Whitespace inside parentheses and brackets never terminates a statement.
 
@@ -162,10 +165,30 @@ enemy.health -= 10
 Assignment is a statement, not an expression. An expression statement must have
 type `Unit`; silently discarding another value is a type error.
 
+`List[T]`, `Text`, and aggregates containing them are single-home managed values.
+Using a named single-home place where an owned value is required is ambiguous and
+rejected. `take place` transfers a whole named local or consuming parameter;
+`value.copy()` requests an independent structural copy. Fields and indexed
+elements are grammatical places after `take` so the parser can issue the focused
+partial-move diagnostic, but the Keld 0.1 storage rules reject those transfers.
+The normative rules are in [storage-values.md](storage-values.md).
+
 ## 9. Construction and Calls
 
 `Name(arguments)` is parsed uniformly as a call. Name resolution decides whether it is
 a function call, value constructor, enum variant, or entity constructor.
+
+Generic arguments appear only in type positions in Keld 0.1. Constructor type
+arguments are inferred from constructor arguments or the expected result type:
+
+```keld
+let numbers: List[Int] = List()
+let pair = Pair(first: 1, second: "one")
+```
+
+`let numbers = List()` is rejected because neither the arguments nor the result
+context determines the element type. The expression form `List[Int]()` is not a
+generic constructor; square brackets in expression position are indexing.
 
 Arguments are either all positional or all named. Named arguments use `:`:
 
@@ -225,6 +248,11 @@ raises-clause, then retires-clause
 Function parameter types and non-`Unit` return types are explicit. Omitting the
 return clause means `Unit`; it does not request return-type inference.
 
+`take name: Type` declares a consuming parameter. A named single-home argument
+must be written `take place`; an owned temporary transfers automatically. Normal
+single-home parameters are call-scoped loans, with access effects inferred into
+module metadata.
+
 Examples:
 
 ```keld
@@ -255,12 +283,14 @@ From highest to lowest:
 |---:|---|---|
 | 1 | `()` call, `[]` index, `.` field | left |
 | 2 | `!`, unary `-` | right |
+| 2 | `take place` | non-associative |
 | 3 | `*`, `/`, `%` | left |
 | 4 | `+`, `-` | left |
-| 5 | `<`, `<=`, `>`, `>=` | non-associative |
-| 6 | `==`, `!=` | non-associative |
-| 7 | `&&` | left |
-| 8 | `||` | left |
+| 5 | `<<`, `>>` | left |
+| 6 | `<`, `<=`, `>`, `>=` | non-associative |
+| 7 | `==`, `!=` | non-associative |
+| 8 | `&&` | left |
+| 9 | `||` | left |
 
 Comparison chaining such as `a < b < c` is rejected. Write
 `a < b && b < c`.
@@ -276,6 +306,13 @@ Assignment operators are outside expression precedence:
 Expressions evaluate left to right. The compiler cannot reorder observable I/O,
 error, retirement, lifecycle, or allocation effects.
 
+Call arguments evaluate before call-scoped storage loans open. After each place
+argument, the compiler records an address-free pending reservation. Later
+argument effects must be compatible with earlier reservations, and the complete
+overlap set is checked before entering the callee. `take` changes the source
+place to `Moved` only after prior argument effects complete and the transfer is
+reached. A later argument cannot use that moved place.
+
 An entity field read opens a read `View`, copies or materializes the field result,
 and closes the view before the next structural effect. Passing an entity to a
 function passes its `EntityRef`; the callee opens any required views.
@@ -287,6 +324,12 @@ Assignment evaluates in this order:
 2. evaluate the right-hand expression;
 3. verify that the destination's live proof remains valid;
 4. open the final edit `View`, perform the store, and close the view.
+
+While an assignment destination is pending, its right side cannot move the
+destination base. For an indexed List destination, the right side also cannot
+structurally mutate that List; the final bounds check uses the List state at
+commit. This restriction prevents a saved index from changing meaning before the
+store.
 
 A compound assignment also reads and saves the old destination value after step
 1, closes that read view, then evaluates the right-hand expression. Its final
@@ -320,3 +363,8 @@ feature is not enabled by the selected language version.
 Interfaces, implementations, closures, async functions, shared lifecycles,
 resource declarations, macros, and package manifests remain ungrammatical in
 Keld 0.1. Their reserved keywords prevent accidental source incompatibility.
+
+Numeric operation behavior and faults are normative in
+[numeric-safety.md](numeric-safety.md). Single-home storage, loans, List, and
+Text are normative in [storage-values.md](storage-values.md). Syntax acceptance
+does not override either document's static restrictions.
