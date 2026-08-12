@@ -37,6 +37,11 @@ pub fn analyze_text(text: &str) -> Analysis {
 #[must_use]
 pub fn analyze(source: &SourceText) -> Analysis {
     let parsed = parse(lex(source));
+    analyze_parsed(source, &parsed)
+}
+
+#[must_use]
+pub fn analyze_parsed(source: &SourceText, parsed: &ParsedFile) -> Analysis {
     if !parsed.diagnostics.is_empty() {
         return Analysis {
             module: None,
@@ -52,7 +57,7 @@ pub fn analyze(source: &SourceText) -> Analysis {
         };
     }
 
-    Analyzer::new(source, &parsed).run()
+    Analyzer::new(source, parsed).run()
 }
 
 pub(crate) struct Analyzer<'source, 'syntax> {

@@ -1,0 +1,18 @@
+entity Enemy {
+    health: Int
+    target: link Enemy?
+}
+
+fn main() -> Int {
+    lifecycle level {
+        let first = Enemy(health: 10, target: none)
+        let second = Enemy(health: 20, target: first)
+        first.target = second
+        retire first
+        when second.target as stale {
+            return stale.health
+        } else {
+            return second.health
+        }
+    }
+}

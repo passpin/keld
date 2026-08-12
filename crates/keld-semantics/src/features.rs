@@ -8,11 +8,15 @@ pub(crate) fn gate(root: &SyntaxNode, lexed: &Lexed, source: &SourceText) -> Vec
     let mut stack = root.child_nodes().rev().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if let Some(feature) = unsupported_feature(node, lexed, source) {
-            diagnostics.push(Diagnostic::error(
+            let mut diagnostic = Diagnostic::error(
                 FEATURE_DIAGNOSTIC,
                 node.span,
                 format!("`{feature}` is parsed but not supported by the bootstrap compiler"),
-            ));
+            );
+            diagnostic.help = Some(
+                "remove this feature or use the currently supported bootstrap subset".to_owned(),
+            );
+            diagnostics.push(diagnostic);
             continue;
         }
         stack.extend(node.child_nodes().rev());

@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "keld-cli"
+version = "0.1.0"
+dependencies = [
+ "keld-flow",
+ "keld-interpreter",
+ "keld-ir",
+ "keld-lifecycle",
+ "keld-semantics",
+ "keld-source",
+ "keld-syntax",
+]
+
+[[package]]
 name = "keld-flow"
 version = "0.1.0"
 dependencies = [

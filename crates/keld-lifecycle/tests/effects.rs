@@ -63,3 +63,12 @@ fn parameter_and_fresh_return_provenance_are_summarized() {
         } if parameters.is_empty()
     ));
 }
+
+#[test]
+fn entrypoint_applies_broad_liveness_barriers_without_declaring_public_effects() {
+    let result = verify_text_for_test(
+        "entity Enemy {\nhealth: Int\n}\nentity World {\ntarget: link Enemy?\n}\nfn sweep(world: World) retires any Enemy { when world.target as enemy { retire enemy } }\nfn main() -> Int { lifecycle level { let enemy = Enemy(health: 1); let world = World(target: enemy); sweep(world); when world.target as live { return live.health } else { return 0 } } }\n",
+    );
+
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+}

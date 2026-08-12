@@ -1,0 +1,19 @@
+entity Enemy { health: Int }
+
+fn remove_then_read(a: Enemy, b: Enemy) -> Int retires a {
+    if a != b {
+        retire a
+        return b.health
+    } else {
+        retire a
+        return 0
+    }
+}
+
+fn main() -> Int {
+    lifecycle level {
+        let first = Enemy(health: 10)
+        let second = Enemy(health: 20)
+        return remove_then_read(first, second)
+    }
+}

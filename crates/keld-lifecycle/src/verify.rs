@@ -39,7 +39,12 @@ pub fn verify(flow: FlowModule) -> Verification {
 
     for function in &flow.functions {
         let outcome = analyze_function(&flow, function, &summaries, true);
-        validate_effects(function, &outcome.inference, &mut sink);
+        validate_effects(
+            function,
+            &outcome.inference,
+            function.id == flow.main,
+            &mut sink,
+        );
         for diagnostic in outcome.diagnostics {
             sink.push(diagnostic);
         }
@@ -797,7 +802,15 @@ fn validate_persistent_fields(flow: &FlowModule, sink: &mut DiagnosticSink) {
     }
 }
 
-fn validate_effects(function: &FlowFunction, inferred: &Inference, sink: &mut DiagnosticSink) {
+fn validate_effects(
+    function: &FlowFunction,
+    inferred: &Inference,
+    is_entrypoint: bool,
+    sink: &mut DiagnosticSink,
+) {
+    if is_entrypoint {
+        return;
+    }
     let declared_exact = function
         .effects
         .retires
