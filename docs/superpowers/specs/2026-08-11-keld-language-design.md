@@ -171,8 +171,13 @@ Rules:
 - A new entity joins the innermost active lifecycle.
 - Ending a lifecycle deterministically retires all remaining members.
 - Child lifecycles end before their parent.
-- `keep entity in lifecycle` moves an entity to a named ancestor lifecycle.
+- `keep entity in lifecycle` moves an entity to a strict named ancestor
+  lifecycle.
 - `retire entity` ends one entity early.
+
+Keeping an entity removes its old membership and appends it as the newest
+adoption in the target ancestor. Reverse-adoption cleanup order is therefore
+defined by the time an entity most recently entered that lifecycle.
 
 A function call does not create a lifecycle implicitly. The callee inherits the
 call site's current lifecycle as a hidden argument, so an entity created by an
@@ -392,14 +397,14 @@ new home or consuming parameter.
 
 ### 6.2 Lifecycle order
 
-Let `L1 <= L2` mean that `L2` is an ancestor of `L1` and therefore outlives
+Let `L1 < L2` mean that `L2` is a strict ancestor of `L1` and therefore outlives
 `L1`.
 
 `keep x in L2` is valid only when:
 
 - `x` is live in `L1`;
 - `L2` is active;
-- `L1 <= L2`;
+- `L1 < L2`;
 - both lifecycles belong to the same hidden store; and
 - no access window is active at the operation.
 
@@ -408,11 +413,17 @@ Let `L1 <= L2` mean that `L2` is an ancestor of `L1` and therefore outlives
 For each `EntityRef`, typed control flow tracks one of:
 
 ```text
-Live(lifecycle, provenance)
+Live(lifecycle_fact, provenance)
 Invalidated(cause)
 Retired
 OutOfScope
 ```
+
+`lifecycle_fact` is either `Known(lifecycle)` or `Dynamic`. Fresh allocations
+and their direct aliases are known. Entity parameters and references produced by
+link resolution are dynamic unless their origin is otherwise proven. Dynamic
+references may be read, passed, or retired, but `keep` requires a known current
+lifecycle so the strict-ancestor relation can be proved at compile time.
 
 Only `Live` can open a `View` for field access or be passed to a function that
 requires a live entity. Resolving a link dynamically creates a new scoped `Live`
@@ -757,6 +768,17 @@ error[KLD1008]: `selected` may have been retired by this operation
   resolve a persistent link after the call to obtain a new live reference
 ```
 
+### KLD1009: invalid retirement effect declaration
+
+```text
+error[KLD1009]: `remove` retires parameter `enemy` but does not declare it
+  add `retires enemy` to the function signature
+```
+
+The same family reports a declared retirement target that the function cannot
+retire. The diagnostic points to the clause and removes it as the concrete
+repair.
+
 Diagnostics must include the operation that created the restriction, the use
 that violates it, and one concrete repair when one is mechanically known.
 
@@ -911,11 +933,12 @@ Included source features:
 
 - modules with one source file;
 - `Int`, `Bool`, structs, and entities;
-- checked `Int` arithmetic, division, remainder, shifts, and conversions;
+- checked `Int` arithmetic, division, remainder, and shifts;
+- range-checked `Int` literals and constant expressions;
 - local `let` bindings;
-- functions with explicit parameter and return types;
+- functions with explicit parameter types and explicit non-`Unit` return types;
 - `lifecycle`, entity construction, `link`, `when`, `keep`, and `retire`;
-- field read and mutation;
+- struct field read plus entity field read and mutation;
 - `if` and block control flow; and
 - deterministic cleanup on normal return.
 
@@ -926,12 +949,22 @@ Included tooling:
 - stable diagnostic codes for lifecycle failures; and
 - an executable-IR textual dump for debugging tests.
 
+The bootstrap executable entrypoint is exactly `fn main() -> Int`. It has no
+parameters or effect clauses. `keld run --engine interpreter` writes the returned
+decimal Int followed by one newline. A successful execution exits with host
+status zero independently of the returned Keld value. Static rejection exits
+with status one, a runtime Keld fault exits with status two, and command misuse
+exits with status 64.
+
 Excluded from this milestone:
 
 - LLVM lowering;
 - WebAssembly;
 - concurrency and async;
 - interfaces and generics;
+- imports, enums, `var`, loops, `break`, `continue`, and `match`;
+- recursive function-call cycles;
+- Text, List, `take`, and every other single-home storage operation;
 - typed error effects;
 - resource types and user-defined cleanup;
 - unsafe code and FFI; and
