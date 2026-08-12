@@ -1,0 +1,120 @@
+use keld_semantics::analyze_text;
+
+#[test]
+fn supported_bootstrap_program_reaches_typed_hir() {
+    let analysis = analyze_text(
+        r"entity Enemy {
+health: Int
+target: link Enemy?
+}
+fn main() -> Int {
+lifecycle level {
+let enemy = Enemy(health: 7, target: none)
+return enemy.health
+}
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(analysis.module.is_some());
+}
+
+#[test]
+fn every_deferred_construct_has_one_focused_feature_diagnostic() {
+    let cases = [
+        ("use game.io\nfn main() -> Int { return 0 }\n", "use"),
+        ("enum E { A }\nfn main() -> Int { return 0 }\n", "enum"),
+        ("fn main() -> Int { var x = 0; return x }\n", "var"),
+        (
+            "fn main() -> Int { while true { break }; return 0 }\n",
+            "while",
+        ),
+        ("fn main() -> Int { break; return 0 }\n", "break"),
+        ("fn main() -> Int { continue; return 0 }\n", "continue"),
+        ("fn main() -> Int { match 0 { _ => 0 } }\n", "match"),
+        (
+            "struct Box[T] { value: T }\nfn main() -> Int { return 0 }\n",
+            "generic",
+        ),
+        (
+            "fn consume(take x: Int) -> Int { return x }\nfn main() -> Int { return consume(0) }\n",
+            "take",
+        ),
+        (
+            "fn main() -> Int { let text = \"x\"; return 0 }\n",
+            "string",
+        ),
+        (
+            "fn read(text: Text) -> Int { return 0 }\nfn main() -> Int { return 0 }\n",
+            "Text",
+        ),
+        (
+            "fn count(values: List) -> Int { return 0 }\nfn main() -> Int { return 0 }\n",
+            "List",
+        ),
+        ("fn main() -> Int raises Error { return 0 }\n", "raises"),
+        (
+            "fn main() -> Int { try { return 0 } handle Error as error { return 1 } }\n",
+            "try",
+        ),
+        (
+            "unsafe module app\nfn main() -> Int { return 0 }\n",
+            "unsafe",
+        ),
+        (
+            "extern \"c\" fn foreign() -> Int\nfn main() -> Int { return 0 }\n",
+            "extern",
+        ),
+    ];
+
+    for (text, feature) in cases {
+        let analysis = analyze_text(text);
+        let feature_diagnostics = analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code.0 == "KLD0004")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            feature_diagnostics.len(),
+            1,
+            "{feature}: {:#?}",
+            analysis.diagnostics
+        );
+        assert!(
+            feature_diagnostics[0].primary.message.contains(feature),
+            "{feature}: {:#?}",
+            feature_diagnostics[0]
+        );
+    }
+}
+
+#[test]
+fn outer_unsupported_construct_suppresses_child_feature_cascades() {
+    let analysis = analyze_text("fn main() -> Int { while true { var x = 0; break }; return 0 }\n");
+    let feature_diagnostics = analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.0 == "KLD0004")
+        .collect::<Vec<_>>();
+
+    assert_eq!(feature_diagnostics.len(), 1, "{:#?}", analysis.diagnostics);
+    assert!(feature_diagnostics[0].primary.message.contains("while"));
+}
+
+#[test]
+fn direct_and_mutual_recursion_are_deferred() {
+    for text in [
+        "fn loop() -> Int { return loop() }\nfn main() -> Int { return 0 }\n",
+        "fn a() -> Int { return b() }\nfn b() -> Int { return a() }\nfn main() -> Int { return 0 }\n",
+    ] {
+        let analysis = analyze_text(text);
+        assert!(analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.0 == "KLD0004" && diagnostic.primary.message.contains("recursive")
+        }));
+    }
+}
