@@ -1,6 +1,7 @@
 use crate::{
-    Function, Instruction, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module, Register,
-    RegisterStorage, Terminator, ViewId, ViewMode,
+    ArgumentProjection, ArgumentSource, Function, Instruction, IrBlockId, IrDefinition,
+    IrDefinitionKind, IrType, Module, Receiver, Register, RegisterStorage, Terminator, ViewId,
+    ViewMode,
 };
 use keld_semantics::{CompareOp, DefId, FieldId};
 use keld_source::{Diagnostic, DiagnosticCode, Span};
@@ -95,12 +96,11 @@ fn validate_named_type(module: &Module, ty: &IrType, span: Span, sink: &mut Diag
         | IrType::Link {
             entity: definition, ..
         } => (*definition, IrDefinitionKind::Entity),
-        IrType::Unit
-        | IrType::Bool
-        | IrType::Int
-        | IrType::Text
-        | IrType::List(_)
-        | IrType::Lifecycle => return,
+        IrType::List(element) | IrType::Optional(element) => {
+            validate_named_type(module, element, span, sink);
+            return;
+        }
+        IrType::Unit | IrType::Bool | IrType::Int | IrType::Text | IrType::Lifecycle => return,
     };
     if module
         .definitions
@@ -754,20 +754,30 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 displaced,
                 ..
             } => {
-                self.check_register(destination.base, span);
-                let source_ok = require_role(
-                    self.sink,
-                    *source,
-                    |role| matches!(role, RegisterStorage::Home { .. }),
-                    "place replacement source must be a Home register",
-                );
+                let destination_type = self.validate_argument_source(destination, span);
+                if let Some(destination_type) = destination_type {
+                    self.expect_type(*source, &destination_type, span);
+                    self.expect_type(*displaced, &destination_type, span);
+                } else {
+                    self.check_register(*source, span);
+                    self.check_register(*displaced, span);
+                }
+                let source_role = role(*source);
+                let source_ok = !matches!(source_role, Some(RegisterStorage::Loan) | None);
+                if !source_ok {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "place replacement source must be owned or trivial",
+                    );
+                }
                 let displaced_ok = require_role(
                     self.sink,
                     *displaced,
                     |role| matches!(role, RegisterStorage::DropSlot),
                     "place replacement displaced register must be a DropSlot",
                 );
-                if source_ok {
+                if source_ok && matches!(source_role, Some(RegisterStorage::Home { .. })) {
                     require_live(self.sink, *source, "place replacement source is empty");
                 }
                 if displaced_ok {
@@ -803,6 +813,31 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 if source_ok {
                     require_live(self.sink, *source, "field replacement source is empty");
                 }
+                if displaced_ok {
+                    require_empty(self.sink, *displaced, "displaced slot is already live");
+                }
+            }
+            Instruction::ListReplace {
+                value, displaced, ..
+            } => {
+                let source_role = role(*value);
+                let source_ok = !matches!(source_role, Some(RegisterStorage::Loan) | None);
+                if !source_ok {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "indexed replacement source must be owned or trivial",
+                    );
+                }
+                if source_ok && matches!(source_role, Some(RegisterStorage::Home { .. })) {
+                    require_live(self.sink, *value, "indexed replacement source is empty");
+                }
+                let displaced_ok = require_role(
+                    self.sink,
+                    *displaced,
+                    |role| matches!(role, RegisterStorage::DropSlot),
+                    "indexed replacement displaced register must be a DropSlot",
+                );
                 if displaced_ok {
                     require_empty(self.sink, *displaced, "displaced slot is already live");
                 }
@@ -952,11 +987,13 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 }
             }
             Instruction::ListPush { list, value, .. } => {
-                if !matches!(self.register_type(*list, span), Some(IrType::List(_))) {
+                let Some(IrType::List(element)) = self.register_type(*list, span).cloned() else {
                     self.sink
                         .error("KLD9006", span, "list push requires a List value");
-                }
-                self.check_register(*value, span);
+                    self.check_register(*value, span);
+                    return;
+                };
+                self.expect_type(*value, &element, span);
             }
             Instruction::ListPushPlace {
                 list,
@@ -964,12 +1001,23 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 value,
                 ..
             } => {
-                if !matches!(self.register_type(*list, span), Some(IrType::List(_))) {
+                let Some(IrType::List(element)) = self.register_type(*list, span).cloned() else {
                     self.sink
                         .error("KLD9006", span, "list push requires a List value");
+                    self.check_register(source.base, span);
+                    self.check_register(*value, span);
+                    return;
+                };
+                if self.validate_argument_source(source, span)
+                    != Some(IrType::List(element.clone()))
+                {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "list push source does not resolve to the receiver List",
+                    );
                 }
-                self.check_register(source.base, span);
-                self.check_register(*value, span);
+                self.expect_type(*value, &element, span);
             }
             Instruction::ListRemove {
                 dst, list, index, ..
@@ -1000,8 +1048,77 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                     return;
                 };
                 self.expect_type(*dst, &element, span);
-                self.check_register(source.base, span);
+                if self.validate_argument_source(source, span)
+                    != Some(IrType::List(element.clone()))
+                {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "list remove source does not resolve to the receiver List",
+                    );
+                }
                 self.expect_type(*index, &IrType::Int, span);
+            }
+            Instruction::ListIndex {
+                dst,
+                receiver,
+                index,
+                ..
+            } => {
+                let Some(element) = self.validate_receiver(receiver, span) else {
+                    self.check_register(*dst, span);
+                    self.check_register(*index, span);
+                    return;
+                };
+                self.expect_type(*index, &IrType::Int, span);
+                self.expect_type(*dst, &element, span);
+                if !is_implicit_copy_type(self.module, &element)
+                    && !matches!(self.register_storage(*dst), Some(RegisterStorage::Loan))
+                {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "non-copyable List index results must be Loan registers",
+                    );
+                }
+            }
+            Instruction::ListGet {
+                dst,
+                receiver,
+                index,
+                ..
+            } => {
+                let Some(element) = self.validate_receiver(receiver, span) else {
+                    self.check_register(*dst, span);
+                    self.check_register(*index, span);
+                    return;
+                };
+                self.expect_type(*index, &IrType::Int, span);
+                if !is_implicit_copy_type(self.module, &element) {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "List get requires an implicitly copyable element",
+                    );
+                }
+                self.expect_type(*dst, &IrType::Optional(Box::new(element)), span);
+            }
+            Instruction::ListReplace {
+                receiver,
+                index,
+                value,
+                displaced,
+                ..
+            } => {
+                let Some(element) = self.validate_receiver(receiver, span) else {
+                    self.check_register(*index, span);
+                    self.check_register(*value, span);
+                    self.check_register(*displaced, span);
+                    return;
+                };
+                self.expect_type(*index, &IrType::Int, span);
+                self.expect_type(*value, &element, span);
+                self.expect_type(*displaced, &element, span);
             }
             Instruction::TextByteLength { dst, text, .. } => {
                 self.expect_type(*dst, &IrType::Int, span);
@@ -1208,6 +1325,9 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             | Instruction::ListPushPlace { .. }
             | Instruction::ListRemove { .. }
             | Instruction::ListRemovePlace { .. }
+            | Instruction::ListIndex { .. }
+            | Instruction::ListGet { .. }
+            | Instruction::ListReplace { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -1573,6 +1693,73 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
     }
 
+    fn validate_receiver(&mut self, receiver: &Receiver, span: Span) -> Option<IrType> {
+        let list_type = self.register_type(receiver.list, span).cloned();
+        let Some(IrType::List(element)) = list_type else {
+            self.sink.error(
+                STORAGE_ERROR,
+                span,
+                "List receiver register must have a List type",
+            );
+            self.check_register(receiver.list, span);
+            if let Some(source) = &receiver.source {
+                self.validate_argument_source(source, span);
+            }
+            return None;
+        };
+        if let Some(source) = &receiver.source
+            && self.validate_argument_source(source, span) != Some(IrType::List(element.clone()))
+        {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "projected receiver source does not resolve to the receiver List",
+            );
+        }
+        Some(*element)
+    }
+
+    fn validate_argument_source(&mut self, source: &ArgumentSource, span: Span) -> Option<IrType> {
+        let mut current = self.register_type(source.base, span).cloned();
+        if current.is_none() {
+            self.check_register(source.base, span);
+            return None;
+        }
+        for projection in &source.projections {
+            current = match (current, projection) {
+                (
+                    Some(IrType::Struct(definition) | IrType::Entity(definition)),
+                    ArgumentProjection::Field(field),
+                ) => self.field_type(definition, *field, span).cloned(),
+                (Some(IrType::List(element)), ArgumentProjection::Index(index)) => {
+                    self.expect_type(*index, &IrType::Int, span);
+                    Some(*element)
+                }
+                (Some(_), ArgumentProjection::Field(_)) => {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "field projection requires a struct or entity value",
+                    );
+                    None
+                }
+                (Some(_), ArgumentProjection::Index(_)) => {
+                    self.sink.error(
+                        REGISTER_ERROR,
+                        span,
+                        "index projection requires a List value",
+                    );
+                    None
+                }
+                (None, _) => None,
+            };
+            if current.is_none() {
+                break;
+            }
+        }
+        current
+    }
+
     fn expect_entity(&mut self, register: Register, span: Span) {
         self.check_register(register, span);
         if !matches!(self.register_type(register, span), Some(IrType::Entity(_))) {
@@ -1609,6 +1796,24 @@ fn join_home_state(left: HomeState, right: HomeState) -> HomeState {
     }
 }
 
+fn is_implicit_copy_type(module: &Module, ty: &IrType) -> bool {
+    match ty {
+        IrType::Unit | IrType::Bool | IrType::Int | IrType::Link { .. } => true,
+        IrType::Optional(inner) => is_implicit_copy_type(module, inner),
+        IrType::Struct(definition) => module
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == *definition)
+            .is_some_and(|definition| {
+                definition
+                    .fields
+                    .iter()
+                    .all(|(_, field)| is_implicit_copy_type(module, field))
+            }),
+        IrType::Text | IrType::List(_) | IrType::Entity(_) | IrType::Lifecycle => false,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn transfer_home_states(
     incoming: &BTreeMap<Register, HomeState>,
@@ -1633,6 +1838,8 @@ fn transfer_home_states(
             | Instruction::ListNew { dst, .. }
             | Instruction::ListRemove { dst, .. }
             | Instruction::ListRemovePlace { dst, .. }
+            | Instruction::ListIndex { dst, .. }
+            | Instruction::ListGet { dst, .. }
             | Instruction::TextConcat { dst, .. }
             | Instruction::CheckedUnaryInt { dst, .. }
             | Instruction::CheckedBinaryInt { dst, .. }
@@ -1721,6 +1928,16 @@ fn transfer_home_states(
             } => {
                 if matches!(role(*source), Some(RegisterStorage::Home { .. })) {
                     state.insert(*source, HomeState::Empty);
+                }
+                if matches!(role(*displaced), Some(RegisterStorage::DropSlot)) {
+                    state.insert(*displaced, HomeState::Live);
+                }
+            }
+            Instruction::ListReplace {
+                value, displaced, ..
+            } => {
+                if matches!(role(*value), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*value, HomeState::Empty);
                 }
                 if matches!(role(*displaced), Some(RegisterStorage::DropSlot)) {
                     state.insert(*displaced, HomeState::Live);
@@ -1818,6 +2035,8 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::ListLength { dst, .. }
         | Instruction::ListRemove { dst, .. }
         | Instruction::ListRemovePlace { dst, .. }
+        | Instruction::ListIndex { dst, .. }
+        | Instruction::ListGet { dst, .. }
         | Instruction::TextByteLength { dst, .. }
         | Instruction::TextIsEmpty { dst, .. }
         | Instruction::TextConcat { dst, .. }
@@ -1834,6 +2053,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::ReadField { dst, .. } => Some(*dst),
         Instruction::MoveHome { destination, .. } => Some(*destination),
         Instruction::InstallHome { displaced, .. }
+        | Instruction::ListReplace { displaced, .. }
         | Instruction::ReplacePlace { displaced, .. }
         | Instruction::ReplaceField { displaced, .. } => Some(*displaced),
         Instruction::Call { dst, .. } => *dst,
@@ -1852,6 +2072,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
     match instruction {
         Instruction::ConstInt { .. }
@@ -1877,7 +2098,10 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
             destination,
             source,
             ..
-        } => vec![destination.base, *source],
+        } => source_registers(destination)
+            .into_iter()
+            .chain(std::iter::once(*source))
+            .collect(),
         Instruction::ReplaceField { source, .. } => vec![*source],
         Instruction::ListLength { list, .. } => vec![*list],
         Instruction::ListPush { list, value, .. } => vec![*list, *value],
@@ -1886,14 +2110,38 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
             source,
             value,
             ..
-        } => vec![*list, source.base, *value],
+        } => std::iter::once(*list)
+            .chain(source_registers(source))
+            .chain(std::iter::once(*value))
+            .collect(),
         Instruction::ListRemove { list, index, .. } => vec![*list, *index],
         Instruction::ListRemovePlace {
             list,
             source,
             index,
             ..
-        } => vec![*list, source.base, *index],
+        } => std::iter::once(*list)
+            .chain(source_registers(source))
+            .chain(std::iter::once(*index))
+            .collect(),
+        Instruction::ListIndex {
+            receiver, index, ..
+        }
+        | Instruction::ListGet {
+            receiver, index, ..
+        } => receiver_registers(receiver)
+            .into_iter()
+            .chain(std::iter::once(*index))
+            .collect(),
+        Instruction::ListReplace {
+            receiver,
+            index,
+            value,
+            ..
+        } => receiver_registers(receiver)
+            .into_iter()
+            .chain([*index, *value])
+            .collect(),
         Instruction::TextByteLength { text, .. } | Instruction::TextIsEmpty { text, .. } => {
             vec![*text]
         }
@@ -1932,11 +2180,31 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
             .chain(
                 argument_sources
                     .iter()
-                    .filter_map(|(_, source)| source.as_ref().map(|source| source.base)),
+                    .flat_map(|(_, source)| source.as_ref().into_iter().flat_map(source_registers)),
             )
             .chain(std::iter::once(*current_lifecycle))
             .collect(),
     }
+}
+
+fn source_registers(source: &crate::ArgumentSource) -> Vec<Register> {
+    std::iter::once(source.base)
+        .chain(
+            source
+                .projections
+                .iter()
+                .filter_map(|projection| match projection {
+                    crate::ArgumentProjection::Field(_) => None,
+                    crate::ArgumentProjection::Index(register) => Some(*register),
+                }),
+        )
+        .collect()
+}
+
+fn receiver_registers(receiver: &crate::Receiver) -> Vec<Register> {
+    std::iter::once(receiver.list)
+        .chain(receiver.source.iter().flat_map(source_registers))
+        .collect()
 }
 
 fn terminator_uses(terminator: &Terminator) -> Vec<Register> {
@@ -1961,6 +2229,9 @@ fn is_structural(instruction: &Instruction) -> bool {
             | Instruction::RetireEntity { .. }
             | Instruction::ListPush { .. }
             | Instruction::ListRemove { .. }
+            | Instruction::ListIndex { .. }
+            | Instruction::ListGet { .. }
+            | Instruction::ListReplace { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -2002,6 +2273,9 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListPushPlace { span, .. }
         | Instruction::ListRemove { span, .. }
         | Instruction::ListRemovePlace { span, .. }
+        | Instruction::ListIndex { span, .. }
+        | Instruction::ListGet { span, .. }
+        | Instruction::ListReplace { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }

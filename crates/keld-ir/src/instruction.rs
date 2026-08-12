@@ -114,6 +114,25 @@ pub enum Instruction {
         index: Register,
         span: Span,
     },
+    ListIndex {
+        dst: Register,
+        receiver: crate::Receiver,
+        index: Register,
+        span: Span,
+    },
+    ListGet {
+        dst: Register,
+        receiver: crate::Receiver,
+        index: Register,
+        span: Span,
+    },
+    ListReplace {
+        receiver: crate::Receiver,
+        index: Register,
+        value: Register,
+        displaced: Register,
+        span: Span,
+    },
     TextByteLength {
         dst: Register,
         text: Register,

@@ -7,7 +7,8 @@ mod validate;
 pub use instruction::{FaultKind, Instruction, Terminator, ViewMode};
 pub use lower::{VerifiedInput, lower};
 pub use module::{
-    ArgumentSource, Function, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module,
-    Register, RegisterStorage, TestModuleBuilder, ViewId,
+    ArgumentProjection, ArgumentSource, Function, IrBlock, IrBlockId, IrDefinition,
+    IrDefinitionKind, IrType, Module, Receiver, Register, RegisterStorage, TestModuleBuilder,
+    ViewId,
 };
 pub use validate::validate;

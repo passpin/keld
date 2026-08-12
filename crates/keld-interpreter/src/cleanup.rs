@@ -164,10 +164,18 @@ fn cleanup_work(
                 }
             }
             Value::List(elements) => {
-                for (index, element) in elements.into_iter().enumerate() {
+                for (index, element) in elements.into_elements().enumerate() {
                     work.push(CleanupTask::Value {
                         value: element,
                         path: CleanupPath::ListElement { index },
+                    });
+                }
+            }
+            Value::Optional(value) => {
+                if let Some(value) = value {
+                    work.push(CleanupTask::Value {
+                        value: *value,
+                        path,
                     });
                 }
             }

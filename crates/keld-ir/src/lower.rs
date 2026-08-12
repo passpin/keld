@@ -1,6 +1,7 @@
 use crate::{
-    ArgumentSource, Function, Instruction, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind,
-    IrType, Module, Register, RegisterStorage, Terminator, ViewId, ViewMode,
+    ArgumentProjection, ArgumentSource, Function, Instruction, IrBlock, IrBlockId, IrDefinition,
+    IrDefinitionKind, IrType, Module, Receiver, Register, RegisterStorage, Terminator, ViewId,
+    ViewMode,
 };
 use keld_flow::FlowModule;
 use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection, ValueId};
@@ -408,9 +409,10 @@ impl<'flow> FunctionLowerer<'flow> {
                 span,
             } => {
                 if let Some(place) = &receiver.place {
+                    let source = self.argument_source(place, *span, output);
                     output.push(Instruction::ListPushPlace {
                         list: self.registers.value(receiver.value),
-                        source: self.argument_source(place),
+                        source,
                         value: self.registers.value(*value),
                         span: *span,
                     });
@@ -429,10 +431,11 @@ impl<'flow> FunctionLowerer<'flow> {
                 span,
             } => {
                 if let Some(place) = &receiver.place {
+                    let source = self.argument_source(place, *span, output);
                     output.push(Instruction::ListRemovePlace {
                         dst: self.registers.value(*dst),
                         list: self.registers.value(receiver.value),
-                        source: self.argument_source(place),
+                        source,
                         index: self.registers.value(*index),
                         span: *span,
                     });
@@ -447,16 +450,14 @@ impl<'flow> FunctionLowerer<'flow> {
             }
             FlowOp::ListIndex { .. }
             | FlowOp::ListGet { .. }
+            | FlowOp::ListReplace { .. }
+            | FlowOp::ReplacePlace { .. }
+            | FlowOp::BeginIndexedReplacement { .. }
+            | FlowOp::EndIndexedReplacement { .. }
             | FlowOp::ListTryRemove { .. }
             | FlowOp::ListClear { .. }
             | FlowOp::ListReserve { .. }
-            | FlowOp::ListTryReserve { .. }
-            | FlowOp::BeginIndexedReplacement { .. }
-            | FlowOp::EndIndexedReplacement { .. }
-            | FlowOp::ListReplace { .. }
-            | FlowOp::ReplacePlace { .. } => {
-                unimplemented!("List projection IR lowering is implemented in the next milestone")
-            }
+            | FlowOp::ListTryReserve { .. } => self.list_operation(operation, output),
             FlowOp::TextByteLength { dst, text, span } => {
                 output.push(Instruction::TextByteLength {
                     dst: self.registers.value(*dst),
@@ -605,28 +606,30 @@ impl<'flow> FunctionLowerer<'flow> {
                 current_lifecycle,
                 span,
                 ..
-            } => output.push(Instruction::Call {
-                dst: dst.map(|value| self.registers.value(value)),
-                function: *function,
-                arguments: arguments
-                    .iter()
-                    .map(|(parameter, value)| (*parameter, self.registers.value(*value)))
-                    .collect(),
-                argument_sources: argument_places
+            } => {
+                let argument_sources = argument_places
                     .iter()
                     .map(|(parameter, place)| {
                         (
                             *parameter,
-                            place.as_ref().map(|place| ArgumentSource {
-                                base: self.registers.local(place.base),
-                                fields: place_fields(place),
-                            }),
+                            place
+                                .as_ref()
+                                .map(|place| self.argument_source(place, *span, output)),
                         )
                     })
-                    .collect(),
-                current_lifecycle: self.registers.lifecycle(*current_lifecycle),
-                span: *span,
-            }),
+                    .collect();
+                output.push(Instruction::Call {
+                    dst: dst.map(|value| self.registers.value(value)),
+                    function: *function,
+                    arguments: arguments
+                        .iter()
+                        .map(|(parameter, value)| (*parameter, self.registers.value(*value)))
+                        .collect(),
+                    argument_sources,
+                    current_lifecycle: self.registers.lifecycle(*current_lifecycle),
+                    span: *span,
+                });
+            }
             FlowOp::BeginCall { .. } | FlowOp::ReserveArgument { .. } => {}
             FlowOp::Keep {
                 entity,
@@ -694,10 +697,138 @@ impl<'flow> FunctionLowerer<'flow> {
             .collect()
     }
 
-    fn argument_source(&self, place: &Place) -> ArgumentSource {
+    fn argument_source(
+        &mut self,
+        place: &Place,
+        span: keld_source::Span,
+        output: &mut Vec<Instruction>,
+    ) -> ArgumentSource {
         ArgumentSource {
             base: self.registers.local(place.base),
-            fields: place_fields(place),
+            projections: place
+                .projections
+                .iter()
+                .map(|projection| match projection {
+                    PlaceProjection::Field(field) => ArgumentProjection::Field(*field),
+                    PlaceProjection::Index(keld_flow::IndexIdentity::Value(value)) => {
+                        ArgumentProjection::Index(self.registers.value(*value))
+                    }
+                    PlaceProjection::Index(keld_flow::IndexIdentity::Constant(value)) => {
+                        let register = self
+                            .registers
+                            .add_scratch(IrType::Int, RegisterStorage::Trivial);
+                        output.push(Instruction::ConstInt {
+                            dst: register,
+                            value: *value,
+                            span,
+                        });
+                        ArgumentProjection::Index(register)
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn receiver(
+        &mut self,
+        receiver: &keld_flow::StorageReceiver,
+        span: keld_source::Span,
+        output: &mut Vec<Instruction>,
+    ) -> Receiver {
+        let source = receiver
+            .place
+            .as_ref()
+            .map(|place| self.argument_source(place, span, output));
+        Receiver {
+            list: self.registers.value(receiver.value),
+            source,
+        }
+    }
+
+    fn list_operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
+        match operation {
+            FlowOp::ListIndex {
+                dst,
+                receiver,
+                index,
+                span,
+            } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListIndex {
+                    dst: self.registers.value(*dst),
+                    receiver: lowered_receiver,
+                    index: self.registers.value(*index),
+                    span: *span,
+                });
+            }
+            FlowOp::ListGet {
+                dst,
+                receiver,
+                index,
+                span,
+            } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListGet {
+                    dst: self.registers.value(*dst),
+                    receiver: lowered_receiver,
+                    index: self.registers.value(*index),
+                    span: *span,
+                });
+            }
+            FlowOp::ListReplace {
+                receiver,
+                index,
+                value,
+                span,
+            } => {
+                let element = match self.registers.types
+                    [self.registers.value(receiver.value).0 as usize]
+                    .clone()
+                {
+                    IrType::List(element) => *element,
+                    _ => IrType::Unit,
+                };
+                let displaced = self
+                    .registers
+                    .add_scratch(element, RegisterStorage::DropSlot);
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListReplace {
+                    receiver: lowered_receiver,
+                    index: self.registers.value(*index),
+                    value: self.registers.value(*value),
+                    displaced,
+                    span: *span,
+                });
+                output.push(Instruction::DropSlot {
+                    slot: displaced,
+                    span: *span,
+                });
+            }
+            FlowOp::ReplacePlace { place, value, span } => {
+                let value_register = self.registers.value(*value);
+                let displaced = self.registers.add_scratch(
+                    self.registers.types[value_register.0 as usize].clone(),
+                    RegisterStorage::DropSlot,
+                );
+                let destination = self.argument_source(place, *span, output);
+                output.push(Instruction::ReplacePlace {
+                    destination,
+                    source: value_register,
+                    displaced,
+                    span: *span,
+                });
+                output.push(Instruction::DropSlot {
+                    slot: displaced,
+                    span: *span,
+                });
+            }
+            FlowOp::BeginIndexedReplacement { .. }
+            | FlowOp::EndIndexedReplacement { .. }
+            | FlowOp::ListTryRemove { .. }
+            | FlowOp::ListClear { .. }
+            | FlowOp::ListReserve { .. }
+            | FlowOp::ListTryReserve { .. } => {}
+            _ => unreachable!("non-list operation reached list lowering"),
         }
     }
 
@@ -868,21 +999,6 @@ impl<'flow> FunctionLowerer<'flow> {
     }
 }
 
-fn place_fields(place: &Place) -> Vec<keld_semantics::FieldId> {
-    place
-        .projections
-        .iter()
-        .map(|projection| match projection {
-            PlaceProjection::Field(field) => *field,
-            PlaceProjection::Index(_) => {
-                unimplemented!(
-                    "indexed ArgumentSource lowering is implemented in the next milestone"
-                )
-            }
-        })
-        .collect()
-}
-
 fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
     match types.kind(ty) {
         TypeKind::Unit => IrType::Unit,
@@ -896,7 +1012,8 @@ fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
         },
         TypeKind::Text => IrType::Text,
         TypeKind::List(element) => IrType::List(Box::new(map_type(types, *element))),
-        TypeKind::Optional(_) | TypeKind::Error => {
+        TypeKind::Optional(element) => IrType::Optional(Box::new(map_type(types, *element))),
+        TypeKind::Error => {
             unreachable!("verified bootstrap flow contains only executable types")
         }
     }

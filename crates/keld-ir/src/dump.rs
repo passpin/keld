@@ -106,10 +106,10 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
         } => {
             write!(
                 output,
-                "list-push-place r{} base r{} fields{} r{} ",
+                "list-push-place r{} base r{} projections{} r{} ",
                 list.0,
                 source.base.0,
-                source.fields.len(),
+                source.projections.len(),
                 value.0
             )
             .expect("writing to String cannot fail");
@@ -134,12 +134,55 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
         } => {
             write!(
                 output,
-                "r{} = list-remove-place r{} base r{} fields{} r{} ",
+                "r{} = list-remove-place r{} base r{} projections{} r{} ",
                 dst.0,
                 list.0,
                 source.base.0,
-                source.fields.len(),
+                source.projections.len(),
                 index.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListIndex {
+            dst,
+            receiver,
+            index,
+            span,
+        } => {
+            write!(
+                output,
+                "r{} = list-index r{} r{} ",
+                dst.0, receiver.list.0, index.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListGet {
+            dst,
+            receiver,
+            index,
+            span,
+        } => {
+            write!(
+                output,
+                "r{} = list-get r{} r{} ",
+                dst.0, receiver.list.0, index.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListReplace {
+            receiver,
+            index,
+            value,
+            displaced,
+            span,
+        } => {
+            write!(
+                output,
+                "list-replace r{} r{} <- r{} displaced r{} ",
+                receiver.list.0, index.0, value.0, displaced.0
             )
             .expect("writing to String cannot fail");
             write_span(output, *span);
@@ -409,9 +452,9 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
         } => {
             write!(
                 output,
-                "replace-place base r{} fields{} <- r{} displaced r{} ",
+                "replace-place base r{} projections{} <- r{} displaced r{} ",
                 destination.base.0,
-                destination.fields.len(),
+                destination.projections.len(),
                 source.0,
                 displaced.0
             )
@@ -445,6 +488,9 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
         | Instruction::ListPushPlace { .. }
         | Instruction::ListRemove { .. }
         | Instruction::ListRemovePlace { .. }
+        | Instruction::ListIndex { .. }
+        | Instruction::ListGet { .. }
+        | Instruction::ListReplace { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }
@@ -558,6 +604,7 @@ fn type_name(ty: &IrType) -> String {
         }
         IrType::Text => "Text".to_owned(),
         IrType::List(element) => format!("List[{}]", type_name(element)),
+        IrType::Optional(element) => format!("Optional[{}]", type_name(element)),
         IrType::Lifecycle => "Lifecycle".to_owned(),
     }
 }

@@ -22,7 +22,19 @@ pub enum RegisterStorage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArgumentSource {
     pub base: Register,
-    pub fields: Vec<keld_semantics::FieldId>,
+    pub projections: Vec<ArgumentProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArgumentProjection {
+    Field(keld_semantics::FieldId),
+    Index(Register),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Receiver {
+    pub list: Register,
+    pub source: Option<ArgumentSource>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -41,6 +53,7 @@ pub enum IrType {
     Link { entity: DefId, optional: bool },
     Text,
     List(Box<IrType>),
+    Optional(Box<IrType>),
     Lifecycle,
 }
 

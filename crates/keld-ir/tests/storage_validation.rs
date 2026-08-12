@@ -118,6 +118,26 @@ fn remove_first_drop_slot(module: &mut Module) {
     panic!("compiler-produced drop slot exists");
 }
 
+fn remove_drop_after_list_replace(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(index) = block
+                .instructions
+                .iter()
+                .position(|instruction| matches!(instruction, Instruction::ListReplace { .. }))
+            {
+                assert!(matches!(
+                    block.instructions.get(index + 1),
+                    Some(Instruction::DropSlot { .. })
+                ));
+                block.instructions.remove(index + 1);
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced list replacement exists");
+}
+
 #[test]
 fn managed_home_cannot_return_live_without_cleanup() {
     let mut module = lower_ok("fn main() -> Int { let value: Text = \"Keld\"; return 0; }\n");
@@ -157,5 +177,22 @@ fn displaced_values_must_be_dropped_after_replacement() {
     let mut module =
         lower_ok("fn main() -> Int { var value: Text = \"old\"; value = \"new\"; return 0; }\n");
     remove_first_drop_slot(&mut module);
+    assert_ir_error(&module, "live displaced value at return");
+}
+
+#[test]
+fn list_get_lowers_to_a_valid_optional_result() {
+    let module = lower_ok(
+        "fn main() -> Int { let items: List[Int] = List(); let maybe = items.get(0); return 0; }\n",
+    );
+    assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
+}
+
+#[test]
+fn indexed_replacement_requires_displaced_cleanup() {
+    let mut module = lower_ok(
+        "fn main() -> Int { let items: List[Text] = List(); items.push(\"old\"); items[0] = \"new\"; return 0; }\n",
+    );
+    remove_drop_after_list_replace(&mut module);
     assert_ir_error(&module, "live displaced value at return");
 }

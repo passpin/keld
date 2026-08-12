@@ -1,6 +1,8 @@
 use keld_runtime::{EntityId, Link, RuntimeLifecycleId};
 use keld_semantics::DefId;
 
+use crate::RuntimeList;
+
 #[derive(Debug, Eq)]
 pub enum RuntimeText {
     Inline { len: u8, bytes: [u8; 22] },
@@ -62,7 +64,8 @@ pub enum Value {
         definition: DefId,
         fields: Vec<Value>,
     },
-    List(Vec<Value>),
+    List(RuntimeList),
+    Optional(Option<Box<Value>>),
     Entity(EntityId),
     Link(Option<Link>),
     #[doc(hidden)]
@@ -75,8 +78,9 @@ pub struct EntityPayload {
     pub fields: Vec<Value>,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct CopyAllocation;
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CopyAllocation;
 
 enum CopyTask<'value> {
     Visit(&'value Value),
@@ -125,14 +129,21 @@ pub(crate) fn try_copy_value(value: &Value) -> Result<Value, CopyAllocation> {
                     }
                 }
                 Value::List(elements) => {
-                    work.try_reserve(elements.len().saturating_add(1))
+                    work.try_reserve(elements.length().saturating_add(1))
                         .map_err(|_| CopyAllocation)?;
                     work.push(CopyTask::FinishList {
-                        elements: elements.len(),
+                        elements: elements.length(),
                     });
-                    for element in elements.iter().rev() {
+                    for element in elements.as_slice().iter().rev() {
                         work.push(CopyTask::Visit(element));
                     }
+                }
+                Value::Optional(Some(value)) => push_completed(
+                    &mut completed,
+                    Value::Optional(Some(Box::new(try_copy_value(value)?))),
+                )?,
+                Value::Optional(None) => {
+                    push_completed(&mut completed, Value::Optional(None))?;
                 }
             },
             CopyTask::FinishStruct { definition, fields } => {
@@ -160,7 +171,10 @@ pub(crate) fn try_copy_value(value: &Value) -> Result<Value, CopyAllocation> {
                     .try_reserve_exact(elements)
                     .map_err(|_| CopyAllocation)?;
                 copied.extend(completed.drain(start..));
-                push_completed(&mut completed, Value::List(copied))?;
+                push_completed(
+                    &mut completed,
+                    Value::List(RuntimeList::from_values(copied)),
+                )?;
             }
         }
     }

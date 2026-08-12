@@ -5,8 +5,8 @@ use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
 use crate::value::{CopyAllocation, EntityPayload, Value, try_copy_value};
 use keld_ir::{
-    ArgumentSource, FaultKind, Function, Instruction, IrBlockId, Module, Register, Terminator,
-    ViewMode,
+    ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, Module,
+    Receiver, Register, Terminator, ViewMode,
 };
 use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
@@ -312,14 +312,14 @@ fn execute_instruction(
             set_register(frames, *dst, value)?;
         }
         Instruction::ListNew { dst, .. } => {
-            set_register(frames, *dst, Value::List(Vec::new()))?;
+            set_register(frames, *dst, Value::List(crate::RuntimeList::new()))?;
         }
         Instruction::ListLength { dst, list, .. } => {
             let length = with_register_value(module, store, frames, *list, span, |value| {
                 let Value::List(elements) = value else {
                     return Err(internal("validated list length received a non-list"));
                 };
-                i64::try_from(elements.len())
+                i64::try_from(elements.length())
                     .map_err(|_| internal("validated List length exceeds Int"))
             })?;
             set_register(frames, *dst, Value::Int(length))?;
@@ -332,21 +332,21 @@ fn execute_instruction(
                 };
                 elements
                     .try_reserve(1)
-                    .map_err(|_| allocation_failure(span))?;
+                    .map_err(|()| allocation_failure(span))?;
                 elements.push(value);
                 Ok(())
             })?;
         }
         Instruction::ListPushPlace { source, value, .. } => {
             let value = take_argument(module, store, frames, *value, span, controls)?;
-            let place = runtime_place_for_source(frames, source);
+            let place = runtime_place_for_source(frames, source, span)?;
             with_place_mut(module, store, frames, &place, span, |list_value| {
                 let Value::List(elements) = list_value else {
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
                     .try_reserve(1)
-                    .map_err(|_| allocation_failure(span))?;
+                    .map_err(|()| allocation_failure(span))?;
                 elements.push(value);
                 Ok(())
             })?;
@@ -361,7 +361,7 @@ fn execute_instruction(
                 let Value::List(elements) = list_value else {
                     return Err(internal("validated list remove received a non-list"));
                 };
-                if index >= elements.len() {
+                if index >= elements.length() {
                     return Err(bounds_failure(span));
                 }
                 Ok(elements.remove(index))
@@ -374,17 +374,91 @@ fn execute_instruction(
             let index = with_register_value(module, store, frames, *index, span, |value| {
                 usize::try_from(expect_int(value)?).map_err(|_| bounds_failure(span))
             })?;
-            let place = runtime_place_for_source(frames, source);
+            let place = runtime_place_for_source(frames, source, span)?;
             let removed = with_place_mut(module, store, frames, &place, span, |list_value| {
                 let Value::List(elements) = list_value else {
                     return Err(internal("validated list remove received a non-list"));
                 };
-                if index >= elements.len() {
+                if index >= elements.length() {
                     return Err(bounds_failure(span));
                 }
                 Ok(elements.remove(index))
             })?;
             set_register(frames, *dst, removed)?;
+        }
+        Instruction::ListIndex {
+            dst,
+            receiver,
+            index,
+            ..
+        } => {
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let Some(index) = checked_receiver_index(module, store, frames, &place, *index, span)?
+            else {
+                return Err(bounds_failure(span));
+            };
+            if is_loan_register(module, frames, *dst) {
+                let loan = place.project(RuntimeProjection::Index(index));
+                frames
+                    .last_mut()
+                    .ok_or_else(|| internal("indexed loan has no active frame"))?
+                    .set_loan(*dst, loan)
+                    .map_err(|()| internal("validated indexed loan destination is not empty"))?;
+            } else {
+                let value = with_place_value(module, store, frames, &place, span, |list| {
+                    let Value::List(elements) = list else {
+                        return Err(internal("validated list index received a non-list"));
+                    };
+                    let element = elements.get(index).ok_or_else(|| bounds_failure(span))?;
+                    structural_copy(element, span, controls)
+                })?;
+                set_register(frames, *dst, value)?;
+            }
+        }
+        Instruction::ListGet {
+            dst,
+            receiver,
+            index,
+            ..
+        } => {
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
+                Some(index) => with_place_value(module, store, frames, &place, span, |list| {
+                    let Value::List(elements) = list else {
+                        return Err(internal("validated list get received a non-list"));
+                    };
+                    let element = elements.get(index).ok_or_else(|| {
+                        internal("validated list get index changed during access")
+                    })?;
+                    structural_copy(element, span, controls).map(|value| Some(Box::new(value)))
+                })?,
+                None => None,
+            };
+            set_register(frames, *dst, Value::Optional(value))?;
+        }
+        Instruction::ListReplace {
+            receiver,
+            index,
+            value,
+            displaced,
+            ..
+        } => {
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let Some(index) = checked_receiver_index(module, store, frames, &place, *index, span)?
+            else {
+                return Err(bounds_failure(span));
+            };
+            let incoming = take_argument(module, store, frames, *value, span, controls)?;
+            let previous = with_place_mut(module, store, frames, &place, span, |list| {
+                let Value::List(elements) = list else {
+                    return Err(internal("validated list replacement received a non-list"));
+                };
+                let destination = elements
+                    .get_mut(index)
+                    .ok_or_else(|| bounds_failure(span))?;
+                Ok(std::mem::replace(destination, incoming))
+            })?;
+            set_register(frames, *displaced, previous)?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
             let length = with_register_value(module, store, frames, *text, span, |value| {
@@ -837,6 +911,9 @@ fn execute_call_or_retirement(
         | Instruction::ListPushPlace { .. }
         | Instruction::ListRemove { .. }
         | Instruction::ListRemovePlace { .. }
+        | Instruction::ListIndex { .. }
+        | Instruction::ListGet { .. }
+        | Instruction::ListReplace { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }
@@ -912,10 +989,17 @@ fn execute_call(
                 .iter()
                 .find(|(candidate, _)| *candidate == *parameter)
                 .and_then(|(_, source)| source.as_ref());
-            let place = source.map_or_else(
-                || runtime_place_for_register(frames, *register),
-                |source| runtime_place_for_source(frames, source),
-            );
+            let place = if frames
+                .last()
+                .and_then(|frame| frame.loan(*register))
+                .is_some()
+            {
+                runtime_place_for_register(frames, *register)
+            } else if let Some(source) = source {
+                runtime_place_for_source(frames, source, span)?
+            } else {
+                runtime_place_for_register(frames, *register)
+            };
             loans.push((callee_register, place));
             continue;
         }
@@ -1234,6 +1318,40 @@ fn runtime_place_for_register(frames: &[Frame], register: Register) -> RuntimePl
     RuntimePlace::frame(frame, register)
 }
 
+fn runtime_place_for_receiver(
+    frames: &[Frame],
+    receiver: &Receiver,
+    span: Span,
+) -> Result<RuntimePlace, InterpreterFailure> {
+    if let Some(place) = frames.last().and_then(|frame| frame.loan(receiver.list)) {
+        return Ok(place.clone());
+    }
+    receiver.source.as_ref().map_or_else(
+        || Ok(runtime_place_for_register(frames, receiver.list)),
+        |source| runtime_place_for_source(frames, source, span),
+    )
+}
+
+fn checked_receiver_index(
+    module: &Module,
+    store: &Store<EntityPayload>,
+    frames: &[Frame],
+    place: &RuntimePlace,
+    index: Register,
+    span: Span,
+) -> Result<Option<usize>, InterpreterFailure> {
+    let raw = with_register_value(module, store, frames, index, span, |value| {
+        expect_int(value)
+    })?;
+    let length = with_place_value(module, store, frames, place, span, |value| {
+        let Value::List(elements) = value else {
+            return Err(internal("validated indexed receiver is not a List"));
+        };
+        Ok(elements.length())
+    })?;
+    Ok(usize::try_from(raw).ok().filter(|index| *index < length))
+}
+
 fn is_loan_register(module: &Module, frames: &[Frame], register: Register) -> bool {
     frames
         .last()
@@ -1250,8 +1368,12 @@ fn is_home_register(module: &Module, frames: &[Frame], register: Register) -> bo
         .is_some_and(|storage| matches!(storage, keld_ir::RegisterStorage::Home { .. }))
 }
 
-fn runtime_place_for_source(frames: &[Frame], source: &ArgumentSource) -> RuntimePlace {
-    let mut place = if source.fields.is_empty() {
+fn runtime_place_for_source(
+    frames: &[Frame],
+    source: &ArgumentSource,
+    span: Span,
+) -> Result<RuntimePlace, InterpreterFailure> {
+    let mut place = if source.projections.is_empty() {
         runtime_place_for_register(frames, source.base)
     } else {
         match frames.last().and_then(|frame| frame.value(source.base)) {
@@ -1262,10 +1384,17 @@ fn runtime_place_for_source(frames: &[Frame], source: &ArgumentSource) -> Runtim
             _ => runtime_place_for_register(frames, source.base),
         }
     };
-    for field in &source.fields {
-        place = place.project(RuntimeProjection::Field(*field));
+    for projection in &source.projections {
+        place = match projection {
+            ArgumentProjection::Field(field) => place.project(RuntimeProjection::Field(*field)),
+            ArgumentProjection::Index(index) => {
+                let raw = expect_int(frame_value(frames, *index)?)?;
+                let index = usize::try_from(raw).map_err(|_| bounds_failure(span))?;
+                place.project(RuntimeProjection::Index(index))
+            }
+        };
     }
-    place
+    Ok(place)
 }
 
 fn with_register_value<R>(
@@ -1323,7 +1452,7 @@ fn with_place_value<R>(
                 .get(frame.0)
                 .and_then(|frame| frame.value(register))
                 .ok_or_else(|| internal("loan root register is undefined"))?;
-            access_projected(module, value, &place.projections, access)
+            access_projected(module, value, &place.projections, span, access)
         }
         RuntimePlaceRoot::Entity { entity } => store
             .read(entity, |payload| {
@@ -1335,7 +1464,7 @@ fn with_place_value<R>(
                     .fields
                     .get(index)
                     .ok_or_else(|| internal("entity payload layout is invalid"))?;
-                access_projected(module, value, &place.projections[1..], access)
+                access_projected(module, value, &place.projections[1..], span, access)
             })
             .map_err(|error| store_failure(error, span))?,
     }
@@ -1355,7 +1484,7 @@ fn with_place_mut<R>(
                 .get_mut(frame.0)
                 .and_then(|frame| frame.value_mut(register))
                 .ok_or_else(|| internal("loan root register is undefined"))?;
-            access_projected_mut(module, value, &place.projections, access)
+            access_projected_mut(module, value, &place.projections, span, access)
         }
         RuntimePlaceRoot::Entity { entity } => store
             .edit(entity, |payload| {
@@ -1367,7 +1496,7 @@ fn with_place_mut<R>(
                     .fields
                     .get_mut(index)
                     .ok_or_else(|| internal("entity payload layout is invalid"))?;
-                access_projected_mut(module, value, &place.projections[1..], access)
+                access_projected_mut(module, value, &place.projections[1..], span, access)
             })
             .map_err(|error| store_failure(error, span))?,
     }
@@ -1377,6 +1506,7 @@ fn access_projected<R>(
     module: &Module,
     mut value: &Value,
     projections: &[RuntimeProjection],
+    span: Span,
     access: impl FnOnce(&Value) -> Result<R, InterpreterFailure>,
 ) -> Result<R, InterpreterFailure> {
     for projection in projections {
@@ -1394,9 +1524,7 @@ fn access_projected<R>(
                 let Value::List(elements) = value else {
                     return Err(internal("loan index projection requires a list"));
                 };
-                elements
-                    .get(*index)
-                    .ok_or_else(|| internal("loan list index is out of bounds"))?
+                elements.get(*index).ok_or_else(|| bounds_failure(span))?
             }
         };
     }
@@ -1407,6 +1535,7 @@ fn access_projected_mut<R>(
     module: &Module,
     mut value: &mut Value,
     projections: &[RuntimeProjection],
+    span: Span,
     access: impl FnOnce(&mut Value) -> Result<R, InterpreterFailure>,
 ) -> Result<R, InterpreterFailure> {
     for projection in projections {
@@ -1426,7 +1555,7 @@ fn access_projected_mut<R>(
                 };
                 elements
                     .get_mut(*index)
-                    .ok_or_else(|| internal("loan list index is out of bounds"))?
+                    .ok_or_else(|| bounds_failure(span))?
             }
         };
     }
@@ -1489,45 +1618,10 @@ fn take_source(
     source: &ArgumentSource,
     span: Span,
 ) -> Result<Value, InterpreterFailure> {
-    if source.fields.is_empty() {
-        return take_register(frames, source.base);
-    }
-    let is_entity = matches!(frame_value(frames, source.base)?, Value::Entity(_));
-    if is_entity {
-        let entity = expect_entity(frame_value(frames, source.base)?)?;
-        let value = store
-            .edit(entity, |payload| {
-                let index = field_index(module, payload.definition, source.fields[0])?;
-                if source.fields.len() == 1 {
-                    Ok(std::mem::replace(
-                        payload
-                            .fields
-                            .get_mut(index)
-                            .ok_or_else(|| internal("entity payload layout is invalid"))?,
-                        Value::Unit,
-                    ))
-                } else {
-                    take_nested(
-                        module,
-                        payload
-                            .fields
-                            .get_mut(index)
-                            .ok_or_else(|| internal("entity payload layout is invalid"))?,
-                        &source.fields[1..],
-                    )
-                }
-            })
-            .map_err(|error| store_failure(error, span))??;
-        return Ok(value);
-    }
-    let mut aggregate = take_register(frames, source.base)?;
-    let value = take_nested(module, &mut aggregate, &source.fields)?;
-    frames
-        .last_mut()
-        .ok_or_else(|| internal("source writeback has no active frame"))?
-        .set(source.base, aggregate)
-        .map_err(|()| internal("source base register is outside the caller frame"))?;
-    Ok(value)
+    let place = runtime_place_for_source(frames, source, span)?;
+    with_place_mut(module, store, frames, &place, span, |destination| {
+        Ok(std::mem::replace(destination, Value::Unit))
+    })
 }
 
 fn write_source(
@@ -1538,86 +1632,11 @@ fn write_source(
     value: Value,
     span: Span,
 ) -> Result<(), InterpreterFailure> {
-    if source.fields.is_empty() {
-        return set_register(frames, source.base, value);
-    }
-    let is_entity = matches!(frame_value(frames, source.base)?, Value::Entity(_));
-    if is_entity {
-        let entity = expect_entity(frame_value(frames, source.base)?)?;
-        store
-            .edit(entity, |payload| {
-                let index = field_index(module, payload.definition, source.fields[0])?;
-                let destination = payload
-                    .fields
-                    .get_mut(index)
-                    .ok_or_else(|| internal("entity payload layout is invalid"))?;
-                if source.fields.len() == 1 {
-                    *destination = value;
-                    Ok(())
-                } else {
-                    write_nested(module, destination, &source.fields[1..], value)
-                }
-            })
-            .map_err(|error| store_failure(error, span))??;
-        return Ok(());
-    }
-    let mut aggregate = take_register(frames, source.base)?;
-    write_nested(module, &mut aggregate, &source.fields, value)?;
-    frames
-        .last_mut()
-        .ok_or_else(|| internal("source writeback has no active frame"))?
-        .set(source.base, aggregate)
-        .map_err(|()| internal("source base register is outside the caller frame"))
-}
-
-fn take_nested(
-    module: &Module,
-    value: &mut Value,
-    fields: &[FieldId],
-) -> Result<Value, InterpreterFailure> {
-    let Some(field) = fields.first().copied() else {
-        return Ok(std::mem::replace(value, Value::Unit));
-    };
-    let Value::Struct {
-        definition,
-        fields: values,
-    } = value
-    else {
-        return Err(internal(
-            "argument source path does not name a struct field",
-        ));
-    };
-    let index = field_index(module, *definition, field)?;
-    let destination = values
-        .get_mut(index)
-        .ok_or_else(|| internal("struct payload layout is invalid"))?;
-    take_nested(module, destination, &fields[1..])
-}
-
-fn write_nested(
-    module: &Module,
-    value: &mut Value,
-    fields: &[FieldId],
-    replacement: Value,
-) -> Result<(), InterpreterFailure> {
-    let Some(field) = fields.first().copied() else {
-        *value = replacement;
-        return Ok(());
-    };
-    let Value::Struct {
-        definition,
-        fields: values,
-    } = value
-    else {
-        return Err(internal(
-            "argument source path does not name a struct field",
-        ));
-    };
-    let index = field_index(module, *definition, field)?;
-    let destination = values
-        .get_mut(index)
-        .ok_or_else(|| internal("struct payload layout is invalid"))?;
-    write_nested(module, destination, &fields[1..], replacement)
+    let place = runtime_place_for_source(frames, source, span)?;
+    with_place_mut(module, store, frames, &place, span, |destination| {
+        *destination = value;
+        Ok(())
+    })
 }
 
 fn active_view(frames: &[Frame], view: keld_ir::ViewId) -> Result<ActiveView, InterpreterFailure> {
@@ -1769,6 +1788,9 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListPushPlace { span, .. }
         | Instruction::ListRemove { span, .. }
         | Instruction::ListRemovePlace { span, .. }
+        | Instruction::ListIndex { span, .. }
+        | Instruction::ListGet { span, .. }
+        | Instruction::ListReplace { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }
