@@ -133,6 +133,16 @@ pub enum Instruction {
         displaced: Register,
         span: Span,
     },
+    ListTryRemove {
+        dst: Register,
+        receiver: crate::Receiver,
+        index: Register,
+        span: Span,
+    },
+    ListClear {
+        receiver: crate::Receiver,
+        span: Span,
+    },
     TextByteLength {
         dst: Register,
         text: Register,

@@ -64,3 +64,41 @@ fn get_returns_none_without_fault_and_does_not_change_the_list() {
     assert_eq!(list.length(), 1);
     assert_eq!(list.get_copy(0), Ok(Some(Value::Int(7))));
 }
+
+#[test]
+fn try_remove_invalid_returns_none_and_preserves_length() {
+    let mut list = RuntimeList::from_values(vec![Value::Int(7)]);
+    assert_eq!(list.try_remove(1), None);
+    assert_eq!(list.length(), 1);
+}
+
+#[test]
+fn try_remove_success_returns_owned_element_and_closes_the_gap() {
+    let result = run_text_for_test(
+        "fn main() -> Int { let inner: List[Int] = List(); inner.push(7); let outer: List[List[Int]] = List(); outer.push(take inner); let removed = outer.try_remove(0); return outer.length }\n",
+    )
+    .expect("successful try_remove executes");
+    assert_eq!(result.value, Value::Int(0));
+}
+
+#[test]
+fn clear_destroys_elements_in_reverse_index_order() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let items: List[Text] = List(); items.push(\"a\"); items.push(\"b\"); items.push(\"c\"); items.clear(); return 0 }\n",
+    )
+    .expect("clear executes");
+    assert_eq!(trace.list_indices(), vec![2, 1, 0]);
+    assert_eq!(trace.text_markers(), vec![(1, b'c'), (1, b'b'), (1, b'a')]);
+}
+
+#[test]
+fn remove_and_clear_preserve_capacity() {
+    let mut list = RuntimeList::with_capacity_for_test(8);
+    list.push_for_test(Value::Int(1));
+    list.push_for_test(Value::Int(2));
+    let capacity = list.capacity_for_test();
+    let _ = list.remove(0);
+    let mut removed = Vec::new();
+    list.clear_into(&mut removed);
+    assert_eq!(list.capacity_for_test(), capacity);
+}

@@ -460,6 +460,57 @@ fn execute_instruction(
             })?;
             set_register(frames, *displaced, previous)?;
         }
+        Instruction::ListTryRemove {
+            dst,
+            receiver,
+            index,
+            ..
+        } => {
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
+                Some(index) => {
+                    let removed = with_place_mut(module, store, frames, &place, span, |list| {
+                        let Value::List(elements) = list else {
+                            return Err(internal("validated try_remove received a non-list"));
+                        };
+                        elements.try_remove(index).ok_or_else(|| {
+                            internal("validated try_remove index changed during access")
+                        })
+                    })?;
+                    Some(Box::new(removed))
+                }
+                None => None,
+            };
+            set_register(frames, *dst, Value::Optional(value))?;
+        }
+        Instruction::ListClear { receiver, .. } => {
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let length = with_place_value(module, store, frames, &place, span, |list| {
+                let Value::List(elements) = list else {
+                    return Err(internal("validated clear received a non-list"));
+                };
+                Ok(elements.length())
+            })?;
+            let mut removed = Vec::new();
+            removed
+                .try_reserve_exact(length)
+                .map_err(|_| allocation_failure(span))?;
+            with_place_mut(module, store, frames, &place, span, |list| {
+                let Value::List(elements) = list else {
+                    return Err(internal("validated clear received a non-list"));
+                };
+                elements.clear_into(&mut removed);
+                Ok(())
+            })?;
+            for (index, value) in (0..length).rev().zip(removed) {
+                cleanup_value(
+                    module,
+                    value,
+                    CleanupPath::ListElement { index },
+                    cleanup_trace.as_mut(),
+                );
+            }
+        }
         Instruction::TextByteLength { dst, text, .. } => {
             let length = with_register_value(module, store, frames, *text, span, |value| {
                 let Value::Text(value) = value else {
@@ -914,6 +965,8 @@ fn execute_call_or_retirement(
         | Instruction::ListIndex { .. }
         | Instruction::ListGet { .. }
         | Instruction::ListReplace { .. }
+        | Instruction::ListTryRemove { .. }
+        | Instruction::ListClear { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }
@@ -1791,6 +1844,8 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListIndex { span, .. }
         | Instruction::ListGet { span, .. }
         | Instruction::ListReplace { span, .. }
+        | Instruction::ListTryRemove { span, .. }
+        | Instruction::ListClear { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }

@@ -745,6 +745,7 @@ impl<'flow> FunctionLowerer<'flow> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn list_operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
         match operation {
             FlowOp::ListIndex {
@@ -772,6 +773,27 @@ impl<'flow> FunctionLowerer<'flow> {
                     dst: self.registers.value(*dst),
                     receiver: lowered_receiver,
                     index: self.registers.value(*index),
+                    span: *span,
+                });
+            }
+            FlowOp::ListTryRemove {
+                dst,
+                receiver,
+                index,
+                span,
+            } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListTryRemove {
+                    dst: self.registers.value(*dst),
+                    receiver: lowered_receiver,
+                    index: self.registers.value(*index),
+                    span: *span,
+                });
+            }
+            FlowOp::ListClear { receiver, span } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListClear {
+                    receiver: lowered_receiver,
                     span: *span,
                 });
             }
@@ -824,8 +846,6 @@ impl<'flow> FunctionLowerer<'flow> {
             }
             FlowOp::BeginIndexedReplacement { .. }
             | FlowOp::EndIndexedReplacement { .. }
-            | FlowOp::ListTryRemove { .. }
-            | FlowOp::ListClear { .. }
             | FlowOp::ListReserve { .. }
             | FlowOp::ListTryReserve { .. } => {}
             _ => unreachable!("non-list operation reached list lowering"),

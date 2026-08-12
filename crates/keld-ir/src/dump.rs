@@ -187,6 +187,25 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
             .expect("writing to String cannot fail");
             write_span(output, *span);
         }
+        Instruction::ListTryRemove {
+            dst,
+            receiver,
+            index,
+            span,
+        } => {
+            write!(
+                output,
+                "r{} = list-try-remove r{} r{} ",
+                dst.0, receiver.list.0, index.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListClear { receiver, span } => {
+            write!(output, "list-clear r{} ", receiver.list.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
         Instruction::TextByteLength { dst, text, span } => {
             write!(output, "r{} = text-byte-length r{} ", dst.0, text.0)
                 .expect("writing to String cannot fail");
@@ -491,6 +510,8 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
         | Instruction::ListIndex { .. }
         | Instruction::ListGet { .. }
         | Instruction::ListReplace { .. }
+        | Instruction::ListTryRemove { .. }
+        | Instruction::ListClear { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }

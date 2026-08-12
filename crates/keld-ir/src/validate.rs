@@ -1120,6 +1120,35 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 self.expect_type(*value, &element, span);
                 self.expect_type(*displaced, &element, span);
             }
+            Instruction::ListTryRemove {
+                dst,
+                receiver,
+                index,
+                ..
+            } => {
+                let Some(element) = self.validate_receiver(receiver, span) else {
+                    self.check_register(*dst, span);
+                    self.check_register(*index, span);
+                    return;
+                };
+                self.expect_type(*index, &IrType::Int, span);
+                self.expect_type(*dst, &IrType::Optional(Box::new(element.clone())), span);
+                if !is_implicit_copy_type(self.module, &element)
+                    && !matches!(
+                        self.register_storage(*dst),
+                        Some(RegisterStorage::Home { .. })
+                    )
+                {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "non-copyable try_remove results must be Home registers",
+                    );
+                }
+            }
+            Instruction::ListClear { receiver, .. } => {
+                self.validate_receiver(receiver, span);
+            }
             Instruction::TextByteLength { dst, text, .. } => {
                 self.expect_type(*dst, &IrType::Int, span);
                 self.expect_type(*text, &IrType::Text, span);
@@ -1328,6 +1357,8 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             | Instruction::ListIndex { .. }
             | Instruction::ListGet { .. }
             | Instruction::ListReplace { .. }
+            | Instruction::ListTryRemove { .. }
+            | Instruction::ListClear { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -1840,6 +1871,7 @@ fn transfer_home_states(
             | Instruction::ListRemovePlace { dst, .. }
             | Instruction::ListIndex { dst, .. }
             | Instruction::ListGet { dst, .. }
+            | Instruction::ListTryRemove { dst, .. }
             | Instruction::TextConcat { dst, .. }
             | Instruction::CheckedUnaryInt { dst, .. }
             | Instruction::CheckedBinaryInt { dst, .. }
@@ -1974,7 +2006,8 @@ fn transfer_home_states(
             | Instruction::CloseView { .. }
             | Instruction::EndLifecycle { .. }
             | Instruction::KeepEntity { .. }
-            | Instruction::RetireEntity { .. } => {}
+            | Instruction::RetireEntity { .. }
+            | Instruction::ListClear { .. } => {}
         }
     }
     state
@@ -2037,6 +2070,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::ListRemovePlace { dst, .. }
         | Instruction::ListIndex { dst, .. }
         | Instruction::ListGet { dst, .. }
+        | Instruction::ListTryRemove { dst, .. }
         | Instruction::TextByteLength { dst, .. }
         | Instruction::TextIsEmpty { dst, .. }
         | Instruction::TextConcat { dst, .. }
@@ -2067,6 +2101,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::CloseView { .. }
         | Instruction::ListPush { .. }
         | Instruction::ListPushPlace { .. }
+        | Instruction::ListClear { .. }
         | Instruction::KeepEntity { .. }
         | Instruction::RetireEntity { .. } => None,
     }
@@ -2129,6 +2164,9 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         }
         | Instruction::ListGet {
             receiver, index, ..
+        }
+        | Instruction::ListTryRemove {
+            receiver, index, ..
         } => receiver_registers(receiver)
             .into_iter()
             .chain(std::iter::once(*index))
@@ -2142,6 +2180,7 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
             .into_iter()
             .chain([*index, *value])
             .collect(),
+        Instruction::ListClear { receiver, .. } => receiver_registers(receiver),
         Instruction::TextByteLength { text, .. } | Instruction::TextIsEmpty { text, .. } => {
             vec![*text]
         }
@@ -2232,6 +2271,8 @@ fn is_structural(instruction: &Instruction) -> bool {
             | Instruction::ListIndex { .. }
             | Instruction::ListGet { .. }
             | Instruction::ListReplace { .. }
+            | Instruction::ListTryRemove { .. }
+            | Instruction::ListClear { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -2276,6 +2317,8 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListIndex { span, .. }
         | Instruction::ListGet { span, .. }
         | Instruction::ListReplace { span, .. }
+        | Instruction::ListTryRemove { span, .. }
+        | Instruction::ListClear { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }

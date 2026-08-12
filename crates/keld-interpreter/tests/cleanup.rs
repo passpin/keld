@@ -63,3 +63,12 @@ fn fields_and_list_elements_drop_in_reverse_order_iteratively() {
         vec![FieldId(1), FieldId(0), FieldId(1), FieldId(0)]
     );
 }
+
+#[test]
+fn optional_try_remove_result_cleans_present_element() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let values: List[Text] = List(); values.push(\"x\"); let removed = values.try_remove(0); return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.text_markers(), vec![(1, b'x')]);
+}

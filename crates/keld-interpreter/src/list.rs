@@ -8,6 +8,14 @@ pub struct RuntimeList {
 impl RuntimeList {
     #[doc(hidden)]
     #[must_use]
+    pub fn with_capacity_for_test(capacity: usize) -> Self {
+        Self {
+            elements: Vec::with_capacity(capacity),
+        }
+    }
+
+    #[doc(hidden)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             elements: Vec::new(),
@@ -24,6 +32,17 @@ impl RuntimeList {
     #[must_use]
     pub fn length(&self) -> usize {
         self.elements.len()
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn capacity_for_test(&self) -> usize {
+        self.elements.capacity()
+    }
+
+    #[doc(hidden)]
+    pub fn push_for_test(&mut self, value: Value) {
+        self.elements.push(value);
     }
 
     #[doc(hidden)]
@@ -45,8 +64,21 @@ impl RuntimeList {
         self.elements.push(value);
     }
 
-    pub(crate) fn remove(&mut self, index: usize) -> Value {
+    #[doc(hidden)]
+    pub fn remove(&mut self, index: usize) -> Value {
         self.elements.remove(index)
+    }
+
+    #[doc(hidden)]
+    pub fn try_remove(&mut self, index: usize) -> Option<Value> {
+        (index < self.elements.len()).then(|| self.remove(index))
+    }
+
+    #[doc(hidden)]
+    pub fn clear_into(&mut self, cleanup: &mut Vec<Value>) {
+        while let Some(value) = self.elements.pop() {
+            cleanup.push(value);
+        }
     }
 
     pub(crate) fn get(&self, index: usize) -> Option<&Value> {
