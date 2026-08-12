@@ -1,3 +1,4 @@
+use crate::cleanup::{CleanupPath, CleanupTrace, ExecutionTrace, cleanup_payload, cleanup_value};
 use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFaultKind};
 use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
@@ -37,6 +38,7 @@ pub struct Interpreter<'module> {
     frames: Vec<Frame>,
     started: bool,
     controls: TestControls,
+    cleanup_trace: Option<CleanupTrace>,
 }
 
 impl<'module> Interpreter<'module> {
@@ -47,12 +49,24 @@ impl<'module> Interpreter<'module> {
     /// Returns a static IR error, an internal store error, or an allocation
     /// fault associated with the main function span.
     pub fn new(module: &'module Module) -> Result<Self, InterpreterFailure> {
-        Self::with_controls(module, TestControls::default())
+        Self::with_options(module, TestControls::default(), false)
     }
 
     fn with_controls(
         module: &'module Module,
         controls: TestControls,
+    ) -> Result<Self, InterpreterFailure> {
+        Self::with_options(module, controls, false)
+    }
+
+    fn with_trace(module: &'module Module) -> Result<Self, InterpreterFailure> {
+        Self::with_options(module, TestControls::default(), true)
+    }
+
+    fn with_options(
+        module: &'module Module,
+        controls: TestControls,
+        trace_cleanup: bool,
     ) -> Result<Self, InterpreterFailure> {
         let diagnostics = keld_ir::validate(module);
         if !diagnostics.is_empty() {
@@ -72,6 +86,7 @@ impl<'module> Interpreter<'module> {
             frames,
             started: false,
             controls,
+            cleanup_trace: trace_cleanup.then(CleanupTrace::default),
         })
     }
 
@@ -104,8 +119,12 @@ impl<'module> Interpreter<'module> {
         )?;
         loop {
             if let Some(value) = self.step()? {
+                let module = self.module;
+                let cleanup_trace = &mut self.cleanup_trace;
                 self.store
-                    .finish_with(drop)
+                    .finish_with(|payload| {
+                        cleanup_payload(module, payload, cleanup_trace.as_mut());
+                    })
                     .map_err(|error| store_failure(error, main.span))?;
                 return Ok(ExecutionResult { value });
             }
@@ -140,6 +159,7 @@ impl<'module> Interpreter<'module> {
                 &mut self.frames,
                 instruction,
                 &mut self.controls,
+                &mut self.cleanup_trace,
             )?;
             Ok(None)
         } else {
@@ -183,6 +203,49 @@ pub fn run_text_with_controls_for_test(
     text: &str,
     controls: TestControls,
 ) -> Result<ExecutionResult, RuntimeFault> {
+    let ir = compile_text_for_test(text);
+    let mut interpreter = match Interpreter::with_controls(&ir, controls) {
+        Ok(interpreter) => interpreter,
+        Err(InterpreterFailure::Runtime(fault)) => return Err(fault),
+        Err(InterpreterFailure::Internal(error)) => panic!("interpreter setup failed: {error}"),
+    };
+    match interpreter.run_main() {
+        Ok(result) => Ok(result),
+        Err(InterpreterFailure::Runtime(fault)) => Err(fault),
+        Err(InterpreterFailure::Internal(error)) => panic!("interpreter execution failed: {error}"),
+    }
+}
+
+/// Compiles and executes source while exposing the test-only cleanup event stream.
+///
+/// # Errors
+///
+/// Returns a Keld runtime fault produced by otherwise valid test source.
+///
+/// # Panics
+///
+/// Panics when the test source fails static analysis, verification, or an
+/// internal compiler/interpreter invariant is violated.
+pub fn trace_text_for_test(text: &str) -> Result<ExecutionTrace, RuntimeFault> {
+    let ir = compile_text_for_test(text);
+    let mut interpreter = match Interpreter::with_trace(&ir) {
+        Ok(interpreter) => interpreter,
+        Err(InterpreterFailure::Runtime(fault)) => return Err(fault),
+        Err(InterpreterFailure::Internal(error)) => panic!("interpreter setup failed: {error}"),
+    };
+    let result = match interpreter.run_main() {
+        Ok(result) => result,
+        Err(InterpreterFailure::Runtime(fault)) => return Err(fault),
+        Err(InterpreterFailure::Internal(error)) => panic!("interpreter execution failed: {error}"),
+    };
+    let cleanup = interpreter
+        .cleanup_trace
+        .take()
+        .map_or_else(Vec::new, |trace| trace.events);
+    Ok(ExecutionTrace { result, cleanup })
+}
+
+fn compile_text_for_test(text: &str) -> Module {
     let flow = keld_flow::lower_text_for_test(text)
         .unwrap_or_else(|diagnostics| panic!("test source failed analysis: {diagnostics:#?}"));
     let verification = keld_lifecycle::verify(flow);
@@ -199,17 +262,7 @@ pub fn run_text_with_controls_for_test(
             storage.diagnostics
         )
     });
-    let ir = keld_ir::lower(&verified);
-    let mut interpreter = match Interpreter::with_controls(&ir, controls) {
-        Ok(interpreter) => interpreter,
-        Err(InterpreterFailure::Runtime(fault)) => return Err(fault),
-        Err(InterpreterFailure::Internal(error)) => panic!("interpreter setup failed: {error}"),
-    };
-    match interpreter.run_main() {
-        Ok(result) => Ok(result),
-        Err(InterpreterFailure::Runtime(fault)) => Err(fault),
-        Err(InterpreterFailure::Internal(error)) => panic!("interpreter execution failed: {error}"),
-    }
+    keld_ir::lower(&verified)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -219,6 +272,7 @@ fn execute_instruction(
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
     controls: &mut TestControls,
+    cleanup_trace: &mut Option<CleanupTrace>,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -452,13 +506,50 @@ fn execute_instruction(
             let value = take_register(frames, *source)?;
             set_register(frames, *destination, value)?;
         }
-        Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => {
-            let _ = take_register(frames, *home);
+        Instruction::DropHome { home, .. } => {
+            let value = take_register(frames, *home)?;
+            cleanup_value(
+                module,
+                value,
+                CleanupPath::Home(*home),
+                cleanup_trace.as_mut(),
+            );
+        }
+        Instruction::DropIfLive { home, .. } => {
+            if let Some(value) = frames.last_mut().and_then(|frame| frame.take(*home)) {
+                cleanup_value(
+                    module,
+                    value,
+                    CleanupPath::Home(*home),
+                    cleanup_trace.as_mut(),
+                );
+            }
         }
         Instruction::DropSlot { slot, .. } => {
-            let _ = take_register(frames, *slot);
+            if let Some(value) = frames.last_mut().and_then(|frame| frame.take(*slot)) {
+                cleanup_value(
+                    module,
+                    value,
+                    CleanupPath::Home(*slot),
+                    cleanup_trace.as_mut(),
+                );
+            }
         }
-        Instruction::CleanupTrackedScope { .. } => {}
+        Instruction::CleanupTrackedScope { scope, .. } => {
+            while let Some(home) = frames
+                .last_mut()
+                .and_then(|frame| frame.pop_cleanup_home(*scope))
+            {
+                if let Some(value) = frames.last_mut().and_then(|frame| frame.take(home)) {
+                    cleanup_value(
+                        module,
+                        value,
+                        CleanupPath::Home(home),
+                        cleanup_trace.as_mut(),
+                    );
+                }
+            }
+        }
         Instruction::ReplacePlace {
             destination,
             source,
@@ -496,7 +587,16 @@ fn execute_instruction(
                 .map_err(|error| store_failure(error, span))??;
             set_register(frames, *displaced, previous)?;
         }
-        _ => return execute_effect_instruction(module, store, frames, instruction, controls),
+        _ => {
+            return execute_effect_instruction(
+                module,
+                store,
+                frames,
+                instruction,
+                controls,
+                cleanup_trace,
+            );
+        }
     }
     advance(frames)?;
     Ok(())
@@ -508,6 +608,7 @@ fn execute_effect_instruction(
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
     controls: &mut TestControls,
+    cleanup_trace: &mut Option<CleanupTrace>,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -521,7 +622,9 @@ fn execute_effect_instruction(
         Instruction::EndLifecycle { lifecycle, .. } => {
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
             store
-                .end_lifecycle_with(lifecycle, drop)
+                .end_lifecycle_with(lifecycle, |payload| {
+                    cleanup_payload(module, payload, cleanup_trace.as_mut());
+                })
                 .map_err(|error| store_failure(error, span))?;
         }
         Instruction::AllocateEntity {
@@ -553,7 +656,16 @@ fn execute_effect_instruction(
                 .map_err(|error| store_failure(error, span))?;
             set_register(frames, *dst, Value::Link(Some(link)))?;
         }
-        _ => return execute_view_instruction(module, store, frames, instruction, controls),
+        _ => {
+            return execute_view_instruction(
+                module,
+                store,
+                frames,
+                instruction,
+                controls,
+                cleanup_trace,
+            );
+        }
     }
     advance(frames)?;
     Ok(())
@@ -565,6 +677,7 @@ fn execute_view_instruction(
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
     controls: &mut TestControls,
+    cleanup_trace: &mut Option<CleanupTrace>,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -649,7 +762,16 @@ fn execute_view_instruction(
                 return Err(internal("validated view is not open"));
             }
         }
-        _ => return execute_call_or_retirement(module, store, frames, instruction, controls),
+        _ => {
+            return execute_call_or_retirement(
+                module,
+                store,
+                frames,
+                instruction,
+                controls,
+                cleanup_trace,
+            );
+        }
     }
     advance(frames)?;
     Ok(())
@@ -661,6 +783,7 @@ fn execute_call_or_retirement(
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
     controls: &mut TestControls,
+    cleanup_trace: &mut Option<CleanupTrace>,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -676,7 +799,9 @@ fn execute_call_or_retirement(
         Instruction::RetireEntity { entity, .. } => {
             let entity = expect_entity(frame_value(frames, *entity)?)?;
             store
-                .retire_with(entity, drop)
+                .retire_with(entity, |payload| {
+                    cleanup_payload(module, payload, cleanup_trace.as_mut());
+                })
                 .map_err(|error| store_failure(error, span))?;
         }
         Instruction::Call {

@@ -1,5 +1,7 @@
 use crate::Value;
+use crate::cleanup::ActiveHomeTracker;
 use crate::place::{RegisterSlot, RuntimePlace};
+use keld_flow::StorageScopeId;
 use keld_ir::{Function, IrBlockId, Register, RegisterStorage, ViewId, ViewMode};
 use keld_runtime::EntityId;
 
@@ -17,6 +19,8 @@ pub(crate) struct Frame {
     pub predecessor: Option<IrBlockId>,
     pub return_destination: Option<Register>,
     pub views: Vec<Option<ActiveView>>,
+    home_scopes: Vec<Option<StorageScopeId>>,
+    pub(crate) cleanup_trackers: Vec<ActiveHomeTracker>,
 }
 
 impl Frame {
@@ -35,6 +39,28 @@ impl Frame {
                 | RegisterStorage::EntityFlow
                 | RegisterStorage::Loan
                 | RegisterStorage::Home { .. } => RegisterSlot::Empty,
+            });
+        }
+        let home_scopes = function
+            .register_storage
+            .iter()
+            .map(|storage| match storage {
+                RegisterStorage::Home { scope, .. } => Some(*scope),
+                _ => None,
+            })
+            .collect();
+        let mut cleanup_trackers = Vec::new();
+        cleanup_trackers
+            .try_reserve_exact(function.storage_scope_parents.len())
+            .map_err(|_| crate::value::CopyAllocation)?;
+        for (index, _) in function.storage_scope_parents.iter().enumerate() {
+            let mut homes = Vec::new();
+            homes
+                .try_reserve_exact(function.register_storage.len())
+                .map_err(|_| crate::value::CopyAllocation)?;
+            cleanup_trackers.push(ActiveHomeTracker {
+                scope: StorageScopeId(u32::try_from(index).expect("storage scope count fits")),
+                homes,
             });
         }
         let view_count = function
@@ -64,6 +90,8 @@ impl Frame {
             predecessor: None,
             return_destination,
             views,
+            home_scopes,
+            cleanup_trackers,
         })
     }
 
@@ -83,7 +111,7 @@ impl Frame {
 
     pub fn set(&mut self, register: Register, value: Value) -> Result<(), ()> {
         let destination = self.registers.get_mut(register.0 as usize).ok_or(())?;
-        match destination {
+        let result = match destination {
             RegisterSlot::Empty | RegisterSlot::Owned(_) => {
                 *destination = RegisterSlot::Owned(value);
                 Ok(())
@@ -93,7 +121,11 @@ impl Frame {
                 Ok(())
             }
             RegisterSlot::Loan(_) => Err(()),
+        };
+        if result.is_ok() {
+            self.activate_home(register);
         }
+        result
     }
 
     pub fn set_loan(&mut self, register: Register, place: RuntimePlace) -> Result<(), ()> {
@@ -107,7 +139,7 @@ impl Frame {
 
     pub fn take(&mut self, register: Register) -> Option<Value> {
         let slot = self.registers.get_mut(register.0 as usize)?;
-        match slot {
+        let value = match slot {
             RegisterSlot::Owned(_) => {
                 let old = std::mem::replace(slot, RegisterSlot::Empty);
                 match old {
@@ -117,13 +149,57 @@ impl Frame {
             }
             RegisterSlot::DropSlot(value) => value.take(),
             RegisterSlot::Empty | RegisterSlot::Loan(_) => None,
+        };
+        if value.is_some() {
+            self.deactivate_home(register);
         }
+        value
     }
 
     pub fn loan(&self, register: Register) -> Option<&RuntimePlace> {
         match self.registers.get(register.0 as usize)? {
             RegisterSlot::Loan(place) => Some(place),
             _ => None,
+        }
+    }
+
+    pub fn pop_cleanup_home(&mut self, scope: StorageScopeId) -> Option<Register> {
+        self.cleanup_trackers
+            .iter_mut()
+            .find(|tracker| tracker.scope == scope)
+            .and_then(|tracker| tracker.homes.pop())
+    }
+
+    fn activate_home(&mut self, register: Register) {
+        let Some(Some(scope)) = self.home_scopes.get(register.0 as usize).copied() else {
+            return;
+        };
+        let Some(tracker) = self
+            .cleanup_trackers
+            .iter_mut()
+            .find(|tracker| tracker.scope == scope)
+        else {
+            return;
+        };
+        if !tracker.homes.contains(&register) {
+            tracker.homes.push(register);
+        }
+    }
+
+    fn deactivate_home(&mut self, register: Register) {
+        let Some(Some(scope)) = self.home_scopes.get(register.0 as usize).copied() else {
+            return;
+        };
+        if let Some(tracker) = self
+            .cleanup_trackers
+            .iter_mut()
+            .find(|tracker| tracker.scope == scope)
+            && let Some(index) = tracker
+                .homes
+                .iter()
+                .position(|candidate| *candidate == register)
+        {
+            tracker.homes.remove(index);
         }
     }
 
