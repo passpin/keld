@@ -1,4 +1,23 @@
-use keld_interpreter::{Value, run_text_for_test};
+use keld_interpreter::{TestControls, Value, run_text_for_test, run_text_with_controls_for_test};
+
+#[test]
+fn read_loan_of_heap_text_does_not_allocate_or_copy() {
+    let result = run_text_with_controls_for_test(
+        "fn size(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { let value: Text = \"abcdefghijklmnopqrstuvwxyz\"; return size(value) }\n",
+        TestControls::fail_structural_copy(1),
+    )
+    .expect("read loan does not allocate");
+    assert_eq!(result.value, Value::Int(26));
+}
+
+#[test]
+fn two_read_parameters_can_share_one_source_place() {
+    let result = run_text_for_test(
+        "fn sum(a: List[Int], b: List[Int]) -> Int { return a.length + b.length }\nfn main() -> Int { let items: List[Int] = List(); items.push(1); return sum(items, items) }\n",
+    )
+    .expect("overlapping reads execute");
+    assert_eq!(result.value, Value::Int(2));
+}
 
 #[test]
 fn empty_list_can_be_created_and_transferred_to_a_consuming_parameter() {

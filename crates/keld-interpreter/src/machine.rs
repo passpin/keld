@@ -1,5 +1,6 @@
 use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFaultKind};
-use crate::frame::{ActiveView, Frame, LoanReturn};
+use crate::frame::{ActiveView, Frame};
+use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
 use crate::value::{CopyAllocation, EntityPayload, Value, try_copy_value};
 use keld_ir::{
@@ -16,11 +17,26 @@ pub struct ExecutionResult {
     pub value: Value,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TestControls {
+    fail_structural_copies: usize,
+}
+
+impl TestControls {
+    #[must_use]
+    pub const fn fail_structural_copy(count: usize) -> Self {
+        Self {
+            fail_structural_copies: count,
+        }
+    }
+}
+
 pub struct Interpreter<'module> {
     module: &'module Module,
     store: Store<EntityPayload>,
     frames: Vec<Frame>,
     started: bool,
+    controls: TestControls,
 }
 
 impl<'module> Interpreter<'module> {
@@ -31,6 +47,13 @@ impl<'module> Interpreter<'module> {
     /// Returns a static IR error, an internal store error, or an allocation
     /// fault associated with the main function span.
     pub fn new(module: &'module Module) -> Result<Self, InterpreterFailure> {
+        Self::with_controls(module, TestControls::default())
+    }
+
+    fn with_controls(
+        module: &'module Module,
+        controls: TestControls,
+    ) -> Result<Self, InterpreterFailure> {
         let diagnostics = keld_ir::validate(module);
         if !diagnostics.is_empty() {
             return Err(InterpreterFailure::Internal(InterpreterError::InvalidIr(
@@ -48,6 +71,7 @@ impl<'module> Interpreter<'module> {
             store,
             frames,
             started: false,
+            controls,
         })
     }
 
@@ -67,9 +91,17 @@ impl<'module> Interpreter<'module> {
             .get(self.module.main.0 as usize)
             .ok_or_else(|| internal("validated main function is missing"))?;
         let root = self.store.root_lifecycle();
-        let frame = build_frame(main, Vec::new(), root, None, Vec::new(), main.span)?;
+        let frame = build_frame(main, Vec::new(), Vec::new(), root, None, main.span)?;
         self.frames.push(frame);
-        enter_block(self.module, &mut self.frames, main.entry, None, main.span)?;
+        enter_block(
+            self.module,
+            &self.store,
+            &mut self.frames,
+            main.entry,
+            None,
+            main.span,
+            &mut self.controls,
+        )?;
         loop {
             if let Some(value) = self.step()? {
                 self.store
@@ -102,7 +134,13 @@ impl<'module> Interpreter<'module> {
             .get(block_index)
             .ok_or_else(|| internal("active frame references an unknown block"))?;
         if let Some(instruction) = block.instructions.get(instruction_index) {
-            execute_instruction(self.module, &mut self.store, &mut self.frames, instruction)?;
+            execute_instruction(
+                self.module,
+                &mut self.store,
+                &mut self.frames,
+                instruction,
+                &mut self.controls,
+            )?;
             Ok(None)
         } else {
             execute_terminator(
@@ -111,6 +149,7 @@ impl<'module> Interpreter<'module> {
                 &mut self.frames,
                 &block.terminator,
                 function.span,
+                &mut self.controls,
             )
         }
     }
@@ -127,6 +166,23 @@ impl<'module> Interpreter<'module> {
 /// Panics if the supplied source has a static diagnostic or triggers an
 /// internal compiler/interpreter invariant. Tests should pass valid source.
 pub fn run_text_for_test(text: &str) -> Result<ExecutionResult, RuntimeFault> {
+    run_text_with_controls_for_test(text, TestControls::default())
+}
+
+/// Compiles and executes source with deterministic test-only allocation controls.
+///
+/// # Errors
+///
+/// Returns a Keld runtime fault produced by otherwise valid test source.
+///
+/// # Panics
+///
+/// Panics when the test source fails static analysis, verification, or an
+/// internal compiler/interpreter invariant is violated.
+pub fn run_text_with_controls_for_test(
+    text: &str,
+    controls: TestControls,
+) -> Result<ExecutionResult, RuntimeFault> {
     let flow = keld_flow::lower_text_for_test(text)
         .unwrap_or_else(|diagnostics| panic!("test source failed analysis: {diagnostics:#?}"));
     let verification = keld_lifecycle::verify(flow);
@@ -144,7 +200,7 @@ pub fn run_text_for_test(text: &str) -> Result<ExecutionResult, RuntimeFault> {
         )
     });
     let ir = keld_ir::lower(&verified);
-    let mut interpreter = match Interpreter::new(&ir) {
+    let mut interpreter = match Interpreter::with_controls(&ir, controls) {
         Ok(interpreter) => interpreter,
         Err(InterpreterFailure::Runtime(fault)) => return Err(fault),
         Err(InterpreterFailure::Internal(error)) => panic!("interpreter setup failed: {error}"),
@@ -162,6 +218,7 @@ fn execute_instruction(
     store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -182,9 +239,19 @@ fn execute_instruction(
             set_register(frames, *dst, Value::Link(None))?;
         }
         Instruction::Copy { dst, src, .. } => {
-            let value =
-                try_copy_value(frame_value(frames, *src)?).map_err(|_| allocation_failure(span))?;
-            set_register(frames, *dst, value)?;
+            if is_loan_register(module, frames, *dst) {
+                let place = runtime_place_for_register(frames, *src);
+                frames
+                    .last_mut()
+                    .ok_or_else(|| internal("loan copy has no active frame"))?
+                    .set_loan(*dst, place)
+                    .map_err(|()| internal("validated loan destination is not empty"))?;
+            } else {
+                let value = with_register_value(module, store, frames, *src, span, |value| {
+                    structural_copy(value, span, controls)
+                })?;
+                set_register(frames, *dst, value)?;
+            }
         }
         Instruction::Take { dst, src, .. } => {
             let value = take_register(frames, *src)?;
@@ -194,92 +261,94 @@ fn execute_instruction(
             set_register(frames, *dst, Value::List(Vec::new()))?;
         }
         Instruction::ListLength { dst, list, .. } => {
-            let Value::List(elements) = frame_value(frames, *list)? else {
-                return Err(internal("validated list length received a non-list"));
-            };
-            let length = i64::try_from(elements.len())
-                .map_err(|_| internal("validated List length exceeds Int"))?;
+            let length = with_register_value(module, store, frames, *list, span, |value| {
+                let Value::List(elements) = value else {
+                    return Err(internal("validated list length received a non-list"));
+                };
+                i64::try_from(elements.len())
+                    .map_err(|_| internal("validated List length exceeds Int"))
+            })?;
             set_register(frames, *dst, Value::Int(length))?;
         }
         Instruction::ListPush { list, value, .. } => {
-            let value = try_copy_value(frame_value(frames, *value)?)
-                .map_err(|_| allocation_failure(span))?;
-            let mut list_value = take_register(frames, *list)?;
-            let Value::List(elements) = &mut list_value else {
-                return Err(internal("validated list push received a non-list"));
-            };
-            if elements.try_reserve(1).is_err() {
-                set_register(frames, *list, list_value)?;
-                return Err(allocation_failure(span));
-            }
-            elements.push(value);
-            set_register(frames, *list, list_value)?;
+            let value = take_argument(module, store, frames, *value, span, controls)?;
+            with_register_mut(module, store, frames, *list, span, |list_value| {
+                let Value::List(elements) = list_value else {
+                    return Err(internal("validated list push received a non-list"));
+                };
+                elements
+                    .try_reserve(1)
+                    .map_err(|_| allocation_failure(span))?;
+                elements.push(value);
+                Ok(())
+            })?;
         }
         Instruction::ListPushPlace { source, value, .. } => {
-            let value = try_copy_value(frame_value(frames, *value)?)
-                .map_err(|_| allocation_failure(span))?;
-            let mut list_value = take_source(module, store, frames, source, span)?;
-            let result = if let Value::List(elements) = &mut list_value {
-                if elements.try_reserve(1).is_err() {
-                    Err(allocation_failure(span))
-                } else {
-                    elements.push(value);
-                    Ok(())
-                }
-            } else {
-                Err(internal("validated list push received a non-list"))
-            };
-            write_source(module, store, frames, source, list_value, span)?;
-            result?;
+            let value = take_argument(module, store, frames, *value, span, controls)?;
+            let place = runtime_place_for_source(frames, source);
+            with_place_mut(module, store, frames, &place, span, |list_value| {
+                let Value::List(elements) = list_value else {
+                    return Err(internal("validated list push received a non-list"));
+                };
+                elements
+                    .try_reserve(1)
+                    .map_err(|_| allocation_failure(span))?;
+                elements.push(value);
+                Ok(())
+            })?;
         }
         Instruction::ListRemove {
             dst, list, index, ..
         } => {
-            let index = usize::try_from(expect_int(frame_value(frames, *index)?)?)
-                .map_err(|_| bounds_failure(span))?;
-            let mut list_value = take_register(frames, *list)?;
-            let Value::List(elements) = &mut list_value else {
-                return Err(internal("validated list remove received a non-list"));
-            };
-            if index >= elements.len() {
-                set_register(frames, *list, list_value)?;
-                return Err(bounds_failure(span));
-            }
-            let removed = elements.remove(index);
-            set_register(frames, *list, list_value)?;
+            let index = with_register_value(module, store, frames, *index, span, |value| {
+                usize::try_from(expect_int(value)?).map_err(|_| bounds_failure(span))
+            })?;
+            let removed = with_register_mut(module, store, frames, *list, span, |list_value| {
+                let Value::List(elements) = list_value else {
+                    return Err(internal("validated list remove received a non-list"));
+                };
+                if index >= elements.len() {
+                    return Err(bounds_failure(span));
+                }
+                Ok(elements.remove(index))
+            })?;
             set_register(frames, *dst, removed)?;
         }
         Instruction::ListRemovePlace {
             dst, source, index, ..
         } => {
-            let index = usize::try_from(expect_int(frame_value(frames, *index)?)?)
-                .map_err(|_| bounds_failure(span))?;
-            let mut list_value = take_source(module, store, frames, source, span)?;
-            let result = if let Value::List(elements) = &mut list_value {
+            let index = with_register_value(module, store, frames, *index, span, |value| {
+                usize::try_from(expect_int(value)?).map_err(|_| bounds_failure(span))
+            })?;
+            let place = runtime_place_for_source(frames, source);
+            let removed = with_place_mut(module, store, frames, &place, span, |list_value| {
+                let Value::List(elements) = list_value else {
+                    return Err(internal("validated list remove received a non-list"));
+                };
                 if index >= elements.len() {
-                    Err(bounds_failure(span))
-                } else {
-                    Ok(elements.remove(index))
+                    return Err(bounds_failure(span));
                 }
-            } else {
-                Err(internal("validated list remove received a non-list"))
-            };
-            write_source(module, store, frames, source, list_value, span)?;
-            set_register(frames, *dst, result?)?;
+                Ok(elements.remove(index))
+            })?;
+            set_register(frames, *dst, removed)?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
-            let Value::Text(value) = frame_value(frames, *text)? else {
-                return Err(internal("validated text byte length received a non-text"));
-            };
-            let length = i64::try_from(value.byte_length())
-                .map_err(|_| internal("validated Text length exceeds Int"))?;
+            let length = with_register_value(module, store, frames, *text, span, |value| {
+                let Value::Text(value) = value else {
+                    return Err(internal("validated text byte length received a non-text"));
+                };
+                i64::try_from(value.byte_length())
+                    .map_err(|_| internal("validated Text length exceeds Int"))
+            })?;
             set_register(frames, *dst, Value::Int(length))?;
         }
         Instruction::TextIsEmpty { dst, text, .. } => {
-            let Value::Text(value) = frame_value(frames, *text)? else {
-                return Err(internal("validated text is_empty received a non-text"));
-            };
-            let is_empty = value.byte_length() == 0;
+            let is_empty = with_register_value(module, store, frames, *text, span, |value| {
+                let Value::Text(value) = value else {
+                    return Err(internal("validated text is_empty received a non-text"));
+                };
+                Ok(value.byte_length() == 0)
+            })?;
             set_register(frames, *dst, Value::Bool(is_empty))?;
         }
         Instruction::TextConcat { dst, lhs, rhs, .. } => {
@@ -326,7 +395,8 @@ fn execute_instruction(
             fields,
             ..
         } => {
-            let values = materialize_fields(module, frames, *definition, fields, span)?;
+            let values =
+                materialize_fields(module, store, frames, *definition, fields, span, controls)?;
             set_register(
                 frames,
                 *dst,
@@ -339,17 +409,94 @@ fn execute_instruction(
         Instruction::ReadStructField {
             dst, base, field, ..
         } => {
-            let Value::Struct { definition, fields } = frame_value(frames, *base)? else {
-                return Err(internal("validated struct read received a non-struct"));
-            };
-            let field_index = field_index(module, *definition, *field)?;
-            let value = fields
-                .get(field_index)
-                .ok_or_else(|| internal("struct payload does not match its definition"))?;
-            let value = try_copy_value(value).map_err(|_| allocation_failure(span))?;
-            set_register(frames, *dst, value)?;
+            if is_loan_register(module, frames, *dst) {
+                let place = runtime_place_for_register(frames, *base)
+                    .project(RuntimeProjection::Field(*field));
+                frames
+                    .last_mut()
+                    .ok_or_else(|| internal("struct loan has no active frame"))?
+                    .set_loan(*dst, place)
+                    .map_err(|()| internal("validated struct loan destination is not empty"))?;
+            } else {
+                let value = with_register_value(module, store, frames, *base, span, |base| {
+                    let Value::Struct { definition, fields } = base else {
+                        return Err(internal("validated struct read received a non-struct"));
+                    };
+                    let field_index = field_index(module, *definition, *field)?;
+                    let value = fields
+                        .get(field_index)
+                        .ok_or_else(|| internal("struct payload does not match its definition"))?;
+                    structural_copy(value, span, controls)
+                })?;
+                set_register(frames, *dst, value)?;
+            }
         }
-        _ => return execute_effect_instruction(module, store, frames, instruction),
+        Instruction::InstallHome {
+            destination,
+            source,
+            displaced,
+            ..
+        } => {
+            let incoming = take_register(frames, *source)?;
+            let previous = take_register(frames, *destination).ok();
+            set_register(frames, *destination, incoming)?;
+            if let Some(previous) = previous {
+                set_register(frames, *displaced, previous)?;
+            }
+        }
+        Instruction::MoveHome {
+            destination,
+            source,
+            ..
+        } => {
+            let value = take_register(frames, *source)?;
+            set_register(frames, *destination, value)?;
+        }
+        Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => {
+            let _ = take_register(frames, *home);
+        }
+        Instruction::DropSlot { slot, .. } => {
+            let _ = take_register(frames, *slot);
+        }
+        Instruction::CleanupTrackedScope { .. } => {}
+        Instruction::ReplacePlace {
+            destination,
+            source,
+            displaced,
+            ..
+        } => {
+            let incoming = take_register(frames, *source)?;
+            let previous = take_source(module, store, frames, destination, span).ok();
+            write_source(module, store, frames, destination, incoming, span)?;
+            if let Some(previous) = previous {
+                set_register(frames, *displaced, previous)?;
+            }
+        }
+        Instruction::ReplaceField {
+            view,
+            field,
+            source,
+            displaced,
+            ..
+        } => {
+            let active = active_view(frames, *view)?;
+            if active.mode != ViewMode::Edit {
+                return Err(internal("validated field replacement used a read view"));
+            }
+            let incoming = take_register(frames, *source)?;
+            let previous = store
+                .edit(active.entity, |payload| {
+                    let index = field_index(module, payload.definition, *field)?;
+                    let destination = payload
+                        .fields
+                        .get_mut(index)
+                        .ok_or_else(|| internal("entity payload layout is invalid"))?;
+                    Ok::<Value, InterpreterFailure>(std::mem::replace(destination, incoming))
+                })
+                .map_err(|error| store_failure(error, span))??;
+            set_register(frames, *displaced, previous)?;
+        }
+        _ => return execute_effect_instruction(module, store, frames, instruction, controls),
     }
     advance(frames)?;
     Ok(())
@@ -360,6 +507,7 @@ fn execute_effect_instruction(
     store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -384,7 +532,8 @@ fn execute_effect_instruction(
             ..
         } => {
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
-            let values = materialize_fields(module, frames, *definition, fields, span)?;
+            let values =
+                materialize_fields(module, store, frames, *definition, fields, span, controls)?;
             let entity = store
                 .allocate(
                     RuntimeTypeId(definition.0),
@@ -404,7 +553,7 @@ fn execute_effect_instruction(
                 .map_err(|error| store_failure(error, span))?;
             set_register(frames, *dst, Value::Link(Some(link)))?;
         }
-        _ => return execute_view_instruction(module, store, frames, instruction),
+        _ => return execute_view_instruction(module, store, frames, instruction, controls),
     }
     advance(frames)?;
     Ok(())
@@ -415,6 +564,7 @@ fn execute_view_instruction(
     store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -441,17 +591,31 @@ fn execute_view_instruction(
             dst, view, field, ..
         } => {
             let active = active_view(frames, *view)?;
-            let value = store
-                .read(active.entity, |payload| {
-                    let index = field_index(module, payload.definition, *field)?;
-                    let field = payload
-                        .fields
-                        .get(index)
-                        .ok_or_else(|| internal("entity payload layout is invalid"))?;
-                    try_copy_value(field).map_err(|_| allocation_failure(span))
-                })
-                .map_err(|error| store_failure(error, span))??;
-            set_register(frames, *dst, value)?;
+            if is_loan_register(module, frames, *dst) {
+                let place = RuntimePlace {
+                    root: RuntimePlaceRoot::Entity {
+                        entity: active.entity,
+                    },
+                    projections: vec![RuntimeProjection::Field(*field)],
+                };
+                frames
+                    .last_mut()
+                    .ok_or_else(|| internal("entity loan has no active frame"))?
+                    .set_loan(*dst, place)
+                    .map_err(|()| internal("validated entity loan destination is not empty"))?;
+            } else {
+                let value = store
+                    .read(active.entity, |payload| {
+                        let index = field_index(module, payload.definition, *field)?;
+                        let field = payload
+                            .fields
+                            .get(index)
+                            .ok_or_else(|| internal("entity payload layout is invalid"))?;
+                        structural_copy(field, span, controls)
+                    })
+                    .map_err(|error| store_failure(error, span))??;
+                set_register(frames, *dst, value)?;
+            }
         }
         Instruction::WriteField {
             view, field, value, ..
@@ -460,8 +624,7 @@ fn execute_view_instruction(
             if active.mode != ViewMode::Edit {
                 return Err(internal("validated write used a read view"));
             }
-            let value = try_copy_value(frame_value(frames, *value)?)
-                .map_err(|_| allocation_failure(span))?;
+            let value = take_argument(module, store, frames, *value, span, controls)?;
             store
                 .edit(active.entity, |payload| {
                     let index = field_index(module, payload.definition, *field)?;
@@ -486,7 +649,7 @@ fn execute_view_instruction(
                 return Err(internal("validated view is not open"));
             }
         }
-        _ => return execute_call_or_retirement(module, store, frames, instruction),
+        _ => return execute_call_or_retirement(module, store, frames, instruction, controls),
     }
     advance(frames)?;
     Ok(())
@@ -497,6 +660,7 @@ fn execute_call_or_retirement(
     store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     instruction: &Instruction,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -533,6 +697,7 @@ fn execute_call_or_retirement(
                 argument_sources,
                 *current_lifecycle,
                 span,
+                controls,
             );
         }
         Instruction::ConstInt { .. }
@@ -557,6 +722,14 @@ fn execute_call_or_retirement(
         | Instruction::Phi { .. }
         | Instruction::ConstructStruct { .. }
         | Instruction::ReadStructField { .. }
+        | Instruction::InstallHome { .. }
+        | Instruction::MoveHome { .. }
+        | Instruction::DropHome { .. }
+        | Instruction::DropIfLive { .. }
+        | Instruction::DropSlot { .. }
+        | Instruction::CleanupTrackedScope { .. }
+        | Instruction::ReplacePlace { .. }
+        | Instruction::ReplaceField { .. }
         | Instruction::BeginLifecycle { .. }
         | Instruction::EndLifecycle { .. }
         | Instruction::AllocateEntity { .. }
@@ -583,15 +756,19 @@ fn execute_call(
     argument_sources: &[(ParameterIndex, Option<ArgumentSource>)],
     current_lifecycle: Register,
     span: Span,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
     let callee = module
         .functions
         .get(function.0 as usize)
         .ok_or_else(|| internal("validated call target is missing"))?;
     let mut materialized = Vec::new();
-    let mut loan_returns = Vec::new();
+    let mut loans = Vec::new();
     materialized
-        .try_reserve_exact(arguments.len())
+        .try_reserve(arguments.len())
+        .map_err(|_| allocation_failure(span))?;
+    loans
+        .try_reserve(arguments.len())
         .map_err(|_| allocation_failure(span))?;
     for (parameter, register) in arguments {
         let parameter_index = parameter.0 as usize;
@@ -600,75 +777,49 @@ fn execute_call(
             .get(parameter_index)
             .copied()
             .unwrap_or(keld_semantics::ParameterMode::Loan);
-        let effect = callee
-            .parameter_effects
+        let callee_register = callee
+            .parameters
             .get(parameter_index)
             .copied()
-            .unwrap_or(keld_storage::LoanEffect::Read);
-        let value = if mode == keld_semantics::ParameterMode::Take
-            || matches!(
-                effect,
-                keld_storage::LoanEffect::Edit | keld_storage::LoanEffect::Structural
-            ) {
-            let source = if mode == keld_semantics::ParameterMode::Loan {
-                argument_sources
-                    .iter()
-                    .find(|(candidate, _)| *candidate == *parameter)
-                    .and_then(|(_, source)| source.clone())
-            } else {
-                None
-            };
-            let value = if let Some(source) = source.as_ref() {
-                take_source(module, store, frames, source, span)?
-            } else {
-                take_register(frames, *register)?
-            };
-            if mode == keld_semantics::ParameterMode::Loan {
-                let callee_register = callee
-                    .parameters
-                    .get(parameter_index)
-                    .copied()
-                    .ok_or_else(|| internal("validated call parameter is missing"))?;
-                loan_returns.push(LoanReturn {
-                    source: source.unwrap_or(ArgumentSource {
-                        base: *register,
-                        fields: Vec::new(),
-                    }),
-                    callee: callee_register,
-                });
-            }
-            value
+            .ok_or_else(|| internal("validated call parameter is missing"))?;
+        if mode == keld_semantics::ParameterMode::Loan {
+            let source = argument_sources
+                .iter()
+                .find(|(candidate, _)| *candidate == *parameter)
+                .and_then(|(_, source)| source.as_ref());
+            let place = source.map_or_else(
+                || runtime_place_for_register(frames, *register),
+                |source| runtime_place_for_source(frames, source),
+            );
+            loans.push((callee_register, place));
+            continue;
+        }
+        let value = if mode == keld_semantics::ParameterMode::Take {
+            take_register(frames, *register)?
         } else {
-            try_copy_value(frame_value(frames, *register)?).map_err(|_| allocation_failure(span))?
+            structural_copy(frame_value(frames, *register)?, span, controls)?
         };
         materialized.push((*parameter, value));
     }
     let lifecycle = expect_lifecycle(frame_value(frames, current_lifecycle)?)?;
     advance(frames)?;
-    let frame = build_frame(
-        callee,
-        materialized,
-        lifecycle,
-        destination,
-        loan_returns,
-        span,
-    )?;
+    let frame = build_frame(callee, materialized, loans, lifecycle, destination, span)?;
     frames
         .try_reserve(1)
         .map_err(|_| allocation_failure(span))?;
     frames.push(frame);
-    enter_block(module, frames, callee.entry, None, span)
+    enter_block(module, store, frames, callee.entry, None, span, controls)
 }
 
 fn build_frame(
     function: &Function,
     arguments: Vec<(ParameterIndex, Value)>,
+    loans: Vec<(Register, RuntimePlace)>,
     current_lifecycle: RuntimeLifecycleId,
     return_destination: Option<Register>,
-    loan_returns: Vec<LoanReturn>,
     span: Span,
 ) -> Result<Frame, InterpreterFailure> {
-    let mut frame = Frame::new(function, return_destination, loan_returns)
+    let mut frame = Frame::new(function, return_destination)
         .map_err(|CopyAllocation| allocation_failure(span))?;
     frame
         .set(
@@ -686,6 +837,11 @@ fn build_frame(
             .set(register, value)
             .map_err(|()| internal("parameter register is outside the frame"))?;
     }
+    for (register, place) in loans {
+        frame
+            .set_loan(register, place)
+            .map_err(|()| internal("validated loan parameter register is not empty"))?;
+    }
     Ok(frame)
 }
 
@@ -695,6 +851,7 @@ fn execute_terminator(
     frames: &mut Vec<Frame>,
     terminator: &Terminator,
     fallback_span: Span,
+    controls: &mut TestControls,
 ) -> Result<Option<Value>, InterpreterFailure> {
     let predecessor = frames
         .last()
@@ -702,7 +859,15 @@ fn execute_terminator(
         .ok_or_else(|| internal("terminator has no active frame"))?;
     match terminator {
         Terminator::Goto(target) => {
-            enter_block(module, frames, *target, Some(predecessor), fallback_span)?;
+            enter_block(
+                module,
+                store,
+                frames,
+                *target,
+                Some(predecessor),
+                fallback_span,
+                controls,
+            )?;
             Ok(None)
         }
         Terminator::Branch {
@@ -712,7 +877,15 @@ fn execute_terminator(
         } => {
             let condition = expect_bool(frame_value(frames, *condition)?)?;
             let target = if condition { *then_block } else { *else_block };
-            enter_block(module, frames, target, Some(predecessor), fallback_span)?;
+            enter_block(
+                module,
+                store,
+                frames,
+                target,
+                Some(predecessor),
+                fallback_span,
+                controls,
+            )?;
             Ok(None)
         }
         Terminator::ResolveLink {
@@ -725,15 +898,29 @@ fn execute_terminator(
             let link = expect_link(frame_value(frames, *link)?)?;
             if let Some(entity) = link.and_then(|link| store.resolve(link)) {
                 set_register(frames, *live_value, Value::Entity(entity))?;
-                enter_block(module, frames, *live, Some(predecessor), *span)?;
+                enter_block(
+                    module,
+                    store,
+                    frames,
+                    *live,
+                    Some(predecessor),
+                    *span,
+                    controls,
+                )?;
             } else {
-                enter_block(module, frames, *absent, Some(predecessor), *span)?;
+                enter_block(
+                    module,
+                    store,
+                    frames,
+                    *absent,
+                    Some(predecessor),
+                    *span,
+                    controls,
+                )?;
             }
             Ok(None)
         }
-        Terminator::Return(register) => {
-            return_from_frame(module, store, frames, *register, fallback_span)
-        }
+        Terminator::Return(register) => return_from_frame(frames, *register),
         Terminator::Fault { kind, span } => Err(InterpreterFailure::Runtime(RuntimeFault {
             kind: match kind {
                 FaultKind::Arithmetic => RuntimeFaultKind::Arithmetic,
@@ -748,43 +935,23 @@ fn execute_terminator(
 }
 
 fn return_from_frame(
-    module: &Module,
-    store: &mut Store<EntityPayload>,
     frames: &mut Vec<Frame>,
     register: Option<Register>,
-    span: Span,
 ) -> Result<Option<Value>, InterpreterFailure> {
     let frame = frames
         .last_mut()
         .ok_or_else(|| internal("return has no active frame"))?;
     let value = if let Some(register) = register {
         frame
-            .registers
-            .get_mut(register.0 as usize)
-            .and_then(Option::take)
+            .take(register)
             .ok_or_else(|| internal("validated return register is undefined"))?
     } else {
         Value::Unit
     };
     let destination = frame.return_destination;
-    let loan_returns = frame
-        .loan_returns
-        .iter()
-        .map(|loan| {
-            let value = frame
-                .registers
-                .get_mut(loan.callee.0 as usize)
-                .and_then(Option::take)
-                .ok_or_else(|| internal("validated loan parameter register is undefined"))?;
-            Ok((loan.source.clone(), value))
-        })
-        .collect::<Result<Vec<_>, InterpreterFailure>>()?;
     frames.pop();
     if frames.last().is_none() {
         return Ok(Some(value));
-    }
-    for (source, value) in loan_returns {
-        write_source(module, store, frames, &source, value, span)?;
     }
     if let Some(destination) = destination {
         set_register(frames, destination, value)?;
@@ -794,17 +961,20 @@ fn return_from_frame(
 
 fn enter_block(
     module: &Module,
+    store: &Store<EntityPayload>,
     frames: &mut [Frame],
     target: IrBlockId,
     predecessor: Option<IrBlockId>,
     span: Span,
+    controls: &mut TestControls,
 ) -> Result<(), InterpreterFailure> {
-    let frame = frames
-        .last_mut()
-        .ok_or_else(|| internal("block entry has no active frame"))?;
+    let function_id = frames
+        .last()
+        .ok_or_else(|| internal("block entry has no active frame"))?
+        .function;
     let function = module
         .functions
-        .get(frame.function.0 as usize)
+        .get(function_id.0 as usize)
         .ok_or_else(|| internal("active function is missing"))?;
     let block = function
         .blocks
@@ -815,8 +985,12 @@ fn enter_block(
         .iter()
         .take_while(|instruction| matches!(instruction, Instruction::Phi { .. }))
         .count();
-    let mut pending = Vec::new();
-    pending
+    let mut pending_values = Vec::new();
+    let mut pending_loans = Vec::new();
+    pending_values
+        .try_reserve_exact(phi_count)
+        .map_err(|_| allocation_failure(span))?;
+    pending_loans
         .try_reserve_exact(phi_count)
         .map_err(|_| allocation_failure(span))?;
     for instruction in block.instructions.iter().take(phi_count) {
@@ -828,31 +1002,45 @@ fn enter_block(
             .iter()
             .find_map(|(block, register)| (*block == predecessor).then_some(*register))
             .ok_or_else(|| internal("Phi has no input for the predecessor"))?;
-        let value = frame
-            .value(source)
-            .ok_or_else(|| internal("Phi input register is undefined"))?;
-        pending.push((
-            *dst,
-            try_copy_value(value).map_err(|_| allocation_failure(span))?,
-        ));
+        if is_loan_register(module, frames, *dst) {
+            pending_loans.push((*dst, runtime_place_for_register(frames, source)));
+        } else if is_home_register(module, frames, *dst) && is_home_register(module, frames, source)
+        {
+            pending_values.push((*dst, take_register(frames, source)?));
+        } else {
+            let value = with_register_value(module, store, frames, source, span, |value| {
+                structural_copy(value, span, controls)
+            })?;
+            pending_values.push((*dst, value));
+        }
     }
+    let frame = frames
+        .last_mut()
+        .ok_or_else(|| internal("block entry has no active frame"))?;
     frame.block = target;
     frame.predecessor = predecessor;
     frame.instruction = phi_count;
-    for (destination, value) in pending {
+    for (destination, value) in pending_values {
         frame
             .set(destination, value)
             .map_err(|()| internal("Phi destination is outside the frame"))?;
+    }
+    for (destination, place) in pending_loans {
+        frame
+            .set_loan(destination, place)
+            .map_err(|()| internal("Phi loan destination is not empty"))?;
     }
     Ok(())
 }
 
 fn materialize_fields(
     module: &Module,
-    frames: &[Frame],
+    store: &Store<EntityPayload>,
+    frames: &mut [Frame],
     definition: DefId,
     fields: &[(FieldId, Register)],
     span: Span,
+    controls: &mut TestControls,
 ) -> Result<Vec<Value>, InterpreterFailure> {
     let layout = module
         .definitions
@@ -864,13 +1052,14 @@ fn materialize_fields(
         .try_reserve_exact(fields.len())
         .map_err(|_| allocation_failure(span))?;
     for (field, register) in fields {
-        source_values.push((
-            *field,
-            Some(
-                try_copy_value(frame_value(frames, *register)?)
-                    .map_err(|_| allocation_failure(span))?,
-            ),
-        ));
+        let value = if is_home_register(module, frames, *register) {
+            take_register(frames, *register)?
+        } else {
+            with_register_value(module, store, frames, *register, span, |value| {
+                structural_copy(value, span, controls)
+            })?
+        };
+        source_values.push((*field, Some(value)));
     }
     let mut result = Vec::new();
     result
@@ -912,6 +1101,241 @@ fn frame_value(frames: &[Frame], register: Register) -> Result<&Value, Interpret
         .ok_or_else(|| internal("validated register is undefined"))
 }
 
+fn runtime_place_for_register(frames: &[Frame], register: Register) -> RuntimePlace {
+    let frame = FrameId(frames.len().saturating_sub(1));
+    if let Some(place) = frames.last().and_then(|frame| frame.loan(register)) {
+        return place.clone();
+    }
+    RuntimePlace::frame(frame, register)
+}
+
+fn is_loan_register(module: &Module, frames: &[Frame], register: Register) -> bool {
+    frames
+        .last()
+        .and_then(|frame| module.functions.get(frame.function.0 as usize))
+        .and_then(|function| function.register_storage.get(register.0 as usize))
+        .is_some_and(|storage| matches!(storage, keld_ir::RegisterStorage::Loan))
+}
+
+fn is_home_register(module: &Module, frames: &[Frame], register: Register) -> bool {
+    frames
+        .last()
+        .and_then(|frame| module.functions.get(frame.function.0 as usize))
+        .and_then(|function| function.register_storage.get(register.0 as usize))
+        .is_some_and(|storage| matches!(storage, keld_ir::RegisterStorage::Home { .. }))
+}
+
+fn runtime_place_for_source(frames: &[Frame], source: &ArgumentSource) -> RuntimePlace {
+    let mut place = if source.fields.is_empty() {
+        runtime_place_for_register(frames, source.base)
+    } else {
+        match frames.last().and_then(|frame| frame.value(source.base)) {
+            Some(Value::Entity(entity)) => RuntimePlace {
+                root: RuntimePlaceRoot::Entity { entity: *entity },
+                projections: Vec::new(),
+            },
+            _ => runtime_place_for_register(frames, source.base),
+        }
+    };
+    for field in &source.fields {
+        place = place.project(RuntimeProjection::Field(*field));
+    }
+    place
+}
+
+fn with_register_value<R>(
+    module: &Module,
+    store: &Store<EntityPayload>,
+    frames: &[Frame],
+    register: Register,
+    span: Span,
+    access: impl FnOnce(&Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    let Some(frame) = frames.last() else {
+        return Err(internal("register read has no active frame"));
+    };
+    if let Some(place) = frame.loan(register).cloned() {
+        return with_place_value(module, store, frames, &place, span, access);
+    }
+    let value = frame
+        .value(register)
+        .ok_or_else(|| internal("validated register is undefined"))?;
+    access(value)
+}
+
+fn with_register_mut<R>(
+    module: &Module,
+    store: &mut Store<EntityPayload>,
+    frames: &mut [Frame],
+    register: Register,
+    span: Span,
+    access: impl FnOnce(&mut Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    let frame_index = frames
+        .len()
+        .checked_sub(1)
+        .ok_or_else(|| internal("register mutation has no active frame"))?;
+    if let Some(place) = frames[frame_index].loan(register).cloned() {
+        return with_place_mut(module, store, frames, &place, span, access);
+    }
+    let value = frames[frame_index]
+        .value_mut(register)
+        .ok_or_else(|| internal("validated register is undefined"))?;
+    access(value)
+}
+
+fn with_place_value<R>(
+    module: &Module,
+    store: &Store<EntityPayload>,
+    frames: &[Frame],
+    place: &RuntimePlace,
+    span: Span,
+    access: impl FnOnce(&Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    match place.root {
+        RuntimePlaceRoot::Frame { frame, register } => {
+            let value = frames
+                .get(frame.0)
+                .and_then(|frame| frame.value(register))
+                .ok_or_else(|| internal("loan root register is undefined"))?;
+            access_projected(module, value, &place.projections, access)
+        }
+        RuntimePlaceRoot::Entity { entity } => store
+            .read(entity, |payload| {
+                let Some(RuntimeProjection::Field(field)) = place.projections.first() else {
+                    return Err(internal("entity loan is missing a field projection"));
+                };
+                let index = field_index(module, payload.definition, *field)?;
+                let value = payload
+                    .fields
+                    .get(index)
+                    .ok_or_else(|| internal("entity payload layout is invalid"))?;
+                access_projected(module, value, &place.projections[1..], access)
+            })
+            .map_err(|error| store_failure(error, span))?,
+    }
+}
+
+fn with_place_mut<R>(
+    module: &Module,
+    store: &mut Store<EntityPayload>,
+    frames: &mut [Frame],
+    place: &RuntimePlace,
+    span: Span,
+    access: impl FnOnce(&mut Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    match place.root {
+        RuntimePlaceRoot::Frame { frame, register } => {
+            let value = frames
+                .get_mut(frame.0)
+                .and_then(|frame| frame.value_mut(register))
+                .ok_or_else(|| internal("loan root register is undefined"))?;
+            access_projected_mut(module, value, &place.projections, access)
+        }
+        RuntimePlaceRoot::Entity { entity } => store
+            .edit(entity, |payload| {
+                let Some(RuntimeProjection::Field(field)) = place.projections.first() else {
+                    return Err(internal("entity loan is missing a field projection"));
+                };
+                let index = field_index(module, payload.definition, *field)?;
+                let value = payload
+                    .fields
+                    .get_mut(index)
+                    .ok_or_else(|| internal("entity payload layout is invalid"))?;
+                access_projected_mut(module, value, &place.projections[1..], access)
+            })
+            .map_err(|error| store_failure(error, span))?,
+    }
+}
+
+fn access_projected<R>(
+    module: &Module,
+    mut value: &Value,
+    projections: &[RuntimeProjection],
+    access: impl FnOnce(&Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    for projection in projections {
+        value = match projection {
+            RuntimeProjection::Field(field) => {
+                let Value::Struct { definition, fields } = value else {
+                    return Err(internal("loan field projection requires a struct"));
+                };
+                let index = field_index(module, *definition, *field)?;
+                fields
+                    .get(index)
+                    .ok_or_else(|| internal("struct payload layout is invalid"))?
+            }
+            RuntimeProjection::Index(index) => {
+                let Value::List(elements) = value else {
+                    return Err(internal("loan index projection requires a list"));
+                };
+                elements
+                    .get(*index)
+                    .ok_or_else(|| internal("loan list index is out of bounds"))?
+            }
+        };
+    }
+    access(value)
+}
+
+fn access_projected_mut<R>(
+    module: &Module,
+    mut value: &mut Value,
+    projections: &[RuntimeProjection],
+    access: impl FnOnce(&mut Value) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    for projection in projections {
+        value = match projection {
+            RuntimeProjection::Field(field) => {
+                let Value::Struct { definition, fields } = value else {
+                    return Err(internal("loan field projection requires a struct"));
+                };
+                let index = field_index(module, *definition, *field)?;
+                fields
+                    .get_mut(index)
+                    .ok_or_else(|| internal("struct payload layout is invalid"))?
+            }
+            RuntimeProjection::Index(index) => {
+                let Value::List(elements) = value else {
+                    return Err(internal("loan index projection requires a list"));
+                };
+                elements
+                    .get_mut(*index)
+                    .ok_or_else(|| internal("loan list index is out of bounds"))?
+            }
+        };
+    }
+    access(value)
+}
+
+fn structural_copy(
+    value: &Value,
+    span: Span,
+    controls: &mut TestControls,
+) -> Result<Value, InterpreterFailure> {
+    if controls.fail_structural_copies > 0 {
+        controls.fail_structural_copies -= 1;
+        return Err(allocation_failure(span));
+    }
+    try_copy_value(value).map_err(|_| allocation_failure(span))
+}
+
+fn take_argument(
+    module: &Module,
+    store: &Store<EntityPayload>,
+    frames: &mut [Frame],
+    register: Register,
+    span: Span,
+    controls: &mut TestControls,
+) -> Result<Value, InterpreterFailure> {
+    if is_home_register(module, frames, register) {
+        return take_register(frames, register);
+    }
+    with_register_value(module, store, frames, register, span, |value| {
+        structural_copy(value, span, controls)
+    })
+}
+
 fn set_register(
     frames: &mut [Frame],
     register: Register,
@@ -929,9 +1353,7 @@ fn take_register(frames: &mut [Frame], register: Register) -> Result<Value, Inte
         .last_mut()
         .ok_or_else(|| internal("register move has no active frame"))?;
     frame
-        .registers
-        .get_mut(register.0 as usize)
-        .and_then(Option::take)
+        .take(register)
         .ok_or_else(|| internal("validated source register is undefined or already moved"))
 }
 
@@ -1232,6 +1654,14 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::Phi { span, .. }
         | Instruction::ConstructStruct { span, .. }
         | Instruction::ReadStructField { span, .. }
+        | Instruction::InstallHome { span, .. }
+        | Instruction::MoveHome { span, .. }
+        | Instruction::DropHome { span, .. }
+        | Instruction::DropIfLive { span, .. }
+        | Instruction::DropSlot { span, .. }
+        | Instruction::CleanupTrackedScope { span, .. }
+        | Instruction::ReplacePlace { span, .. }
+        | Instruction::ReplaceField { span, .. }
         | Instruction::BeginLifecycle { span, .. }
         | Instruction::EndLifecycle { span, .. }
         | Instruction::AllocateEntity { span, .. }

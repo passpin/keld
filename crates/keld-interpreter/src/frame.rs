@@ -1,5 +1,6 @@
 use crate::Value;
-use keld_ir::{ArgumentSource, Function, IrBlockId, Register, ViewId, ViewMode};
+use crate::place::{RegisterSlot, RuntimePlace};
+use keld_ir::{Function, IrBlockId, Register, RegisterStorage, ViewId, ViewMode};
 use keld_runtime::EntityId;
 
 #[derive(Clone, Copy)]
@@ -8,19 +9,13 @@ pub(crate) struct ActiveView {
     pub mode: ViewMode,
 }
 
-pub(crate) struct LoanReturn {
-    pub source: ArgumentSource,
-    pub callee: Register,
-}
-
 pub(crate) struct Frame {
     pub function: keld_semantics::FunctionId,
-    pub registers: Vec<Option<Value>>,
+    pub registers: Vec<RegisterSlot>,
     pub block: IrBlockId,
     pub instruction: usize,
     pub predecessor: Option<IrBlockId>,
     pub return_destination: Option<Register>,
-    pub loan_returns: Vec<LoanReturn>,
     pub views: Vec<Option<ActiveView>>,
 }
 
@@ -28,13 +23,20 @@ impl Frame {
     pub fn new(
         function: &Function,
         return_destination: Option<Register>,
-        loan_returns: Vec<LoanReturn>,
     ) -> Result<Self, crate::value::CopyAllocation> {
         let mut registers = Vec::new();
         registers
             .try_reserve_exact(function.register_types.len())
             .map_err(|_| crate::value::CopyAllocation)?;
-        registers.resize_with(function.register_types.len(), || None);
+        for storage in &function.register_storage {
+            registers.push(match storage {
+                RegisterStorage::DropSlot => RegisterSlot::DropSlot(None),
+                RegisterStorage::Trivial
+                | RegisterStorage::EntityFlow
+                | RegisterStorage::Loan
+                | RegisterStorage::Home { .. } => RegisterSlot::Empty,
+            });
+        }
         let view_count = function
             .blocks
             .iter()
@@ -61,19 +63,68 @@ impl Frame {
             instruction: 0,
             predecessor: None,
             return_destination,
-            loan_returns,
             views,
         })
     }
 
     pub fn value(&self, register: Register) -> Option<&Value> {
-        self.registers.get(register.0 as usize)?.as_ref()
+        match self.registers.get(register.0 as usize)? {
+            RegisterSlot::Owned(value) | RegisterSlot::DropSlot(Some(value)) => Some(value),
+            RegisterSlot::Empty | RegisterSlot::Loan(_) | RegisterSlot::DropSlot(None) => None,
+        }
+    }
+
+    pub fn value_mut(&mut self, register: Register) -> Option<&mut Value> {
+        match self.registers.get_mut(register.0 as usize)? {
+            RegisterSlot::Owned(value) | RegisterSlot::DropSlot(Some(value)) => Some(value),
+            RegisterSlot::Empty | RegisterSlot::Loan(_) | RegisterSlot::DropSlot(None) => None,
+        }
     }
 
     pub fn set(&mut self, register: Register, value: Value) -> Result<(), ()> {
         let destination = self.registers.get_mut(register.0 as usize).ok_or(())?;
-        *destination = Some(value);
+        match destination {
+            RegisterSlot::Empty | RegisterSlot::Owned(_) => {
+                *destination = RegisterSlot::Owned(value);
+                Ok(())
+            }
+            RegisterSlot::DropSlot(slot) => {
+                *slot = Some(value);
+                Ok(())
+            }
+            RegisterSlot::Loan(_) => Err(()),
+        }
+    }
+
+    pub fn set_loan(&mut self, register: Register, place: RuntimePlace) -> Result<(), ()> {
+        let destination = self.registers.get_mut(register.0 as usize).ok_or(())?;
+        if !matches!(destination, RegisterSlot::Empty) {
+            return Err(());
+        }
+        *destination = RegisterSlot::Loan(place);
         Ok(())
+    }
+
+    pub fn take(&mut self, register: Register) -> Option<Value> {
+        let slot = self.registers.get_mut(register.0 as usize)?;
+        match slot {
+            RegisterSlot::Owned(_) => {
+                let old = std::mem::replace(slot, RegisterSlot::Empty);
+                match old {
+                    RegisterSlot::Owned(value) => Some(value),
+                    _ => unreachable!(),
+                }
+            }
+            RegisterSlot::DropSlot(value) => value.take(),
+            RegisterSlot::Empty | RegisterSlot::Loan(_) => None,
+        }
+    }
+
+    pub fn loan(&self, register: Register) -> Option<&RuntimePlace> {
+        match self.registers.get(register.0 as usize)? {
+            RegisterSlot::Loan(place) => Some(place),
+            _ => None,
+        }
     }
 
     pub fn view(&self, view: ViewId) -> Option<ActiveView> {
