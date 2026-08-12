@@ -1,5 +1,6 @@
 use keld_interpreter::{
-    RuntimeFaultKind, RuntimeList, Value, run_text_for_test, trace_text_for_test,
+    AllocationController, CapacityError, ReserveFailure, RuntimeFaultKind, RuntimeList, Value,
+    required_capacity, run_text_for_test, run_text_with_controls_for_test, trace_text_for_test,
 };
 
 fn assert_static_error(source: &str, code: &str) {
@@ -101,4 +102,75 @@ fn remove_and_clear_preserve_capacity() {
     let mut removed = Vec::new();
     list.clear_into(&mut removed);
     assert_eq!(list.capacity_for_test(), capacity);
+}
+
+#[test]
+fn reserve_negative_and_unaddressable_sizes_are_capacity_faults() {
+    assert_eq!(required_capacity(0, -1), Err(CapacityError::Impossible));
+    assert_eq!(
+        required_capacity(0, i64::MAX),
+        Err(CapacityError::Impossible)
+    );
+}
+
+#[test]
+fn try_reserve_failure_returns_false_and_preserves_list() {
+    let mut list = RuntimeList::from_values(vec![Value::Int(7)]);
+    let mut allocations = AllocationController::fail_list_attempts([1, 2]);
+    assert!(!list.try_reserve(8, &mut allocations));
+    assert_eq!(list.values_for_test(), &[Value::Int(7)]);
+}
+
+#[test]
+fn preferred_growth_failure_retries_minimum_capacity() {
+    let mut list = RuntimeList::new();
+    let mut allocations = AllocationController::fail_list_attempts([1]);
+    list.reserve(1, &mut allocations)
+        .expect("minimum retry succeeds");
+    assert_eq!(allocations.list_attempts(), 2);
+    assert!(list.capacity_for_test() >= 1);
+}
+
+#[test]
+fn successful_try_reserve_guarantees_the_next_n_pushes_do_not_grow() {
+    let mut list = RuntimeList::new();
+    let mut allocations = AllocationController::default();
+    assert!(list.try_reserve(3, &mut allocations));
+    let attempts = allocations.list_attempts();
+    for value in [1, 2, 3] {
+        list.push(Value::Int(value), &mut allocations)
+            .expect("reserved push succeeds");
+    }
+    assert_eq!(allocations.list_attempts(), attempts);
+}
+
+#[test]
+fn push_reports_allocation_only_after_minimum_retry_fails() {
+    let mut list = RuntimeList::new();
+    let mut allocations = AllocationController::fail_list_attempts([1, 2]);
+    assert_eq!(
+        list.push(Value::Int(1), &mut allocations),
+        Err(ReserveFailure::Allocation)
+    );
+    assert_eq!(allocations.list_attempts(), 2);
+    assert_eq!(list.length(), 0);
+}
+
+#[test]
+fn reserve_and_try_reserve_execute_through_the_ir() {
+    let result = run_text_for_test(
+        "fn main() -> Int { let items: List[Int] = List(); items.reserve(3); let ok = items.try_reserve(-1); if ok { return 1 }; return items.length }\n",
+    )
+    .expect("reserve operations execute");
+    assert_eq!(result.value, Value::Int(0));
+}
+
+#[test]
+fn injected_push_growth_failure_is_reported_as_allocation() {
+    let fault = run_text_with_controls_for_test(
+        "fn main() -> Int { let items: List[Int] = List(); items.push(1); return 0 }\n",
+        keld_interpreter::TestControls::fail_list_attempts([1, 2]),
+    )
+    .expect_err("injected growth failure faults");
+    assert_eq!(fault.kind, RuntimeFaultKind::Allocation);
 }

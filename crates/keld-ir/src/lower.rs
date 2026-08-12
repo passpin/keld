@@ -797,6 +797,32 @@ impl<'flow> FunctionLowerer<'flow> {
                     span: *span,
                 });
             }
+            FlowOp::ListReserve {
+                receiver,
+                additional,
+                span,
+            } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListReserve {
+                    receiver: lowered_receiver,
+                    additional: self.registers.value(*additional),
+                    span: *span,
+                });
+            }
+            FlowOp::ListTryReserve {
+                dst,
+                receiver,
+                additional,
+                span,
+            } => {
+                let lowered_receiver = self.receiver(receiver, *span, output);
+                output.push(Instruction::ListTryReserve {
+                    dst: self.registers.value(*dst),
+                    receiver: lowered_receiver,
+                    additional: self.registers.value(*additional),
+                    span: *span,
+                });
+            }
             FlowOp::ListReplace {
                 receiver,
                 index,
@@ -844,10 +870,7 @@ impl<'flow> FunctionLowerer<'flow> {
                     span: *span,
                 });
             }
-            FlowOp::BeginIndexedReplacement { .. }
-            | FlowOp::EndIndexedReplacement { .. }
-            | FlowOp::ListReserve { .. }
-            | FlowOp::ListTryReserve { .. } => {}
+            FlowOp::BeginIndexedReplacement { .. } | FlowOp::EndIndexedReplacement { .. } => {}
             _ => unreachable!("non-list operation reached list lowering"),
         }
     }

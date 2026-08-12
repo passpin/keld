@@ -1,4 +1,63 @@
 use crate::value::{CopyAllocation, Value, try_copy_value};
+use std::collections::BTreeSet;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapacityError {
+    Impossible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReserveFailure {
+    Capacity,
+    Allocation,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AllocationController {
+    list_attempt: u64,
+    fail_list_attempts: BTreeSet<u64>,
+}
+
+impl AllocationController {
+    #[must_use]
+    pub fn fail_list_attempts(attempts: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            list_attempt: 0,
+            fail_list_attempts: attempts.into_iter().collect(),
+        }
+    }
+
+    #[must_use]
+    pub const fn list_attempts(&self) -> u64 {
+        self.list_attempt
+    }
+
+    fn allow_list_attempt(&mut self) -> bool {
+        self.list_attempt = self.list_attempt.saturating_add(1);
+        !self.fail_list_attempts.contains(&self.list_attempt)
+    }
+}
+
+/// Computes the checked element capacity required by a reservation.
+///
+/// # Errors
+///
+/// Returns [`CapacityError::Impossible`] when the signed source value, element
+/// count, or byte address calculation cannot be represented.
+pub fn required_capacity(length: usize, additional: i64) -> Result<usize, CapacityError> {
+    let additional = usize::try_from(additional).map_err(|_| CapacityError::Impossible)?;
+    let required = length
+        .checked_add(additional)
+        .ok_or(CapacityError::Impossible)?;
+    let _source_length = i64::try_from(required).map_err(|_| CapacityError::Impossible)?;
+    let bytes = required
+        .checked_mul(std::mem::size_of::<Value>())
+        .ok_or(CapacityError::Impossible)?;
+    if bytes > isize::MAX as usize {
+        return Err(CapacityError::Impossible);
+    }
+    Ok(required)
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct RuntimeList {
@@ -46,6 +105,65 @@ impl RuntimeList {
     }
 
     #[doc(hidden)]
+    #[must_use]
+    pub fn values_for_test(&self) -> &[Value] {
+        &self.elements
+    }
+
+    #[doc(hidden)]
+    pub fn push(
+        &mut self,
+        value: Value,
+        allocations: &mut AllocationController,
+    ) -> Result<(), ReserveFailure> {
+        self.reserve(1, allocations)?;
+        self.elements.push(value);
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn reserve(
+        &mut self,
+        additional: i64,
+        allocations: &mut AllocationController,
+    ) -> Result<(), ReserveFailure> {
+        let required = required_capacity(self.elements.len(), additional)
+            .map_err(|CapacityError::Impossible| ReserveFailure::Capacity)?;
+        self.ensure_capacity(required, allocations)
+    }
+
+    #[doc(hidden)]
+    pub fn try_reserve(&mut self, additional: i64, allocations: &mut AllocationController) -> bool {
+        self.reserve(additional, allocations).is_ok()
+    }
+
+    fn ensure_capacity(
+        &mut self,
+        required: usize,
+        allocations: &mut AllocationController,
+    ) -> Result<(), ReserveFailure> {
+        if required <= self.elements.capacity() {
+            return Ok(());
+        }
+        let preferred = required.max(self.elements.capacity().saturating_mul(2).max(4));
+        if self.try_allocate(preferred, allocations)
+            || (preferred != required && self.try_allocate(required, allocations))
+        {
+            Ok(())
+        } else {
+            Err(ReserveFailure::Allocation)
+        }
+    }
+
+    fn try_allocate(&mut self, target: usize, allocations: &mut AllocationController) -> bool {
+        if !allocations.allow_list_attempt() {
+            return false;
+        }
+        let additional = target.saturating_sub(self.elements.capacity());
+        self.elements.try_reserve(additional).is_ok()
+    }
+
+    #[doc(hidden)]
     pub fn get_copy(&self, index: usize) -> Result<Option<Value>, CopyAllocation> {
         self.elements.get(index).map(try_copy_value).transpose()
     }
@@ -54,14 +172,6 @@ impl RuntimeList {
     #[must_use]
     pub fn into_elements(self) -> std::vec::IntoIter<Value> {
         self.elements.into_iter()
-    }
-
-    pub(crate) fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
-        self.elements.try_reserve(additional).map_err(|_| ())
-    }
-
-    pub(crate) fn push(&mut self, value: Value) {
-        self.elements.push(value);
     }
 
     #[doc(hidden)]

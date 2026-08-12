@@ -1149,6 +1149,24 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             Instruction::ListClear { receiver, .. } => {
                 self.validate_receiver(receiver, span);
             }
+            Instruction::ListReserve {
+                receiver,
+                additional,
+                ..
+            } => {
+                self.validate_receiver(receiver, span);
+                self.expect_type(*additional, &IrType::Int, span);
+            }
+            Instruction::ListTryReserve {
+                dst,
+                receiver,
+                additional,
+                ..
+            } => {
+                self.validate_receiver(receiver, span);
+                self.expect_type(*dst, &IrType::Bool, span);
+                self.expect_type(*additional, &IrType::Int, span);
+            }
             Instruction::TextByteLength { dst, text, .. } => {
                 self.expect_type(*dst, &IrType::Int, span);
                 self.expect_type(*text, &IrType::Text, span);
@@ -1359,6 +1377,8 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             | Instruction::ListReplace { .. }
             | Instruction::ListTryRemove { .. }
             | Instruction::ListClear { .. }
+            | Instruction::ListReserve { .. }
+            | Instruction::ListTryReserve { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -1872,6 +1892,7 @@ fn transfer_home_states(
             | Instruction::ListIndex { dst, .. }
             | Instruction::ListGet { dst, .. }
             | Instruction::ListTryRemove { dst, .. }
+            | Instruction::ListTryReserve { dst, .. }
             | Instruction::TextConcat { dst, .. }
             | Instruction::CheckedUnaryInt { dst, .. }
             | Instruction::CheckedBinaryInt { dst, .. }
@@ -2007,7 +2028,8 @@ fn transfer_home_states(
             | Instruction::EndLifecycle { .. }
             | Instruction::KeepEntity { .. }
             | Instruction::RetireEntity { .. }
-            | Instruction::ListClear { .. } => {}
+            | Instruction::ListClear { .. }
+            | Instruction::ListReserve { .. } => {}
         }
     }
     state
@@ -2071,6 +2093,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::ListIndex { dst, .. }
         | Instruction::ListGet { dst, .. }
         | Instruction::ListTryRemove { dst, .. }
+        | Instruction::ListTryReserve { dst, .. }
         | Instruction::TextByteLength { dst, .. }
         | Instruction::TextIsEmpty { dst, .. }
         | Instruction::TextConcat { dst, .. }
@@ -2102,6 +2125,7 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::ListPush { .. }
         | Instruction::ListPushPlace { .. }
         | Instruction::ListClear { .. }
+        | Instruction::ListReserve { .. }
         | Instruction::KeepEntity { .. }
         | Instruction::RetireEntity { .. } => None,
     }
@@ -2181,6 +2205,19 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
             .chain([*index, *value])
             .collect(),
         Instruction::ListClear { receiver, .. } => receiver_registers(receiver),
+        Instruction::ListReserve {
+            receiver,
+            additional,
+            ..
+        }
+        | Instruction::ListTryReserve {
+            receiver,
+            additional,
+            ..
+        } => receiver_registers(receiver)
+            .into_iter()
+            .chain(std::iter::once(*additional))
+            .collect(),
         Instruction::TextByteLength { text, .. } | Instruction::TextIsEmpty { text, .. } => {
             vec![*text]
         }
@@ -2273,6 +2310,8 @@ fn is_structural(instruction: &Instruction) -> bool {
             | Instruction::ListReplace { .. }
             | Instruction::ListTryRemove { .. }
             | Instruction::ListClear { .. }
+            | Instruction::ListReserve { .. }
+            | Instruction::ListTryReserve { .. }
             | Instruction::TextByteLength { .. }
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
@@ -2319,6 +2358,8 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListReplace { span, .. }
         | Instruction::ListTryRemove { span, .. }
         | Instruction::ListClear { span, .. }
+        | Instruction::ListReserve { span, .. }
+        | Instruction::ListTryReserve { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }

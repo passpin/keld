@@ -132,6 +132,22 @@ fn runtime_fault_and_command_misuse_have_distinct_exit_codes() {
 }
 
 #[test]
+fn impossible_list_capacity_is_a_capacity_runtime_fault() {
+    let output = keld()
+        .args(["run", "--engine", "interpreter"])
+        .arg(fixture("runtime_capacity.keld"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("CapacityFault")
+    );
+}
+
+#[test]
 fn dump_ir_is_stable() {
     let path = fixture("numeric_edges.keld");
     let first = keld().arg("dump-ir").arg(&path).output().unwrap();

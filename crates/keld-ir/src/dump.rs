@@ -206,6 +206,33 @@ fn write_instruction(output: &mut String, instruction: &Instruction) {
                 .expect("writing to String cannot fail");
             write_span(output, *span);
         }
+        Instruction::ListReserve {
+            receiver,
+            additional,
+            span,
+        } => {
+            write!(
+                output,
+                "list-reserve r{} r{} ",
+                receiver.list.0, additional.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ListTryReserve {
+            dst,
+            receiver,
+            additional,
+            span,
+        } => {
+            write!(
+                output,
+                "r{} = list-try-reserve r{} r{} ",
+                dst.0, receiver.list.0, additional.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
         Instruction::TextByteLength { dst, text, span } => {
             write!(output, "r{} = text-byte-length r{} ", dst.0, text.0)
                 .expect("writing to String cannot fail");
@@ -512,6 +539,8 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
         | Instruction::ListReplace { .. }
         | Instruction::ListTryRemove { .. }
         | Instruction::ListClear { .. }
+        | Instruction::ListReserve { .. }
+        | Instruction::ListTryReserve { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }
@@ -665,5 +694,6 @@ const fn fault_name(kind: FaultKind) -> &'static str {
         FaultKind::DivisionByZero => "division-by-zero",
         FaultKind::Shift => "shift",
         FaultKind::Allocation => "allocation",
+        FaultKind::Capacity => "capacity",
     }
 }

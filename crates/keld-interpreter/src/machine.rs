@@ -4,6 +4,7 @@ use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
 use crate::value::{CopyAllocation, EntityPayload, Value, try_copy_value};
+use crate::{AllocationController, ReserveFailure};
 use keld_ir::{
     ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, Module,
     Receiver, Register, Terminator, ViewMode,
@@ -18,16 +19,26 @@ pub struct ExecutionResult {
     pub value: Value,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TestControls {
     fail_structural_copies: usize,
+    allocations: AllocationController,
 }
 
 impl TestControls {
     #[must_use]
-    pub const fn fail_structural_copy(count: usize) -> Self {
+    pub fn fail_structural_copy(count: usize) -> Self {
         Self {
             fail_structural_copies: count,
+            allocations: AllocationController::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn fail_list_attempts(attempts: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            fail_structural_copies: 0,
+            allocations: AllocationController::fail_list_attempts(attempts),
         }
     }
 }
@@ -331,9 +342,8 @@ fn execute_instruction(
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
-                    .try_reserve(1)
-                    .map_err(|()| allocation_failure(span))?;
-                elements.push(value);
+                    .push(value, &mut controls.allocations)
+                    .map_err(|failure| reserve_failure(failure, span))?;
                 Ok(())
             })?;
         }
@@ -345,9 +355,8 @@ fn execute_instruction(
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
-                    .try_reserve(1)
-                    .map_err(|()| allocation_failure(span))?;
-                elements.push(value);
+                    .push(value, &mut controls.allocations)
+                    .map_err(|failure| reserve_failure(failure, span))?;
                 Ok(())
             })?;
         }
@@ -510,6 +519,44 @@ fn execute_instruction(
                     cleanup_trace.as_mut(),
                 );
             }
+        }
+        Instruction::ListReserve {
+            receiver,
+            additional,
+            ..
+        } => {
+            let additional =
+                with_register_value(module, store, frames, *additional, span, |value| {
+                    expect_int(value)
+                })?;
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            with_place_mut(module, store, frames, &place, span, |list| {
+                let Value::List(elements) = list else {
+                    return Err(internal("validated reserve received a non-list"));
+                };
+                elements
+                    .reserve(additional, &mut controls.allocations)
+                    .map_err(|failure| reserve_failure(failure, span))
+            })?;
+        }
+        Instruction::ListTryReserve {
+            dst,
+            receiver,
+            additional,
+            ..
+        } => {
+            let additional =
+                with_register_value(module, store, frames, *additional, span, |value| {
+                    expect_int(value)
+                })?;
+            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let success = with_place_mut(module, store, frames, &place, span, |list| {
+                let Value::List(elements) = list else {
+                    return Err(internal("validated try_reserve received a non-list"));
+                };
+                Ok(elements.try_reserve(additional, &mut controls.allocations))
+            })?;
+            set_register(frames, *dst, Value::Bool(success))?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
             let length = with_register_value(module, store, frames, *text, span, |value| {
@@ -967,6 +1014,8 @@ fn execute_call_or_retirement(
         | Instruction::ListReplace { .. }
         | Instruction::ListTryRemove { .. }
         | Instruction::ListClear { .. }
+        | Instruction::ListReserve { .. }
+        | Instruction::ListTryReserve { .. }
         | Instruction::TextByteLength { .. }
         | Instruction::TextIsEmpty { .. }
         | Instruction::TextConcat { .. }
@@ -1189,6 +1238,7 @@ fn execute_terminator(
                 FaultKind::DivisionByZero => RuntimeFaultKind::DivisionByZero,
                 FaultKind::Shift => RuntimeFaultKind::Shift,
                 FaultKind::Allocation => RuntimeFaultKind::Allocation,
+                FaultKind::Capacity => RuntimeFaultKind::Capacity,
             },
             span: *span,
         })),
@@ -1797,6 +1847,16 @@ fn allocation_failure(span: Span) -> InterpreterFailure {
     })
 }
 
+fn reserve_failure(failure: ReserveFailure, span: Span) -> InterpreterFailure {
+    match failure {
+        ReserveFailure::Capacity => InterpreterFailure::Runtime(RuntimeFault {
+            kind: RuntimeFaultKind::Capacity,
+            span,
+        }),
+        ReserveFailure::Allocation => allocation_failure(span),
+    }
+}
+
 fn bounds_failure(span: Span) -> InterpreterFailure {
     InterpreterFailure::Runtime(RuntimeFault {
         kind: RuntimeFaultKind::Bounds,
@@ -1846,6 +1906,8 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::ListReplace { span, .. }
         | Instruction::ListTryRemove { span, .. }
         | Instruction::ListClear { span, .. }
+        | Instruction::ListReserve { span, .. }
+        | Instruction::ListTryReserve { span, .. }
         | Instruction::TextByteLength { span, .. }
         | Instruction::TextIsEmpty { span, .. }
         | Instruction::TextConcat { span, .. }

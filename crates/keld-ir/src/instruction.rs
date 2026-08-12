@@ -143,6 +143,17 @@ pub enum Instruction {
         receiver: crate::Receiver,
         span: Span,
     },
+    ListReserve {
+        receiver: crate::Receiver,
+        additional: Register,
+        span: Span,
+    },
+    ListTryReserve {
+        dst: Register,
+        receiver: crate::Receiver,
+        additional: Register,
+        span: Span,
+    },
     TextByteLength {
         dst: Register,
         text: Register,
@@ -269,6 +280,7 @@ pub enum FaultKind {
     DivisionByZero,
     Shift,
     Allocation,
+    Capacity,
 }
 
 #[derive(Clone, Debug)]
