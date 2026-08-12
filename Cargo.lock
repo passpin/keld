@@ -3,5 +3,9 @@
 version = 4
 
 [[package]]
+name = "keld-numeric"
+version = "0.1.0"
+
+[[package]]
 name = "keld-source"
 version = "0.1.0"
