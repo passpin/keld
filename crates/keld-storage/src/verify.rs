@@ -1,4 +1,5 @@
 use crate::{EmptyReason, Home};
+use crate::{FunctionStoragePlan, cleanup, cleanup::ValueOrigin};
 use keld_flow::{BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, Place, Terminator};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{
@@ -30,7 +31,7 @@ pub struct FunctionStorageSummary {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StorageAnnotations {
-    pub verified_functions: BTreeSet<FunctionId>,
+    pub functions: Vec<FunctionStoragePlan>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,9 +69,9 @@ pub fn verify(lifecycle: VerifiedFlowModule) -> Verification {
     }
     let mut annotations = StorageAnnotations::default();
     for function in &flow.functions {
-        let mut function_diagnostics = verify_function(flow, function, &summaries);
+        let (mut function_diagnostics, plan) = verify_function(flow, function, &summaries);
         diagnostics.append(&mut function_diagnostics);
-        annotations.verified_functions.insert(function.id);
+        annotations.functions.push(plan);
     }
     sort_diagnostics(&mut diagnostics);
     diagnostics
@@ -134,24 +135,13 @@ struct Reservation {
     effect: LoanEffect,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ValueOrigin {
-    Implicit,
-    Local(LocalId),
-    Borrowed(LocalId),
-    BorrowedPlace { place: Place, loaned: bool },
-    BorrowedUnknown,
-    Entity(LocalId),
-    Owned,
-    Unknown,
-}
-
 fn verify_function(
     flow: &FlowModule,
     function: &FlowFunction,
     summaries: &[FunctionStorageSummary],
-) -> Vec<Diagnostic> {
+) -> (Vec<Diagnostic>, FunctionStoragePlan) {
     let mut diagnostics = Vec::new();
+    let mut plan = cleanup::new_function_plan(flow, function);
     let initial = initial_state(flow, function);
     let mut incoming = vec![None::<HomeState>; function.blocks.len()];
     incoming[function.entry.0 as usize] = Some(initial);
@@ -171,6 +161,14 @@ fn verify_function(
                 summaries,
                 &mut diagnostics,
             );
+            cleanup::record_operation(
+                flow,
+                function,
+                operation,
+                &state.origins,
+                block.storage_scope,
+                &mut plan,
+            );
         }
         verify_terminator(flow, function, &block.terminator, &state, &mut diagnostics);
         for successor in successors(&block.terminator) {
@@ -189,7 +187,7 @@ fn verify_function(
             }
         }
     }
-    diagnostics
+    (diagnostics, plan)
 }
 
 fn initial_summary(flow: &FlowModule, function: &FlowFunction) -> FunctionStorageSummary {

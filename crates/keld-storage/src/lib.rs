@@ -1,6 +1,12 @@
+mod cleanup;
+mod plan;
 mod state;
 mod verify;
 
+pub use plan::{
+    BlockStoragePlan, CleanupAction, FunctionStoragePlan, HomeId, LocalStorage,
+    OperationStoragePlan, StoreKind, ValueStorage,
+};
 pub use state::{EmptyReason, EmptyReasonKind, Home};
 pub use verify::{
     FunctionStorageSummary, LoanEffect, StorageAnnotations, Verification, VerifiedStorageModule,
