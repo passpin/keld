@@ -1862,7 +1862,8 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         | Instruction::Phi { .. }
         | Instruction::ReadField { .. }
         | Instruction::CloseView { .. }
-        | Instruction::CleanupTrackedScope { .. } => Vec::new(),
+        | Instruction::CleanupTrackedScope { .. }
+        | Instruction::DropIfLive { .. } => Vec::new(),
         Instruction::Copy { src, .. }
         | Instruction::Take { src, .. }
         | Instruction::CheckedUnaryInt { src, .. }
@@ -1870,7 +1871,7 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         Instruction::InstallHome { source, .. } | Instruction::MoveHome { source, .. } => {
             vec![*source]
         }
-        Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => vec![*home],
+        Instruction::DropHome { home, .. } => vec![*home],
         Instruction::DropSlot { slot, .. } => vec![*slot],
         Instruction::ReplacePlace {
             destination,

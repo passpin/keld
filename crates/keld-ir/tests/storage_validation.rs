@@ -49,9 +49,11 @@ fn insert_drop_after_move(module: &mut Module) {
                 .iter()
                 .position(|instruction| matches!(instruction, Instruction::MoveHome { .. }))
             {
-                let (home, span) = match block.instructions[index] {
-                    Instruction::MoveHome { source, span, .. } => (source, span),
-                    _ => unreachable!(),
+                let Instruction::MoveHome {
+                    source: home, span, ..
+                } = block.instructions[index]
+                else {
+                    unreachable!()
                 };
                 block
                     .instructions
@@ -71,9 +73,8 @@ fn replace_first_loan_read_with_move(module: &mut Module) {
                 .iter()
                 .position(|instruction| matches!(instruction, Instruction::Copy { .. }))
             {
-                let (dst, src, span) = match block.instructions[index] {
-                    Instruction::Copy { dst, src, span } => (dst, src, span),
-                    _ => unreachable!(),
+                let Instruction::Copy { dst, src, span } = block.instructions[index] else {
+                    unreachable!()
                 };
                 block.instructions[index] = Instruction::MoveHome {
                     destination: dst,

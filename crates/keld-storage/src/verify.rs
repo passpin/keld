@@ -347,6 +347,13 @@ fn annotate_exit_plan(
             ExitTarget::Goto(_) | ExitTarget::Return(None) => None,
         };
         let mut actions = Vec::new();
+        let post_success_drops = |home: HomeId| {
+            plan.blocks[block_index].operations.iter().any(|operation| {
+                operation.post_success.iter().any(
+                    |action| matches!(action, CleanupAction::Drop(candidate) if *candidate == home),
+                )
+            })
+        };
         for scope in storage_scopes {
             let Some(scope_state) = state
                 .cleanup_orders
@@ -375,6 +382,9 @@ fn annotate_exit_plan(
                                 Home::Empty(_) => {}
                             },
                             HomeId::Temporary(_) => {
+                                if post_success_drops(*home) {
+                                    continue;
+                                }
                                 actions.push(CleanupAction::Drop(*home));
                             }
                         }
