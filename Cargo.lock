@@ -9,3 +9,10 @@ version = "0.1.0"
 [[package]]
 name = "keld-source"
 version = "0.1.0"
+
+[[package]]
+name = "keld-syntax"
+version = "0.1.0"
+dependencies = [
+ "keld-source",
+]
