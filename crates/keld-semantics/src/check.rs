@@ -142,6 +142,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                     if let Some((local, ty)) = self.environment.locals.get(name).copied() {
                         if matches!(self.analyzer.types.kind(ty), TypeKind::EntityRef(_)) {
                             effects.retires.push(local);
+                            effects.retires_spans.push(*span);
                         } else {
                             self.error(
                                 TYPE_DIAGNOSTIC,
@@ -157,7 +158,10 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                         );
                     }
                 }
-                RetirementSignature::Any(definition) => effects.retires_any.push(*definition),
+                RetirementSignature::Any(definition, span) => {
+                    effects.retires_any.push(*definition);
+                    effects.retires_any_spans.push(*span);
+                }
             }
         }
         effects

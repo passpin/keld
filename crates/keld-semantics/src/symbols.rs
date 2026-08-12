@@ -11,7 +11,7 @@ pub(crate) struct ParameterSignature {
 #[derive(Clone)]
 pub(crate) enum RetirementSignature {
     Parameter(String, Span),
-    Any(DefId),
+    Any(DefId, Span),
 }
 
 #[derive(Clone)]

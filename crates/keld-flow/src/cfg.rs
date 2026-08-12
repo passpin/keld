@@ -1,5 +1,6 @@
 use crate::{FlowOp, Terminator};
 use keld_semantics::{Definition, FunctionEffects, FunctionId, LocalId, TypeId, TypeStore};
+use keld_source::Span;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlockId(pub u32);
@@ -37,6 +38,7 @@ impl FlowModule {
 pub struct FlowFunction {
     pub id: FunctionId,
     pub name: String,
+    pub span: Span,
     pub parameters: Vec<LocalId>,
     pub local_types: Vec<TypeId>,
     pub return_type: TypeId,

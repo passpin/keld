@@ -39,6 +39,8 @@ pub struct FieldDefinition {
 pub struct FunctionEffects {
     pub retires: Vec<LocalId>,
     pub retires_any: Vec<DefId>,
+    pub retires_spans: Vec<Span>,
+    pub retires_any_spans: Vec<Span>,
 }
 
 #[derive(Clone, Debug)]

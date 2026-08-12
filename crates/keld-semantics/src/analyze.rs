@@ -279,7 +279,7 @@ impl<'source, 'syntax> Analyzer<'source, 'syntax> {
                 };
                 let ty = self.resolve_type(type_node);
                 if let TypeKind::EntityRef(definition) = self.types.kind(ty) {
-                    retirements.push(RetirementSignature::Any(*definition));
+                    retirements.push(RetirementSignature::Any(*definition, target.span));
                 } else {
                     self.error(
                         TYPE_DIAGNOSTIC,

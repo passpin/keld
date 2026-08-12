@@ -73,6 +73,7 @@ impl<'module> FunctionBuilder<'module> {
         FlowFunction {
             id: self.function.id,
             name: self.function.name.clone(),
+            span: self.function.span,
             parameters: self
                 .function
                 .parameters
