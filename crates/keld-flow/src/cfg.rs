@@ -17,6 +17,9 @@ pub struct LifecycleId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AllocationSite(pub u32);
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StorageScopeId(pub u32);
+
 #[derive(Clone, Debug)]
 pub struct FlowModule {
     pub definitions: Vec<Definition>,
@@ -51,6 +54,8 @@ pub struct FlowFunction {
     pub current_lifecycle: LifecycleId,
     pub value_types: Vec<TypeId>,
     pub lifecycle_parents: Vec<Option<LifecycleId>>,
+    pub storage_scope_parents: Vec<Option<StorageScopeId>>,
+    pub local_scopes: Vec<StorageScopeId>,
     pub blocks: Vec<FlowBlock>,
     pub entry: BlockId,
 }
@@ -68,6 +73,7 @@ impl FlowFunction {
 #[derive(Clone, Debug)]
 pub struct FlowBlock {
     pub id: BlockId,
+    pub storage_scope: StorageScopeId,
     pub operations: Vec<FlowOp>,
     pub terminator: Terminator,
 }

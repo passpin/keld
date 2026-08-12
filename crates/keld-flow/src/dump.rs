@@ -13,7 +13,12 @@ pub(crate) fn dump(module: &FlowModule) -> String {
         )
         .expect("writing to String cannot fail");
         for block in &function.blocks {
-            writeln!(output, "  block b{}", block.id.0).expect("writing to String cannot fail");
+            writeln!(
+                output,
+                "  block b{} scope s{}",
+                block.id.0, block.storage_scope.0
+            )
+            .expect("writing to String cannot fail");
             for operation in &block.operations {
                 write!(output, "    ").expect("writing to String cannot fail");
                 write_operation(&mut output, operation);
@@ -352,8 +357,22 @@ fn write_terminator(output: &mut String, terminator: &Terminator) {
                 link.0, bind_local.0, live.0, absent.0
             ),
         ),
-        Terminator::ExitScopes { lifecycles, next } => {
+        Terminator::ExitScopes {
+            storage_scopes,
+            lifecycles,
+            next,
+        } => {
             output.push_str("exit");
+            if !storage_scopes.is_empty() {
+                output.push_str(" storage_exit [");
+                for (index, scope) in storage_scopes.iter().enumerate() {
+                    if index > 0 {
+                        output.push_str(", ");
+                    }
+                    write!(output, "s{}", scope.0).expect("writing to String cannot fail");
+                }
+                output.push(']');
+            }
             for lifecycle in lifecycles {
                 write!(output, " l{}", lifecycle.0).expect("writing to String cannot fail");
             }

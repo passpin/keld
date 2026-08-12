@@ -12,7 +12,8 @@ fn return_from_nested_lifecycle_has_an_explicit_exit_edge() {
         block.terminator,
         Terminator::ExitScopes {
             ref lifecycles,
-            next: ExitTarget::Return(_)
+            next: ExitTarget::Return(_),
+            ..
         } if lifecycles.len() == 2 && lifecycles[0].0 > lifecycles[1].0
     )));
 }

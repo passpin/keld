@@ -1,4 +1,4 @@
-use crate::{AllocationSite, BlockId, LifecycleId, ValueId};
+use crate::{AllocationSite, BlockId, LifecycleId, StorageScopeId, ValueId};
 use keld_numeric::{IntBinaryOp, IntUnaryOp};
 use keld_semantics::{CompareOp, DefId, FieldId, FunctionId, LocalId, ParameterIndex};
 use keld_source::Span;
@@ -254,6 +254,7 @@ pub enum Terminator {
         span: Span,
     },
     ExitScopes {
+        storage_scopes: Vec<StorageScopeId>,
         lifecycles: Vec<LifecycleId>,
         next: ExitTarget,
     },

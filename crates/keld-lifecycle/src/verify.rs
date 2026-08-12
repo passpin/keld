@@ -542,7 +542,9 @@ impl Analyzer<'_> {
                 self.annotate(block, None);
                 vec![(*live, live_state), (*absent, state)]
             }
-            Terminator::ExitScopes { lifecycles, next } => match next {
+            Terminator::ExitScopes {
+                lifecycles, next, ..
+            } => match next {
                 ExitTarget::Goto(target) => {
                     let mut state = state;
                     self.exit_lifecycles(&mut state, lifecycles);

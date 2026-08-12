@@ -1,10 +1,10 @@
 use crate::{
     AllocationSite, BlockId, ExitTarget, FlowBlock, FlowFunction, FlowModule, FlowOp, LifecycleId,
-    Place, Terminator, ValueId,
+    Place, StorageScopeId, Terminator, ValueId,
 };
 use keld_semantics::{
     CompareOp, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle,
-    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, TypeId, TypeKind, TypeStore, TypedModule,
+    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, TypeId, TypeKind, TypeStore, TypedModule,
 };
 use keld_source::Diagnostic;
 
@@ -42,6 +42,9 @@ struct FunctionBuilder<'module> {
     current: BlockId,
     value_types: Vec<TypeId>,
     lifecycle_parents: Vec<Option<LifecycleId>>,
+    storage_scope_parents: Vec<Option<StorageScopeId>>,
+    local_scopes: Vec<StorageScopeId>,
+    current_storage_scope: StorageScopeId,
     active_lifecycles: Vec<LifecycleId>,
     next_allocation_site: u32,
     next_call: u32,
@@ -54,6 +57,7 @@ impl<'module> FunctionBuilder<'module> {
             function,
             blocks: vec![FlowBlock {
                 id: BlockId(0),
+                storage_scope: StorageScopeId(0),
                 operations: Vec::new(),
                 terminator: Terminator::Unreachable,
             }],
@@ -61,6 +65,9 @@ impl<'module> FunctionBuilder<'module> {
             current: BlockId(0),
             value_types: Vec::new(),
             lifecycle_parents: vec![None],
+            storage_scope_parents: vec![None],
+            local_scopes: vec![StorageScopeId(0); function.local_types.len()],
+            current_storage_scope: StorageScopeId(0),
             active_lifecycles: Vec::new(),
             next_allocation_site: 0,
             next_call: 0,
@@ -90,6 +97,8 @@ impl<'module> FunctionBuilder<'module> {
             current_lifecycle: LifecycleId(0),
             value_types: self.value_types,
             lifecycle_parents: self.lifecycle_parents,
+            storage_scope_parents: self.storage_scope_parents,
+            local_scopes: self.local_scopes,
             blocks: self.blocks,
             entry: BlockId(0),
         }
@@ -108,6 +117,7 @@ impl<'module> FunctionBuilder<'module> {
     fn lower_statement(&mut self, statement: &HirStmt) {
         match &statement.kind {
             HirStmtKind::Let { local, initializer } => {
+                self.assign_local_scope(*local);
                 if let Some(value) = self.lower_expression(initializer) {
                     self.emit(FlowOp::StoreLocal {
                         local: *local,
@@ -117,6 +127,7 @@ impl<'module> FunctionBuilder<'module> {
                 }
             }
             HirStmtKind::Var { local, initializer } => {
+                self.assign_local_scope(*local);
                 if let Some(initializer) = initializer
                     && let Some(value) = self.lower_expression(initializer)
                 {
@@ -241,9 +252,10 @@ impl<'module> FunctionBuilder<'module> {
             });
         }
 
-        let then_reaches_merge = self.lower_branch(&value.then_block, then_block, merge_block);
+        let then_reaches_merge =
+            self.lower_branch(&value.then_block, then_block, merge_block, None);
         let else_reaches_merge = if let Some(block) = &value.else_block {
-            self.lower_branch(block, else_block, merge_block)
+            self.lower_branch(block, else_block, merge_block, None)
         } else {
             self.current = else_block;
             self.terminate(Terminator::Goto(merge_block));
@@ -269,9 +281,9 @@ impl<'module> FunctionBuilder<'module> {
             absent,
             span: value.link.span,
         });
-        let live_reaches = self.lower_branch(&value.live, live, merge);
+        let live_reaches = self.lower_branch(&value.live, live, merge, Some(value.binding));
         let absent_reaches = if let Some(block) = &value.absent {
-            self.lower_branch(block, absent, merge)
+            self.lower_branch(block, absent, merge, None)
         } else {
             self.current = absent;
             self.terminate(Terminator::Goto(merge));
@@ -296,11 +308,16 @@ impl<'module> FunctionBuilder<'module> {
             parent,
             span: value.body.span,
         });
+        let parent_storage_scope = self.current_storage_scope;
+        let body_storage_scope = self.new_storage_scope(parent_storage_scope);
         self.active_lifecycles.push(lifecycle);
+        self.current_storage_scope = body_storage_scope;
         self.lower_block(&value.body);
         let after = self.new_block();
+        self.blocks[after.0 as usize].storage_scope = parent_storage_scope;
         if self.current_is_open() {
             self.terminate(Terminator::ExitScopes {
+                storage_scopes: self.storage_scopes_until(parent_storage_scope),
                 lifecycles: vec![lifecycle],
                 next: ExitTarget::Goto(after),
             });
@@ -308,16 +325,36 @@ impl<'module> FunctionBuilder<'module> {
             self.sealed[after.0 as usize] = true;
         }
         self.active_lifecycles.pop();
+        self.current_storage_scope = parent_storage_scope;
         self.current = after;
     }
 
-    fn lower_branch(&mut self, block: &HirBlock, entry: BlockId, merge: BlockId) -> bool {
+    fn lower_branch(
+        &mut self,
+        block: &HirBlock,
+        entry: BlockId,
+        merge: BlockId,
+        scope_local: Option<LocalId>,
+    ) -> bool {
+        let parent_storage_scope = self.current_storage_scope;
+        let branch_storage_scope = self.new_storage_scope(parent_storage_scope);
+        self.blocks[entry.0 as usize].storage_scope = branch_storage_scope;
+        if let Some(local) = scope_local {
+            self.local_scopes[local.0 as usize] = branch_storage_scope;
+        }
         self.current = entry;
+        self.current_storage_scope = branch_storage_scope;
         self.lower_block(block);
         if self.current_is_open() {
-            self.terminate(Terminator::Goto(merge));
+            self.terminate(Terminator::ExitScopes {
+                storage_scopes: vec![branch_storage_scope],
+                lifecycles: Vec::new(),
+                next: ExitTarget::Goto(merge),
+            });
+            self.current_storage_scope = parent_storage_scope;
             true
         } else {
+            self.current_storage_scope = parent_storage_scope;
             false
         }
     }
@@ -794,6 +831,7 @@ impl<'module> FunctionBuilder<'module> {
         let id = BlockId(u32::try_from(self.blocks.len()).unwrap_or(u32::MAX));
         self.blocks.push(FlowBlock {
             id,
+            storage_scope: self.current_storage_scope,
             operations: Vec::new(),
             terminator: Terminator::Unreachable,
         });
@@ -819,9 +857,46 @@ impl<'module> FunctionBuilder<'module> {
 
     fn exit_to(&mut self, next: ExitTarget) {
         self.terminate(Terminator::ExitScopes {
+            storage_scopes: self.storage_scopes_to_root(),
             lifecycles: self.active_lifecycles.iter().rev().copied().collect(),
             next,
         });
+    }
+
+    fn assign_local_scope(&mut self, local: LocalId) {
+        if let Some(scope) = self.local_scopes.get_mut(local.0 as usize) {
+            *scope = self.current_storage_scope;
+        }
+    }
+
+    fn new_storage_scope(&mut self, parent: StorageScopeId) -> StorageScopeId {
+        let id =
+            StorageScopeId(u32::try_from(self.storage_scope_parents.len()).unwrap_or(u32::MAX));
+        self.storage_scope_parents.push(Some(parent));
+        id
+    }
+
+    fn storage_scopes_to_root(&self) -> Vec<StorageScopeId> {
+        let mut scopes = Vec::new();
+        let mut current = Some(self.current_storage_scope);
+        while let Some(scope) = current {
+            scopes.push(scope);
+            current = self.storage_scope_parents[scope.0 as usize];
+        }
+        scopes
+    }
+
+    fn storage_scopes_until(&self, ancestor: StorageScopeId) -> Vec<StorageScopeId> {
+        let mut scopes = Vec::new();
+        let mut current = Some(self.current_storage_scope);
+        while let Some(scope) = current {
+            if scope == ancestor {
+                break;
+            }
+            scopes.push(scope);
+            current = self.storage_scope_parents[scope.0 as usize];
+        }
+        scopes
     }
 
     fn current_lifecycle(&self) -> LifecycleId {

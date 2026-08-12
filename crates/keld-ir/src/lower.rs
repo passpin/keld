@@ -671,7 +671,9 @@ impl<'flow> FunctionLowerer<'flow> {
                 absent: IrBlockId(absent.0),
                 span: *span,
             },
-            keld_flow::Terminator::ExitScopes { lifecycles, next } => {
+            keld_flow::Terminator::ExitScopes {
+                lifecycles, next, ..
+            } => {
                 for lifecycle in lifecycles {
                     output.push(Instruction::EndLifecycle {
                         lifecycle: self.registers.lifecycle(*lifecycle),
