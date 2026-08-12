@@ -53,3 +53,28 @@ fn value_indices_are_conservatively_overlapping() {
         "KLD2005",
     );
 }
+
+#[test]
+fn distinct_and_equal_entity_fields_follow_identity_aware_overlap() {
+    let distinct = verify_text_for_test(
+        "entity Holder {\nleft: List[Int]\nright: List[Int]\n}\nfn change(left: List[Int], right: List[Int]) {\nleft.push(1)\nreturn\n}\nfn main() -> Int { lifecycle level { let holder = Holder(left: List(), right: List())\nchange(holder.left, holder.right)\nreturn 0\n} }\n",
+    );
+    assert!(
+        distinct.diagnostics.is_empty(),
+        "{:#?}",
+        distinct.diagnostics
+    );
+
+    assert_code(
+        "entity Holder {\nitems: List[Int]\n}\nfn change(left: List[Int], right: List[Int]) {\nleft.push(1)\nreturn\n}\nfn main() -> Int { lifecycle level { let holder = Holder(items: List())\nchange(holder.items, holder.items)\nreturn 0\n} }\n",
+        "KLD2005",
+    );
+}
+
+#[test]
+fn nested_indexed_replacement_keeps_projected_reservations() {
+    assert_code(
+        "fn main() -> Int {\nlet matrix: List[List[Int]] = List()\nlet index = 0\nlet other = 0\nmatrix[index][other] = matrix[index].remove(0)\nreturn 0\n}\n",
+        "KLD2007",
+    );
+}

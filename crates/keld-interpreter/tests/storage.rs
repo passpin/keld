@@ -147,6 +147,26 @@ fn nested_lists_transfer_copy_and_remove() {
 }
 
 #[test]
+fn nested_text_lists_copy_independently_and_loan_projected_elements() {
+    let result = run_text_for_test(
+        "fn size(value: Text) -> Int { return value.byte_length }\nfn main() -> Int {\nlet inner: List[Text] = List()\ninner.push(\"nested\")\nlet outer: List[List[Text]] = List()\nouter.push(take inner)\nlet copied = outer.copy()\ncopied[0].push(\"copy\")\nlet removed = copied.remove(0)\nreturn size(outer[0][0]) + size(removed[1])\n}\n",
+    )
+    .expect("nested Text transfer, copy, projected loan, and removal execute");
+
+    assert_eq!(result.value, Value::Int(10));
+}
+
+#[test]
+fn owned_list_results_flow_through_binding_call_push_field_and_return() {
+    let result = run_text_for_test(
+        "struct Holder { items: List[Text] }\nfn make() -> List[Text] { let value: List[Text] = List()\nvalue.push(\"owned\")\nreturn take value\n}\nfn consume(take value: List[Text]) -> List[Text] { return take value }\nfn main() -> Int { let source = make()\nlet forwarded = consume(take source)\nlet outer: List[List[Text]] = List()\nouter.push(take forwarded)\nlet extracted = outer.remove(0)\nvar holder = Holder(items: List())\nholder.items = take extracted\nreturn holder.items[0].byte_length\n}\n",
+    )
+    .expect("owned results preserve explicit transfer contexts");
+
+    assert_eq!(result.value, Value::Int(5));
+}
+
+#[test]
 fn structural_loan_mutates_the_callers_list() {
     let result = run_text_for_test(
         "fn append(items: List[Int]) {\nitems.push(1)\nreturn\n}\nfn main() -> Int {\nlet items: List[Int] = List()\nappend(items)\nreturn items.length\n}\n",

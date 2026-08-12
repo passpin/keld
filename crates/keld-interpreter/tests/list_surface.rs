@@ -174,3 +174,27 @@ fn injected_push_growth_failure_is_reported_as_allocation() {
     .expect_err("injected growth failure faults");
     assert_eq!(fault.kind, RuntimeFaultKind::Allocation);
 }
+
+#[test]
+fn nested_list_indexing_replacement_and_bounds_are_checked() {
+    let result = run_text_for_test(
+        "fn main() -> Int { let inner: List[Int] = List()\ninner.push(1)\nlet outer: List[List[Int]] = List()\nouter.push(take inner)\nouter[0][0] = 7\nreturn outer[0][0]\n}\n",
+    )
+    .expect("nested indexed replacement executes");
+    assert_eq!(result.value, Value::Int(7));
+
+    let fault = run_text_for_test(
+        "fn main() -> Int { let inner: List[Int] = List()\nlet outer: List[List[Int]] = List()\nouter.push(take inner)\nreturn outer[0][0]\n}\n",
+    )
+    .expect_err("nested out-of-bounds access must fault");
+    assert_eq!(fault.kind, RuntimeFaultKind::Bounds);
+}
+
+#[test]
+fn failed_indexed_rhs_evaluation_does_not_install_a_replacement() {
+    let fault = run_text_for_test(
+        "fn main() -> Int { let items: List[Int] = List()\nitems.push(7)\nitems[0] = items[1]\nreturn items[0]\n}\n",
+    )
+    .expect_err("failed RHS indexing must fault before replacement");
+    assert_eq!(fault.kind, RuntimeFaultKind::Bounds);
+}

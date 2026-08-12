@@ -1236,8 +1236,14 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 displaced,
                 ..
             } => {
-                self.expect_same_type(destination.base, *source, span);
-                self.expect_same_type(destination.base, *displaced, span);
+                let destination_type = self.validate_argument_source(destination, span);
+                if let Some(destination_type) = destination_type {
+                    self.expect_type(*source, &destination_type, span);
+                    self.expect_type(*displaced, &destination_type, span);
+                } else {
+                    self.check_register(*source, span);
+                    self.check_register(*displaced, span);
+                }
             }
             Instruction::ReplaceField {
                 source, displaced, ..

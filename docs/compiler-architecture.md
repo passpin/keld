@@ -33,8 +33,8 @@ lowered or executed. `check` runs every static stage through IR validation.
 | `keld-semantics` | source plus successful `ParsedFile` | definitions, types, typed HIR, entrypoint contract | CFG scheduling, entity liveness, cleanup, or executable operations |
 | `keld-flow` | `TypedModule` | CFG with explicit evaluation order, locals, and provenance sites | deciding lifecycle safety, runtime storage, or backend layout |
 | `keld-lifecycle` | `FlowModule` | function effects, liveness facts, proof annotations, verified flow | executable instruction selection, slot mutation, or interpretation |
-| `keld-storage` | `VerifiedFlowModule` | single-home homes, CFG joins, loans, reservations, and storage summaries | entity liveness, runtime mutation, or backend policy |
-| `keld-ir` | `VerifiedStorageModule` | executable IR, stable textual dump, validation diagnostics | source recovery, runtime policy, or executing unvalidated modules |
+| `keld-storage` | `VerifiedFlowModule` | `VerifiedStorageModule` with Home/value classifications, call effects, `MaybeLive` flags, transfer/drop actions, and per-exit cleanup actions | entity liveness, runtime mutation, or backend policy |
+| `keld-ir` | `VerifiedStorageModule` | executable IR with explicit move/loan/install/drop and checked List operations, stable textual dump, and validation diagnostics | source recovery, runtime policy, or executing unvalidated modules |
 | `keld-runtime` | opaque branded identities, lifecycle IDs, type IDs, payloads | segmented entity store, weak links, deterministic cleanup | source-language types, IR, diagnostics, or user-visible control flow |
 | `keld-interpreter` | validated executable `Module` | explicit-frame execution result or classified fault | parsing, static recovery, accepting invalid IR, or language extensions |
 | `keld-cli` | OS arguments, selected file bytes | `Compilation`, CLI output, documented exit status | new syntax, type, lifecycle, numeric, or runtime semantics |
@@ -42,6 +42,40 @@ lowered or executed. `check` runs every static stage through IR validation.
 The dependency graph is acyclic. `keld-source` and `keld-numeric` are semantic
 leaves. The runtime is source-independent. The interpreter is the first crate
 where validated executable IR and runtime storage meet.
+
+## Verified storage and executable boundaries
+
+The storage verifier is the sole owner of executable managed-storage decisions:
+
+```text
+VerifiedStorageModule
+  = verified lifecycle flow
+  + call effects
+  + Home/value classifications
+  + MaybeLive flags
+  + per-operation transfer/drop actions
+  + per-exit cleanup actions
+
+keld-ir
+  = explicit move/loan/install/drop
+  + explicit checked List operations
+  + no unresolved cleanup or alias decision
+```
+
+Uniform cleanup paths lower to direct reverse-order drops. A hidden per-scope
+order tracker is emitted only for a scope whose successful-initialization order
+diverges at a CFG join; `MaybeLive` uses conditional drop metadata. Direct drops,
+tracked cleanup, normal scope exits, and returns therefore share one executable
+cleanup contract. `List[T]` and `Text` remain single-home, aggregate cleanup is
+recursive and iterative, `List()` has no element buffer, and bounds/capacity
+checks execute in every build.
+
+The interpreter milestone verifies nested `List[List[Int]]` and
+`List[List[Text]]` transfer, copy, projected loans and replacements, removal,
+clearing, bounds, reservation retry, and cleanup. `Map`, `Set`, `Slice`,
+iterators, `for`, substrings, and Text integer indexing remain outside the
+bootstrap surface. Native and WebAssembly differential execution is a later
+LLVM backend gate and is not claimed by this interpreter milestone.
 
 ## Diagnostic ownership
 
@@ -55,6 +89,7 @@ where validated executable IR and runtime storage meet.
 | `KLD1001`-`KLD1009` | entity liveness, escape, lifecycle order, aliases, effects |
 | `KLD2001`-`KLD2009` | single-home transfers, homes, loans, reservations, and storage effects |
 | `KLD9001`-`KLD9005` | invalid executable views, registers, CFG, lifecycles, or module shape |
+| `KLD9006` | invalid executable storage or container IR: homes, cleanup, projected places, Optional values, List operations, or capacity operations |
 
 Flow lowering and the runtime do not create Keld diagnostics. Runtime store
 errors and interpreter faults are classified separately from static errors.
@@ -89,9 +124,10 @@ in reverse adoption order. A parent cannot end while it has an active child.
 ## Compiler-bug boundary
 
 `keld-ir::validate` is mandatory after lowering and again when an interpreter is
-constructed. A `KLD9001`-`KLD9005` diagnostic from compiler-produced IR is a
+constructed. A `KLD9001`-`KLD9006` diagnostic from compiler-produced IR is a
 compiler bug, not a user program error. In particular, a field `View` must close
-before a structural instruction or terminator.
+before a structural instruction or terminator, and executable storage/container
+IR must contain no unresolved cleanup or alias decision.
 
 With validated IR, `ForeignIdentity`, `StaleEntity`, `InvalidLifecycle`,
 `NonAncestorKeep`, `RootEnd`, and `ActiveChild` store failures indicate a

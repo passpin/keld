@@ -148,6 +148,43 @@ fn impossible_list_capacity_is_a_capacity_runtime_fault() {
 }
 
 #[test]
+fn deferred_containers_and_views_remain_outside_the_bootstrap_surface() {
+    for (name, source) in [
+        (
+            "map",
+            "fn main() -> Int { let value: Map[Int] = none; return 0 }\n",
+        ),
+        (
+            "set",
+            "fn main() -> Int { let value: Set[Int] = none; return 0 }\n",
+        ),
+        (
+            "slice",
+            "fn main() -> Int { let value: Slice[Int] = none; return 0 }\n",
+        ),
+        (
+            "iterator",
+            "fn main() -> Int { let items: List[Int] = List(); return items.iterator() }\n",
+        ),
+        (
+            "for",
+            "fn main() -> Int { for item in List() { return 0 } return 0 }\n",
+        ),
+        (
+            "substring",
+            "fn main() -> Int { return \"text\".substring(0, 1) }\n",
+        ),
+        ("text-index", "fn main() -> Int { return \"text\"[0] }\n"),
+    ] {
+        let path = std::env::temp_dir().join(format!("keld-task12-{name}.keld"));
+        std::fs::write(&path, source).expect("temporary source must be writable");
+        let output = keld().arg("check").arg(&path).output().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(output.status.code(), Some(1), "{name}");
+    }
+}
+
+#[test]
 fn dump_ir_is_stable() {
     let path = fixture("numeric_edges.keld");
     let first = keld().arg("dump-ir").arg(&path).output().unwrap();

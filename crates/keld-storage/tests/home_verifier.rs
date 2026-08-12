@@ -128,6 +128,30 @@ fn list_push_requires_explicit_transfer_for_named_single_home_elements() {
 }
 
 #[test]
+fn nested_text_lists_allow_whole_transfer_and_reject_partial_moves() {
+    let accepted = keld_storage::verify_text_for_test(
+        "fn forward(take value: List[List[Text]]) -> List[List[Text]] {\nlet copied = value.copy()\nreturn take copied\n}\nfn main() -> Int { return 0 }\n",
+    );
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:#?}",
+        accepted.diagnostics
+    );
+
+    let rejected = keld_storage::verify_text_for_test(
+        "fn invalid(take value: List[List[Text]]) -> List[Text] {\nreturn take value[0]\n}\nfn main() -> Int { return 0 }\n",
+    );
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "KLD2004"),
+        "{:#?}",
+        rejected.diagnostics
+    );
+}
+
+#[test]
 fn consuming_call_requires_take_for_a_named_argument() {
     let result = keld_storage::verify_text_for_test(
         "fn consume(take items: List[Int]) { return }\nfn main() -> Int {\nlet items: List[Int] = List()\nconsume(items)\nreturn 0\n}\n",

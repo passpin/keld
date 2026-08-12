@@ -72,3 +72,24 @@ fn optional_try_remove_result_cleans_present_element() {
     .expect("program executes");
     assert_eq!(trace.text_markers(), vec![(1, b'x')]);
 }
+
+#[test]
+fn nested_text_cleanup_is_iterative_and_preserves_reverse_success_order() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let first: List[Text] = List()\nfirst.push(\"a\")\nlet second: List[Text] = List()\nsecond.push(\"long-lived-text\")\nlet values: List[List[Text]] = List()\nvalues.push(take first)\nvalues.push(take second)\nreturn 0\n}\n",
+    )
+    .expect("nested Text cleanup executes");
+
+    assert_eq!(trace.list_indices(), vec![1, 0, 0, 0]);
+    assert_eq!(trace.text_markers(), vec![(15, b'l'), (1, b'a')]);
+}
+
+#[test]
+fn inline_and_heap_text_use_the_same_home_cleanup_rules() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let inline: Text = \"a\"\nlet heap: Text = \"abcdefghijklmnopqrstuvwxyz\"\nreturn 0\n}\n",
+    )
+    .expect("inline and heap Text cleanup executes");
+
+    assert_eq!(trace.text_markers(), vec![(26, b'a'), (1, b'a')]);
+}

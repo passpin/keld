@@ -36,3 +36,11 @@ fn indexed_replacement_rejects_take_rhs_access() {
         "KLD2007",
     );
 }
+
+#[test]
+fn projected_field_replacement_rejects_structural_rhs_access() {
+    assert_code(
+        "struct Holder {\nitems: List[Int]\n}\nfn main() -> Int {\nvar holder = Holder(items: List())\nlet index = 0\nholder.items[index] = holder.items.remove(0)\nreturn 0\n}\n",
+        "KLD2007",
+    );
+}
