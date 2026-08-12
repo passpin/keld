@@ -1,4 +1,7 @@
-use keld_semantics::{DefinitionKind, TypeKind, analyze_text};
+use keld_semantics::{
+    DefinitionKind, FunctionId, HirExprKind, HirProjection, HirStmtKind, TypeKind, TypeStore,
+    TypedModule, analyze_text,
+};
 use std::fmt::Write;
 
 #[test]
@@ -166,6 +169,96 @@ fn types_list_remove_returns_the_element_type() {
 }
 
 #[test]
+fn types_complete_list_operations() {
+    let module = analyze_ok(
+        "fn probe(items: List[Int], index: Int) { let value: Int = items[index]; let maybe: Int? = items.get(index); let removed: Int? = items.try_remove(index); items[index] = 1; items.clear(); items.reserve(4); let ok: Bool = items.try_reserve(4); return }\nfn main() -> Int { return 0 }\n",
+    );
+    let probe = &module.functions[0];
+    let expressions = probe
+        .body
+        .statements
+        .iter()
+        .filter_map(|statement| match &statement.kind {
+            HirStmtKind::Let { initializer, .. }
+            | HirStmtKind::Expr(initializer)
+            | HirStmtKind::Assign {
+                value: initializer, ..
+            }
+            | HirStmtKind::Var {
+                initializer: Some(initializer),
+                ..
+            } => Some(initializer),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        &expressions[0].kind,
+        HirExprKind::ListIndex { .. }
+    ));
+    assert_eq!(expressions[0].ty, TypeStore::INT);
+    assert!(matches!(&expressions[1].kind, HirExprKind::ListGet { .. }));
+    assert!(matches!(
+        module.types.kind(expressions[1].ty),
+        TypeKind::Optional(inner) if *inner == TypeStore::INT
+    ));
+    assert!(matches!(
+        &expressions[2].kind,
+        HirExprKind::ListTryRemove { .. }
+    ));
+    assert!(matches!(
+        &probe.body.statements[3].kind,
+        HirStmtKind::Assign {
+            target,
+            ..
+        } if matches!(target.projections.as_slice(), [HirProjection::Index(_)])
+    ));
+    assert!(matches!(&expressions[4].kind, HirExprKind::ListClear(_)));
+    assert!(matches!(
+        &expressions[5].kind,
+        HirExprKind::ListReserve { .. }
+    ));
+    assert!(matches!(
+        &expressions[6].kind,
+        HirExprKind::ListTryReserve { .. }
+    ));
+    assert_eq!(expressions[6].ty, TypeStore::BOOL);
+}
+
+#[test]
+fn get_rejects_single_home_elements() {
+    let diagnostics = analyze_errors(
+        "fn invalid(items: List[Text]) { let value = items.get(0); return }\nfn main() -> Int { return 0 }\n",
+    );
+    assert_eq!(diagnostics[0].code.0, "KLD0106");
+}
+
+#[test]
+fn indexed_list_diagnostics_are_focused() {
+    let cases = [
+        "fn invalid(items: List[Int]) { let value = items[\"x\"]; return }\nfn main() -> Int { return 0 }\n",
+        "fn invalid(items: List[Int]) { let value = items.get(); return }\nfn main() -> Int { return 0 }\n",
+        "fn invalid(items: List[Int]) { let value = 1.get(0); return }\nfn main() -> Int { return 0 }\n",
+        "fn invalid(items: List[Int]) { let value = take items[0]; return }\nfn main() -> Int { return 0 }\n",
+        "fn invalid(items: List[Int]) { items[0] += 1; return }\nfn main() -> Int { return 0 }\n",
+    ];
+    for text in cases {
+        assert!(!analyze_text(text).diagnostics.is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn managed_struct_field_replacement_requires_a_var_base() {
+    let accepted = analyze_ok(
+        "struct Holder {\nvalue: Text\n}\nfn main() -> Int { var holder = Holder(value: \"old\"); holder.value = \"new\"; return holder.value.byte_length }\n",
+    );
+    assert_eq!(accepted.main, FunctionId(0));
+    let rejected = analyze_errors(
+        "struct Holder {\nvalue: Text\n}\nfn main() -> Int { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0 }\n",
+    );
+    assert_eq!(rejected[0].code.0, "KLD2010");
+}
+
+#[test]
 fn types_text_literal_and_byte_length() {
     let analysis = analyze_text(
         "fn length() -> Int { return \"Keld\".byte_length }\nfn main() -> Int { return 0 }\n",
@@ -324,7 +417,26 @@ fn bootstrap_assignment_exclusions_are_focused() {
     let struct_field = analyze_text(
         "struct S {\nx: Int\n}\nfn main() -> Int { let s = S(x: 0); s.x = 1; return s.x }\n",
     );
-    assert!(struct_field.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code.0 == "KLD0004" && diagnostic.primary.message.contains("assignment")
-    }));
+    assert!(
+        struct_field
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code.0 == "KLD2010" })
+    );
+}
+
+fn analyze_ok(text: &str) -> TypedModule {
+    let analysis = analyze_text(text);
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    analysis.module.expect("analysis module is present")
+}
+
+fn analyze_errors(text: &str) -> Vec<keld_source::Diagnostic> {
+    let analysis = analyze_text(text);
+    assert!(analysis.module.is_none(), "unexpected module for {text}");
+    analysis.diagnostics
 }

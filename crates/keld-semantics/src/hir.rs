@@ -74,8 +74,14 @@ pub struct HirStmt {
 #[derive(Clone, Debug)]
 pub struct HirPlace {
     pub base: LocalId,
-    pub fields: Vec<FieldId>,
+    pub projections: Vec<HirProjection>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum HirProjection {
+    Field(FieldId),
+    Index(HirExpr),
 }
 
 #[derive(Clone, Debug)]
@@ -145,6 +151,14 @@ pub enum HirExprKind {
     Copy(Box<HirExpr>),
     ListNew,
     ListLength(Box<HirExpr>),
+    ListIndex {
+        list: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
+    ListGet {
+        list: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
     ListPush {
         list: Box<HirExpr>,
         value: Box<HirExpr>,
@@ -152,6 +166,19 @@ pub enum HirExprKind {
     ListRemove {
         list: Box<HirExpr>,
         index: Box<HirExpr>,
+    },
+    ListTryRemove {
+        list: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
+    ListClear(Box<HirExpr>),
+    ListReserve {
+        list: Box<HirExpr>,
+        additional: Box<HirExpr>,
+    },
+    ListTryReserve {
+        list: Box<HirExpr>,
+        additional: Box<HirExpr>,
     },
     Unary {
         op: HirUnaryOp,

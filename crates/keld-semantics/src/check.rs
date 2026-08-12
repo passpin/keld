@@ -1,4 +1,5 @@
 use crate::analyze::{Analyzer, direct_child};
+mod list;
 use crate::symbols::{FunctionSignature, RetirementSignature};
 use crate::{
     BindingMutability, CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp,
@@ -301,115 +302,41 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn check_assignment(
         &mut self,
         node: &SyntaxNode,
         environment: &mut Environment,
     ) -> Option<HirStmtKind> {
         let place_node = direct_child(node, SyntaxKind::Place)?;
-        let names = place_node
-            .child_nodes()
-            .filter(|child| child.kind == SyntaxKind::Name)
-            .collect::<Vec<_>>();
-        if names.len() == 1 {
-            let name = self.analyzer.context.node_text(names[0])?;
-            let Some((local, ty)) = environment.locals.get(name).copied() else {
-                self.error(
-                    UNKNOWN_NAME_DIAGNOSTIC,
-                    names[0].span,
-                    format!("unknown local `{name}`"),
-                );
-                return None;
-            };
-            if self.local_mutability[local.0 as usize] != BindingMutability::Var {
-                self.error(
-                    DiagnosticCode("KLD2010"),
-                    place_node.span,
-                    format!("cannot rebind immutable local `{name}`"),
-                );
-            }
-            let value_node = expression_child(node)?;
-            let value = self.check_expression(value_node, Some(ty), environment);
-            return if let Some(Punct::Eq) = self.direct_punct(node) {
-                Some(HirStmtKind::Assign {
-                    target: HirPlace {
-                        base: local,
-                        fields: Vec::new(),
-                        span: place_node.span,
-                    },
-                    value: value.hir,
-                })
-            } else {
-                self.error(
-                    FEATURE_DIAGNOSTIC,
-                    node.span,
-                    "compound assignment requires an entity field".to_owned(),
-                );
-                None
-            };
-        }
-        if names.len() != 2
-            || place_node
-                .direct_token_ids()
-                .any(|id| self.token_kind(id) == Some(TokenKind::Punct(Punct::LBracket)))
-        {
-            self.error(
-                FEATURE_DIAGNOSTIC,
-                place_node.span,
-                "bootstrap assignment requires exactly one field of an entity reference".to_owned(),
-            );
-            return None;
-        }
-        let base_name = self.analyzer.context.node_text(names[0])?;
-        let field_name = self.analyzer.context.node_text(names[1])?;
-        let Some((base, base_ty)) = environment.locals.get(base_name).copied() else {
-            self.error(
-                UNKNOWN_NAME_DIAGNOSTIC,
-                names[0].span,
-                format!("unknown local `{base_name}`"),
-            );
-            return None;
-        };
-        let TypeKind::EntityRef(definition) = *self.analyzer.types.kind(base_ty) else {
-            self.error(
-                FEATURE_DIAGNOSTIC,
-                place_node.span,
-                "bootstrap assignment requires an entity field".to_owned(),
-            );
-            return None;
-        };
-        let Some(field) = self.analyzer.definitions[definition.0 as usize]
-            .fields
-            .iter()
-            .find(|field| field.name == field_name)
-            .cloned()
-        else {
-            self.error(
-                FIELD_DIAGNOSTIC,
-                names[1].span,
-                format!("unknown field `{field_name}`"),
-            );
-            return None;
-        };
+        let (target, target_ty) = self.check_place(place_node, environment)?;
         let value_node = expression_child(node)?;
-        let value = self.check_expression(value_node, Some(field.ty), environment);
-        let target = HirPlace {
-            base,
-            fields: vec![field.id],
-            span: place_node.span,
-        };
+        let value = self.check_expression(value_node, Some(target_ty), environment);
         let operator = self.direct_punct(node);
         match operator {
             Some(Punct::Eq) => Some(HirStmtKind::Assign {
                 target,
                 value: value.hir,
             }),
-            Some(punct) => int_binary_operator(punct).map(|op| HirStmtKind::CompoundAssign {
-                target,
-                op,
-                value: value.hir,
-            }),
+            Some(punct) => {
+                if target
+                    .projections
+                    .iter()
+                    .any(|projection| matches!(projection, crate::HirProjection::Index(_)))
+                {
+                    self.error(
+                        FEATURE_DIAGNOSTIC,
+                        node.span,
+                        "indexed compound assignment is not supported".to_owned(),
+                    );
+                    None
+                } else {
+                    int_binary_operator(punct).map(|op| HirStmtKind::CompoundAssign {
+                        target,
+                        op,
+                        value: value.hir,
+                    })
+                }
+            }
             None => None,
         }
     }
@@ -623,17 +550,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             SyntaxKind::TakeExpr => self.check_take(node, environment),
             SyntaxKind::CallExpr => self.check_call(node, expected, environment),
             SyntaxKind::FieldExpr => self.check_field(node, environment),
-            SyntaxKind::IndexExpr => {
-                self.error(
-                    FEATURE_DIAGNOSTIC,
-                    node.span,
-                    "indexing is not supported by the bootstrap compiler".to_owned(),
-                );
-                CheckedExpr {
-                    hir: Self::error_expression(node.span),
-                    constant_int: None,
-                }
-            }
+            SyntaxKind::IndexExpr => self.check_list_index(node, environment),
             SyntaxKind::LogicalOrExpr
             | SyntaxKind::LogicalAndExpr
             | SyntaxKind::EqualityExpr
@@ -744,6 +661,17 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             .child_nodes()
             .filter(|child| child.kind == SyntaxKind::Name)
             .collect::<Vec<_>>();
+        if place_node.child_nodes().count() != 1 {
+            self.error(
+                DiagnosticCode("KLD2004"),
+                node.span,
+                "`take` does not support projected places".to_owned(),
+            );
+            return CheckedExpr {
+                hir: Self::error_expression(node.span),
+                constant_int: None,
+            };
+        }
         if names.len() != 1 {
             self.error(
                 DiagnosticCode("KLD2009"),
@@ -784,7 +712,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 span: node.span,
                 kind: HirExprKind::Take(HirPlace {
                     base,
-                    fields: Vec::new(),
+                    projections: Vec::new(),
                     span: place_node.span,
                 }),
             },
@@ -1054,6 +982,11 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 "copy" => self.check_copy_call(node, callee, environment),
                 "push" => self.check_list_push_call(node, callee, environment),
                 "remove" => self.check_list_remove_call(node, callee, environment),
+                "get" => self.check_list_get_call(node, callee, environment),
+                "try_remove" => self.check_list_try_remove_call(node, callee, environment),
+                "clear" => self.check_list_clear_call(node, callee, environment),
+                "reserve" => self.check_list_reserve_call(node, callee, environment),
+                "try_reserve" => self.check_list_try_reserve_call(node, callee, environment),
                 _ => {
                     self.error(
                         UNKNOWN_NAME_DIAGNOSTIC,
@@ -1775,14 +1708,23 @@ fn collect_expr_calls(expression: &HirExpr, calls: &mut BTreeSet<FunctionId>) {
         HirExprKind::Copy(value)
         | HirExprKind::TextByteLength(value)
         | HirExprKind::TextIsEmpty(value)
-        | HirExprKind::ListLength(value) => collect_expr_calls(value, calls),
+        | HirExprKind::ListLength(value)
+        | HirExprKind::ListClear(value) => collect_expr_calls(value, calls),
+        HirExprKind::ListIndex { list, index }
+        | HirExprKind::ListGet { list, index }
+        | HirExprKind::ListTryRemove { list, index }
+        | HirExprKind::ListRemove { list, index } => {
+            collect_expr_calls(list, calls);
+            collect_expr_calls(index, calls);
+        }
+        HirExprKind::ListReserve { list, additional }
+        | HirExprKind::ListTryReserve { list, additional } => {
+            collect_expr_calls(list, calls);
+            collect_expr_calls(additional, calls);
+        }
         HirExprKind::ListPush { list, value } => {
             collect_expr_calls(list, calls);
             collect_expr_calls(value, calls);
-        }
-        HirExprKind::ListRemove { list, index } => {
-            collect_expr_calls(list, calls);
-            collect_expr_calls(index, calls);
         }
     }
 }
