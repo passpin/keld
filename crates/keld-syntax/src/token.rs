@@ -150,7 +150,7 @@ pub enum TokenKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TokenId(pub u32);
+pub struct TokenId(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
