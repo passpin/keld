@@ -1,3 +1,5 @@
+use crate::HomeId;
+use keld_flow::StorageScopeId;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -40,6 +42,18 @@ pub enum Home {
     Empty(EmptyReason),
     Live,
     MaybeLive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CleanupOrder {
+    Known(Vec<HomeId>),
+    Divergent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScopeCleanupState {
+    pub(crate) scope: StorageScopeId,
+    pub(crate) order: CleanupOrder,
 }
 
 impl Home {

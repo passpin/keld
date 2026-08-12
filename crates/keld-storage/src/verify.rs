@@ -1,5 +1,5 @@
+use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, cleanup, cleanup::ValueOrigin};
 use crate::{EmptyReason, Home};
-use crate::{FunctionStoragePlan, cleanup, cleanup::ValueOrigin};
 use keld_flow::{BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, Place, Terminator};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{
@@ -119,6 +119,7 @@ struct HomeState {
     borrowed: BTreeSet<LocalId>,
     origins: Vec<ValueOrigin>,
     pending: Vec<PendingCall>,
+    cleanup_orders: Vec<crate::state::ScopeCleanupState>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -144,6 +145,7 @@ fn verify_function(
     let mut plan = cleanup::new_function_plan(flow, function);
     let initial = initial_state(flow, function);
     let mut incoming = vec![None::<HomeState>; function.blocks.len()];
+    let mut exit_states = vec![None::<HomeState>; function.blocks.len()];
     incoming[function.entry.0 as usize] = Some(initial);
     let mut queue = VecDeque::from([function.entry]);
     while let Some(block_id) = queue.pop_front() {
@@ -152,7 +154,8 @@ fn verify_function(
         };
         let block = &function.blocks[block_id.0 as usize];
         let mut state = state;
-        for operation in &block.operations {
+        for (operation_index, operation) in block.operations.iter().enumerate() {
+            let before = state.clone();
             transfer_operation(
                 flow,
                 function,
@@ -169,17 +172,30 @@ fn verify_function(
                 block.storage_scope,
                 &mut plan,
             );
+            update_cleanup_state(flow, function, operation, &mut state, block.storage_scope);
+            annotate_operation_plan(
+                flow,
+                function,
+                operation,
+                &before,
+                &mut plan.blocks[block_id.0 as usize].operations[operation_index],
+            );
         }
         verify_terminator(flow, function, &block.terminator, &state, &mut diagnostics);
+        exit_states[block_id.0 as usize] = Some(state.clone());
+        let mut outgoing = state.clone();
+        if let Terminator::ExitScopes { storage_scopes, .. } = &block.terminator {
+            cleanup::exit_scopes(&mut outgoing.cleanup_orders, storage_scopes);
+        }
         for successor in successors(&block.terminator) {
             let slot = &mut incoming[successor.0 as usize];
             let changed = if let Some(existing) = slot {
-                let joined = join_states(existing, &state);
+                let joined = join_states(existing, &outgoing);
                 let changed = *existing != joined;
                 *existing = joined;
                 changed
             } else {
-                *slot = Some(state.clone());
+                *slot = Some(outgoing.clone());
                 true
             };
             if changed {
@@ -187,7 +203,173 @@ fn verify_function(
             }
         }
     }
+    annotate_exit_plan(function, &exit_states, &mut plan);
     (diagnostics, plan)
+}
+
+fn update_cleanup_state(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    operation: &FlowOp,
+    state: &mut HomeState,
+    scope: keld_flow::StorageScopeId,
+) {
+    if let Some(dst) = cleanup::defined_value(operation)
+        && state.origins.get(dst.0 as usize) == Some(&ValueOrigin::Owned)
+        && flow
+            .types
+            .storage_class(function.value_types[dst.0 as usize])
+            == keld_semantics::StorageClass::SingleHome
+    {
+        cleanup::activate_home(
+            &mut state.cleanup_orders,
+            scope,
+            crate::HomeId::Temporary(dst),
+        );
+    }
+
+    let mut deactivate_temporary = |value: keld_flow::ValueId| {
+        if state.origins.get(value.0 as usize) == Some(&ValueOrigin::Owned) {
+            cleanup::deactivate_home(&mut state.cleanup_orders, crate::HomeId::Temporary(value));
+        }
+    };
+    match operation {
+        FlowOp::StoreLocal { local, value, .. } => {
+            if state.origins.get(value.0 as usize) == Some(&ValueOrigin::Owned) {
+                deactivate_temporary(*value);
+                if let Some(scope) = function.local_scopes.get(local.0 as usize).copied() {
+                    cleanup::activate_home(
+                        &mut state.cleanup_orders,
+                        scope,
+                        crate::HomeId::Local(*local),
+                    );
+                }
+            }
+        }
+        FlowOp::TakeLocal { local, dst, .. } => {
+            if state.origins.get(dst.0 as usize) == Some(&ValueOrigin::Owned) {
+                cleanup::deactivate_home(&mut state.cleanup_orders, crate::HomeId::Local(*local));
+            }
+        }
+        FlowOp::ListPush { value, .. }
+        | FlowOp::ListPushPlace { value, .. }
+        | FlowOp::ListPushLocal { value, .. }
+        | FlowOp::WriteEntityField { value, .. } => deactivate_temporary(*value),
+        FlowOp::ConstructStruct { fields, .. } | FlowOp::AllocateEntity { fields, .. } => {
+            for (_, value) in fields {
+                deactivate_temporary(*value);
+            }
+        }
+        FlowOp::Call {
+            function: callee,
+            arguments,
+            ..
+        } => {
+            for (parameter, value) in arguments {
+                if flow
+                    .functions
+                    .get(callee.0 as usize)
+                    .and_then(|function| function.parameter_modes.get(parameter.0 as usize))
+                    == Some(&keld_semantics::ParameterMode::Take)
+                {
+                    deactivate_temporary(*value);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn annotate_operation_plan(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    operation: &FlowOp,
+    before: &HomeState,
+    plan: &mut crate::OperationStoragePlan,
+) {
+    plan.store = None;
+    plan.post_success.clear();
+    if let FlowOp::Call {
+        function: callee,
+        arguments,
+        ..
+    } = operation
+    {
+        for (parameter, value) in arguments {
+            let is_loan = flow
+                .functions
+                .get(callee.0 as usize)
+                .and_then(|function| function.parameter_modes.get(parameter.0 as usize))
+                == Some(&keld_semantics::ParameterMode::Loan);
+            if is_loan && before.origins.get(value.0 as usize) == Some(&ValueOrigin::Owned) {
+                plan.post_success
+                    .push(CleanupAction::Drop(HomeId::Temporary(*value)));
+            }
+        }
+    }
+    let FlowOp::StoreLocal { local, .. } = operation else {
+        return;
+    };
+    if flow
+        .types
+        .storage_class(function.local_types[local.0 as usize])
+        != keld_semantics::StorageClass::SingleHome
+    {
+        return;
+    }
+    plan.store = Some(match before.homes[local.0 as usize] {
+        Home::Live => StoreKind::ReplaceLive,
+        Home::MaybeLive => StoreKind::ReplaceMaybeLive,
+        Home::Empty(_) => StoreKind::Initialize,
+    });
+}
+
+fn annotate_exit_plan(
+    function: &FlowFunction,
+    exit_states: &[Option<HomeState>],
+    plan: &mut FunctionStoragePlan,
+) {
+    for (block_index, state) in exit_states.iter().enumerate() {
+        let Some(state) = state else {
+            continue;
+        };
+        let terminator = &function.blocks[block_index].terminator;
+        let Terminator::ExitScopes { storage_scopes, .. } = terminator else {
+            continue;
+        };
+        let mut actions = Vec::new();
+        for scope in storage_scopes {
+            let Some(scope_state) = state
+                .cleanup_orders
+                .iter()
+                .find(|scope_state| scope_state.scope == *scope)
+            else {
+                continue;
+            };
+            match &scope_state.order {
+                crate::state::CleanupOrder::Divergent => {
+                    plan.tracked_scopes.insert(*scope);
+                    actions.push(CleanupAction::CleanupTrackedScope(*scope));
+                }
+                crate::state::CleanupOrder::Known(order) => {
+                    for home in order.iter().rev() {
+                        let HomeId::Local(local) = home else {
+                            continue;
+                        };
+                        match state.homes[local.0 as usize] {
+                            Home::Live => actions.push(CleanupAction::Drop(*home)),
+                            Home::MaybeLive => {
+                                plan.drop_flags.insert(*home);
+                                actions.push(CleanupAction::DropIfLive(*home));
+                            }
+                            Home::Empty(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        plan.blocks[block_index].exit = actions;
+    }
 }
 
 fn initial_summary(flow: &FlowModule, function: &FlowFunction) -> FunctionStorageSummary {
@@ -335,6 +517,7 @@ fn initial_state(flow: &FlowModule, function: &FlowFunction) -> HomeState {
         borrowed,
         origins: vec![ValueOrigin::Unknown; function.value_types.len()],
         pending: Vec::new(),
+        cleanup_orders: cleanup::initial_cleanup_orders(function),
     }
 }
 
@@ -1321,6 +1504,7 @@ fn join_states(left: &HomeState, right: &HomeState) -> HomeState {
         } else {
             Vec::new()
         },
+        cleanup_orders: cleanup::join_cleanup_orders(&left.cleanup_orders, &right.cleanup_orders),
     }
 }
 
