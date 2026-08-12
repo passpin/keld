@@ -1,12 +1,15 @@
 use crate::{
     ArgumentSource, Function, Instruction, IrBlock, IrBlockId, IrDefinition, IrDefinitionKind,
-    IrType, Module, Register, Terminator, ViewId, ViewMode,
+    IrType, Module, Register, RegisterStorage, Terminator, ViewId, ViewMode,
 };
 use keld_flow::FlowModule;
 use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, ValueId};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{CompareOp, DefinitionKind, LocalId, TypeId, TypeKind, TypeStore};
-use keld_storage::{FunctionStorageSummary, VerifiedStorageModule};
+use keld_storage::{
+    CleanupAction, FunctionStoragePlan, FunctionStorageSummary, HomeId, LocalStorage, StoreKind,
+    ValueStorage, VerifiedStorageModule,
+};
 use std::collections::BTreeMap;
 
 #[must_use]
@@ -16,6 +19,7 @@ pub trait VerifiedInput {
         &self,
         function: keld_semantics::FunctionId,
     ) -> Option<&FunctionStorageSummary>;
+    fn storage_plan(&self, function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan>;
 }
 
 impl VerifiedInput for VerifiedFlowModule {
@@ -27,6 +31,10 @@ impl VerifiedInput for VerifiedFlowModule {
         &self,
         _function: keld_semantics::FunctionId,
     ) -> Option<&FunctionStorageSummary> {
+        None
+    }
+
+    fn storage_plan(&self, _function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan> {
         None
     }
 }
@@ -41,6 +49,10 @@ impl VerifiedInput for VerifiedStorageModule {
         function: keld_semantics::FunctionId,
     ) -> Option<&FunctionStorageSummary> {
         self.summaries.get(function.0 as usize)
+    }
+
+    fn storage_plan(&self, function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan> {
+        self.annotations.functions.get(function.0 as usize)
     }
 }
 
@@ -68,8 +80,13 @@ pub fn lower<V: VerifiedInput>(verified: &V) -> Module {
             .functions
             .iter()
             .map(|function| {
-                FunctionLowerer::new(function, &flow.types, verified.storage_summary(function.id))
-                    .lower()
+                FunctionLowerer::new(
+                    function,
+                    &flow.types,
+                    verified.storage_summary(function.id),
+                    verified.storage_plan(function.id),
+                )
+                .lower()
             })
             .collect(),
         main: flow.main,
@@ -82,32 +99,55 @@ struct Registers {
     lifecycles: Vec<Register>,
     identity_conditions: BTreeMap<keld_flow::BlockId, Register>,
     types: Vec<IrType>,
+    storage: Vec<RegisterStorage>,
 }
 
 impl Registers {
-    fn new(function: &FlowFunction, types: &TypeStore) -> Self {
+    fn new(
+        function: &FlowFunction,
+        types: &TypeStore,
+        storage_plan: Option<&FunctionStoragePlan>,
+    ) -> Self {
         let mut register_types = Vec::new();
-        let mut push = |ty| {
+        let mut register_storage = Vec::new();
+        let mut push = |ty, storage| {
             let register = Register(
                 u32::try_from(register_types.len()).expect("verified register count fits in u32"),
             );
             register_types.push(ty);
+            register_storage.push(storage);
             register
         };
         let values = function
             .value_types
             .iter()
-            .map(|ty| push(map_type(types, *ty)))
+            .enumerate()
+            .map(|(index, ty)| {
+                push(
+                    map_type(types, *ty),
+                    storage_plan.map_or(RegisterStorage::Trivial, |plan| {
+                        value_register_storage(plan, keld_flow::ValueId(index as u32))
+                    }),
+                )
+            })
             .collect();
         let locals = function
             .local_types
             .iter()
-            .map(|ty| push(map_type(types, *ty)))
+            .enumerate()
+            .map(|(index, ty)| {
+                push(
+                    map_type(types, *ty),
+                    storage_plan.map_or(RegisterStorage::Trivial, |plan| {
+                        local_register_storage(plan, LocalId(index as u32))
+                    }),
+                )
+            })
             .collect();
         let lifecycles = function
             .lifecycle_parents
             .iter()
-            .map(|_| push(IrType::Lifecycle))
+            .map(|_| push(IrType::Lifecycle, RegisterStorage::Trivial))
             .collect();
         let identity_conditions = function
             .blocks
@@ -118,7 +158,7 @@ impl Registers {
                     keld_flow::Terminator::BranchIdentity { .. }
                 )
             })
-            .map(|block| (block.id, push(IrType::Bool)))
+            .map(|block| (block.id, push(IrType::Bool, RegisterStorage::Trivial)))
             .collect();
         Self {
             values,
@@ -126,6 +166,7 @@ impl Registers {
             lifecycles,
             identity_conditions,
             types: register_types,
+            storage: register_storage,
         }
     }
 
@@ -140,6 +181,18 @@ impl Registers {
     fn lifecycle(&self, lifecycle: LifecycleId) -> Register {
         self.lifecycles[lifecycle.0 as usize]
     }
+
+    fn add_scratch(&mut self, ty: IrType, storage: RegisterStorage) -> Register {
+        let register =
+            Register(u32::try_from(self.types.len()).expect("verified register count fits in u32"));
+        self.types.push(ty);
+        self.storage.push(storage);
+        register
+    }
+
+    fn storage(&self, register: Register) -> Option<&RegisterStorage> {
+        self.storage.get(register.0 as usize)
+    }
 }
 
 struct FunctionLowerer<'flow> {
@@ -148,6 +201,7 @@ struct FunctionLowerer<'flow> {
     registers: Registers,
     next_view: u32,
     storage_summary: Option<&'flow FunctionStorageSummary>,
+    storage_plan: Option<&'flow FunctionStoragePlan>,
 }
 
 impl<'flow> FunctionLowerer<'flow> {
@@ -155,13 +209,15 @@ impl<'flow> FunctionLowerer<'flow> {
         function: &'flow FlowFunction,
         types: &'flow TypeStore,
         storage_summary: Option<&'flow FunctionStorageSummary>,
+        storage_plan: Option<&'flow FunctionStoragePlan>,
     ) -> Self {
         Self {
             function,
             types,
-            registers: Registers::new(function, types),
+            registers: Registers::new(function, types, storage_plan),
             next_view: 0,
             storage_summary,
+            storage_plan,
         }
     }
 
@@ -172,10 +228,29 @@ impl<'flow> FunctionLowerer<'flow> {
             .iter()
             .map(|block| {
                 let mut instructions = Vec::new();
-                for operation in &block.operations {
-                    self.operation(operation, &mut instructions);
+                let block_plan = self
+                    .storage_plan
+                    .and_then(|plan| plan.blocks.get(block.id.0 as usize))
+                    .cloned();
+                for (operation_index, operation) in block.operations.iter().enumerate() {
+                    let operation_plan = block_plan
+                        .as_ref()
+                        .and_then(|plan| plan.operations.get(operation_index));
+                    self.operation(
+                        operation,
+                        operation_plan.and_then(|plan| plan.store),
+                        &mut instructions,
+                    );
+                    if let Some(operation_plan) = operation_plan {
+                        self.emit_cleanup_actions(&operation_plan.post_success, &mut instructions);
+                    }
                 }
-                let terminator = self.terminator(block.id, &block.terminator, &mut instructions);
+                let terminator = self.terminator(
+                    block.id,
+                    &block.terminator,
+                    block_plan.as_ref(),
+                    &mut instructions,
+                );
                 IrBlock {
                     id: IrBlockId(block.id.0),
                     instructions,
@@ -199,6 +274,8 @@ impl<'flow> FunctionLowerer<'flow> {
             ),
             current_lifecycle: self.registers.lifecycle(self.function.current_lifecycle),
             register_types: self.registers.types,
+            register_storage: self.registers.storage,
+            storage_scope_parents: self.function.storage_scope_parents.clone(),
             return_type: map_type(self.types, self.function.return_type),
             blocks,
             entry: IrBlockId(self.function.entry.0),
@@ -206,7 +283,12 @@ impl<'flow> FunctionLowerer<'flow> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn operation(&mut self, operation: &FlowOp, output: &mut Vec<Instruction>) {
+    fn operation(
+        &mut self,
+        operation: &FlowOp,
+        store_kind: Option<StoreKind>,
+        output: &mut Vec<Instruction>,
+    ) {
         match operation {
             FlowOp::ConstInt { dst, value, span } => output.push(Instruction::ConstInt {
                 dst: self.registers.value(*dst),
@@ -244,16 +326,54 @@ impl<'flow> FunctionLowerer<'flow> {
                 src: self.registers.local(*local),
                 span: *span,
             }),
-            FlowOp::StoreLocal { local, value, span } => output.push(Instruction::Copy {
-                dst: self.registers.local(*local),
-                src: self.registers.value(*value),
-                span: *span,
-            }),
-            FlowOp::TakeLocal { dst, local, span } => output.push(Instruction::Take {
-                dst: self.registers.value(*dst),
-                src: self.registers.local(*local),
-                span: *span,
-            }),
+            FlowOp::StoreLocal { local, value, span } => {
+                let destination = self.registers.local(*local);
+                let source = self.registers.value(*value);
+                if self.is_home(destination) {
+                    let displaced = self.registers.add_scratch(
+                        self.registers.types[destination.0 as usize].clone(),
+                        RegisterStorage::DropSlot,
+                    );
+                    output.push(Instruction::InstallHome {
+                        destination,
+                        source,
+                        displaced,
+                        span: *span,
+                    });
+                    if matches!(
+                        store_kind,
+                        Some(StoreKind::ReplaceLive | StoreKind::ReplaceMaybeLive)
+                    ) {
+                        output.push(Instruction::DropSlot {
+                            slot: displaced,
+                            span: *span,
+                        });
+                    }
+                } else {
+                    output.push(Instruction::Copy {
+                        dst: destination,
+                        src: source,
+                        span: *span,
+                    });
+                }
+            }
+            FlowOp::TakeLocal { dst, local, span } => {
+                let destination = self.registers.value(*dst);
+                let source = self.registers.local(*local);
+                if self.is_home(destination) {
+                    output.push(Instruction::MoveHome {
+                        destination,
+                        source,
+                        span: *span,
+                    });
+                } else {
+                    output.push(Instruction::Take {
+                        dst: destination,
+                        src: source,
+                        span: *span,
+                    });
+                }
+            }
             FlowOp::CopyStorage { dst, source, span } => output.push(Instruction::Copy {
                 dst: self.registers.value(*dst),
                 src: self.registers.value(*source),
@@ -621,10 +741,46 @@ impl<'flow> FunctionLowerer<'flow> {
         view
     }
 
+    fn is_home(&self, register: Register) -> bool {
+        matches!(
+            self.registers.storage(register),
+            Some(RegisterStorage::Home { .. })
+        )
+    }
+
+    fn home_register(&self, home: HomeId) -> Register {
+        match home {
+            HomeId::Local(local) => self.registers.local(local),
+            HomeId::Temporary(value) => self.registers.value(value),
+        }
+    }
+
+    fn emit_cleanup_actions(&self, actions: &[CleanupAction], output: &mut Vec<Instruction>) {
+        for action in actions {
+            match action {
+                CleanupAction::Drop(home) => output.push(Instruction::DropHome {
+                    home: self.home_register(*home),
+                    span: self.function.span,
+                }),
+                CleanupAction::DropIfLive(home) => output.push(Instruction::DropIfLive {
+                    home: self.home_register(*home),
+                    span: self.function.span,
+                }),
+                CleanupAction::CleanupTrackedScope(scope) => {
+                    output.push(Instruction::CleanupTrackedScope {
+                        scope: *scope,
+                        span: self.function.span,
+                    });
+                }
+            }
+        }
+    }
+
     fn terminator(
         &self,
         block: keld_flow::BlockId,
         terminator: &keld_flow::Terminator,
+        block_plan: Option<&keld_storage::BlockStoragePlan>,
         output: &mut Vec<Instruction>,
     ) -> Terminator {
         match terminator {
@@ -674,6 +830,9 @@ impl<'flow> FunctionLowerer<'flow> {
             keld_flow::Terminator::ExitScopes {
                 lifecycles, next, ..
             } => {
+                if let Some(block_plan) = block_plan {
+                    self.emit_cleanup_actions(&block_plan.exit, output);
+                }
                 for lifecycle in lifecycles {
                     output.push(Instruction::EndLifecycle {
                         lifecycle: self.registers.lifecycle(*lifecycle),
@@ -711,5 +870,36 @@ fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
         TypeKind::Optional(_) | TypeKind::Error => {
             unreachable!("verified bootstrap flow contains only executable types")
         }
+    }
+}
+
+fn value_register_storage(plan: &FunctionStoragePlan, value: ValueId) -> RegisterStorage {
+    match plan
+        .values
+        .get(value.0 as usize)
+        .unwrap_or(&ValueStorage::Trivial)
+    {
+        ValueStorage::Trivial => RegisterStorage::Trivial,
+        ValueStorage::EntityFlow => RegisterStorage::EntityFlow,
+        ValueStorage::Loan(_) => RegisterStorage::Loan,
+        ValueStorage::OwnedTemporary { scope } => RegisterStorage::Home {
+            scope: *scope,
+            conditional: plan.drop_flags.contains(&HomeId::Temporary(value)),
+        },
+    }
+}
+
+fn local_register_storage(plan: &FunctionStoragePlan, local: LocalId) -> RegisterStorage {
+    match plan
+        .locals
+        .get(local.0 as usize)
+        .unwrap_or(&LocalStorage::Trivial)
+    {
+        LocalStorage::Trivial => RegisterStorage::Trivial,
+        LocalStorage::Loan => RegisterStorage::Loan,
+        LocalStorage::Home { scope } => RegisterStorage::Home {
+            scope: *scope,
+            conditional: plan.drop_flags.contains(&HomeId::Local(local)),
+        },
     }
 }

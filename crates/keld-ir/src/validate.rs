@@ -1,6 +1,6 @@
 use crate::{
     Function, Instruction, IrBlockId, IrDefinition, IrDefinitionKind, IrType, Module, Register,
-    Terminator, ViewId, ViewMode,
+    RegisterStorage, Terminator, ViewId, ViewMode,
 };
 use keld_semantics::{CompareOp, DefId, FieldId};
 use keld_source::{Diagnostic, DiagnosticCode, Span};
@@ -11,6 +11,7 @@ const REGISTER_ERROR: &str = "KLD9002";
 const CFG_ERROR: &str = "KLD9003";
 const LIFECYCLE_ERROR: &str = "KLD9004";
 const MODULE_ERROR: &str = "KLD9005";
+const STORAGE_ERROR: &str = "KLD9006";
 
 #[must_use]
 pub fn validate(module: &Module) -> Vec<Diagnostic> {
@@ -129,6 +130,15 @@ struct FunctionValidator<'module, 'sink> {
     incoming_definitions: Vec<BTreeSet<Register>>,
     outgoing_definitions: Vec<BTreeSet<Register>>,
     incoming_lifecycles: Vec<BTreeSet<Register>>,
+    incoming_homes: Vec<BTreeMap<Register, HomeState>>,
+    outgoing_homes: Vec<BTreeMap<Register, HomeState>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HomeState {
+    Empty,
+    Live,
+    MaybeLive,
 }
 
 impl<'module, 'sink> FunctionValidator<'module, 'sink> {
@@ -146,6 +156,8 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             incoming_definitions: vec![BTreeSet::new(); block_count],
             outgoing_definitions: vec![BTreeSet::new(); block_count],
             incoming_lifecycles: vec![BTreeSet::new(); block_count],
+            incoming_homes: vec![BTreeMap::new(); block_count],
+            outgoing_homes: vec![BTreeMap::new(); block_count],
         }
     }
 
@@ -159,6 +171,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         self.build_predecessors();
         self.compute_definition_dataflow();
         self.compute_lifecycle_dataflow();
+        self.compute_home_dataflow();
         for block in &self.function.blocks {
             self.validate_block(block.id);
         }
@@ -190,6 +203,24 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
         for ty in &self.function.register_types {
             validate_named_type(self.module, ty, self.function.span, self.sink);
+        }
+        if self.function.register_storage.len() != self.function.register_types.len() {
+            self.sink.error(
+                STORAGE_ERROR,
+                self.function.span,
+                "register storage roles must align with register types",
+            );
+        }
+        for parent in &self.function.storage_scope_parents {
+            if let Some(parent) = parent
+                && parent.0 as usize >= self.function.storage_scope_parents.len()
+            {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    self.function.span,
+                    "storage scope parent is outside the scope table",
+                );
+            }
         }
         validate_named_type(
             self.module,
@@ -283,6 +314,9 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             for instruction in &block.instructions {
                 if let Some(destination) = instruction_destination(instruction) {
                     universe.insert(destination);
+                }
+                if let Instruction::InstallHome { destination, .. } = instruction {
+                    universe.insert(*destination);
                 }
             }
             if let Terminator::ResolveLink { live_value, .. } = block.terminator {
@@ -400,10 +434,113 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
     }
 
+    fn compute_home_dataflow(&mut self) {
+        let initial = self.initial_home_state();
+        for block in &self.function.blocks {
+            self.incoming_homes[block.id.0 as usize] = if block.id == self.function.entry {
+                initial.clone()
+            } else {
+                self.all_home_states(HomeState::Empty)
+            };
+            self.outgoing_homes[block.id.0 as usize] = transfer_home_states(
+                &self.incoming_homes[block.id.0 as usize],
+                &block.instructions,
+                &self.function.register_storage,
+            );
+        }
+        let iteration_limit = self
+            .function
+            .blocks
+            .len()
+            .saturating_mul(self.function.register_types.len().saturating_add(1));
+        for _ in 0..=iteration_limit {
+            let mut changed = false;
+            for block in &self.function.blocks {
+                let index = block.id.0 as usize;
+                let incoming = if block.id == self.function.entry {
+                    initial.clone()
+                } else {
+                    self.join_predecessor_homes(block.id)
+                };
+                let outgoing = transfer_home_states(
+                    &incoming,
+                    &block.instructions,
+                    &self.function.register_storage,
+                );
+                changed |= incoming != self.incoming_homes[index]
+                    || outgoing != self.outgoing_homes[index];
+                self.incoming_homes[index] = incoming;
+                self.outgoing_homes[index] = outgoing;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn initial_home_state(&self) -> BTreeMap<Register, HomeState> {
+        let mut state = self.all_home_states(HomeState::Empty);
+        for parameter in &self.function.parameters {
+            if matches!(
+                self.register_storage(*parameter),
+                Some(RegisterStorage::Home { .. })
+            ) {
+                state.insert(*parameter, HomeState::Live);
+            }
+        }
+        state
+    }
+
+    fn all_home_states(&self, value: HomeState) -> BTreeMap<Register, HomeState> {
+        self.function
+            .register_storage
+            .iter()
+            .enumerate()
+            .filter_map(|(index, storage)| {
+                matches!(
+                    storage,
+                    RegisterStorage::Home { .. } | RegisterStorage::DropSlot
+                )
+                .then(|| {
+                    (
+                        Register(u32::try_from(index).expect("register index fits in u32")),
+                        value,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn join_predecessor_homes(&self, block: IrBlockId) -> BTreeMap<Register, HomeState> {
+        let mut joined = self.all_home_states(HomeState::Empty);
+        for register in joined.keys().copied().collect::<Vec<_>>() {
+            let mut state = None;
+            for predecessor in &self.predecessors[block.0 as usize] {
+                let predecessor_state = self.outgoing_homes[predecessor.0 as usize]
+                    .get(&register)
+                    .copied()
+                    .unwrap_or(HomeState::Empty);
+                state = Some(match state {
+                    Some(current) => join_home_state(current, predecessor_state),
+                    None => predecessor_state,
+                });
+            }
+            if let Some(state) = state {
+                joined.insert(register, state);
+            }
+        }
+        joined
+    }
+
+    fn register_storage(&self, register: Register) -> Option<&RegisterStorage> {
+        self.function.register_storage.get(register.0 as usize)
+    }
+
     fn validate_block(&mut self, block_id: IrBlockId) {
         let block = &self.function.blocks[block_id.0 as usize];
         let mut available = self.incoming_definitions[block_id.0 as usize].clone();
         let mut active_lifecycles = self.incoming_lifecycles[block_id.0 as usize].clone();
+        let mut home_states = self.incoming_homes[block_id.0 as usize].clone();
         let mut views = BTreeMap::<ViewId, (ViewMode, DefId)>::new();
         let mut passed_phi_group = false;
 
@@ -434,9 +571,8 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 );
             }
             self.validate_instruction(instruction, &mut views, &mut active_lifecycles);
-            if let Some(destination) = instruction_destination(instruction) {
-                available.insert(destination);
-            }
+            add_instruction_definitions(instruction, &mut available);
+            self.validate_home_instruction(instruction, &mut home_states, &views);
         }
         let terminator_span = terminator_span(&block.terminator, self.function.span);
         if !views.is_empty() {
@@ -449,7 +585,257 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         for register in terminator_uses(&block.terminator) {
             self.require_available(register, &available, terminator_span);
         }
+        self.validate_home_terminator(&block.terminator, &home_states, terminator_span);
         self.validate_terminator(&block.terminator, &active_lifecycles);
+    }
+
+    fn validate_home_instruction(
+        &mut self,
+        instruction: &Instruction,
+        state: &mut BTreeMap<Register, HomeState>,
+        views: &BTreeMap<ViewId, (ViewMode, DefId)>,
+    ) {
+        let span = instruction_span(instruction);
+        let storage = self.function.register_storage.clone();
+        let role = |register: Register| storage.get(register.0 as usize).cloned();
+        let home_state =
+            |register: Register| state.get(&register).copied().unwrap_or(HomeState::Empty);
+        let require_role = |sink: &mut DiagnosticSink,
+                            register: Register,
+                            expected: fn(&RegisterStorage) -> bool,
+                            message: &str| {
+            if !role(register).is_some_and(|candidate| expected(&candidate)) {
+                sink.error(STORAGE_ERROR, span, message);
+                false
+            } else {
+                true
+            }
+        };
+        let require_live = |sink: &mut DiagnosticSink, register: Register, message: &str| {
+            if home_state(register) != HomeState::Live {
+                sink.error(STORAGE_ERROR, span, message);
+                false
+            } else {
+                true
+            }
+        };
+        let require_empty = |sink: &mut DiagnosticSink, register: Register, message: &str| {
+            if home_state(register) != HomeState::Empty {
+                sink.error(STORAGE_ERROR, span, message);
+                false
+            } else {
+                true
+            }
+        };
+
+        match instruction {
+            Instruction::InstallHome {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                let destination_ok = require_role(
+                    self.sink,
+                    *destination,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "home installation destination must be a Home register",
+                );
+                let source_ok = require_role(
+                    self.sink,
+                    *source,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "home installation source must be a Home register",
+                );
+                let displaced_ok = require_role(
+                    self.sink,
+                    *displaced,
+                    |role| matches!(role, RegisterStorage::DropSlot),
+                    "home installation displaced register must be a DropSlot",
+                );
+                if destination == source {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "home installation cannot move a home into itself",
+                    );
+                }
+                if source_ok {
+                    require_live(self.sink, *source, "home installation source is empty");
+                }
+                if displaced_ok {
+                    require_empty(self.sink, *displaced, "displaced slot is already live");
+                }
+                let _ = destination_ok;
+            }
+            Instruction::MoveHome {
+                destination,
+                source,
+                ..
+            } => {
+                let destination_role = role(*destination);
+                let source_role = role(*source);
+                if matches!(destination_role, Some(RegisterStorage::Loan))
+                    || matches!(source_role, Some(RegisterStorage::Loan))
+                {
+                    self.sink
+                        .error(STORAGE_ERROR, span, "loan register used as an owned source");
+                }
+                require_role(
+                    self.sink,
+                    *destination,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "home move destination must be a Home register",
+                );
+                let source_ok = require_role(
+                    self.sink,
+                    *source,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "home move source must be a Home register",
+                );
+                if destination == source {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "home move cannot move a home into itself",
+                    );
+                }
+                if source_ok {
+                    require_live(self.sink, *source, "move of empty home");
+                }
+                require_empty(
+                    self.sink,
+                    *destination,
+                    "home move destination is already live",
+                );
+            }
+            Instruction::DropHome { home, .. } => {
+                let home_ok = require_role(
+                    self.sink,
+                    *home,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "home drop register must be a Home",
+                );
+                if home_ok {
+                    require_live(self.sink, *home, "drop of empty home");
+                }
+            }
+            Instruction::DropIfLive { home, .. } => {
+                require_role(
+                    self.sink,
+                    *home,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "conditional drop register must be a Home",
+                );
+            }
+            Instruction::DropSlot { slot, .. } => {
+                let slot_ok = require_role(
+                    self.sink,
+                    *slot,
+                    |role| matches!(role, RegisterStorage::DropSlot),
+                    "drop slot register must be a DropSlot",
+                );
+                if slot_ok && home_state(*slot) == HomeState::Empty {
+                    self.sink.error(STORAGE_ERROR, span, "drop of empty home");
+                }
+            }
+            Instruction::CleanupTrackedScope { scope, .. } => {
+                if scope.0 as usize >= self.function.storage_scope_parents.len() {
+                    self.sink
+                        .error(STORAGE_ERROR, span, "unknown cleanup scope");
+                }
+            }
+            Instruction::ReplacePlace {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                self.check_register(destination.base, span);
+                let source_ok = require_role(
+                    self.sink,
+                    *source,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "place replacement source must be a Home register",
+                );
+                let displaced_ok = require_role(
+                    self.sink,
+                    *displaced,
+                    |role| matches!(role, RegisterStorage::DropSlot),
+                    "place replacement displaced register must be a DropSlot",
+                );
+                if source_ok {
+                    require_live(self.sink, *source, "place replacement source is empty");
+                }
+                if displaced_ok {
+                    require_empty(self.sink, *displaced, "displaced slot is already live");
+                }
+            }
+            Instruction::ReplaceField {
+                view,
+                field: _,
+                source,
+                displaced,
+                ..
+            } => {
+                if !matches!(views.get(view), Some((ViewMode::Edit, _))) {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        span,
+                        "field replacement requires an open edit view",
+                    );
+                }
+                let source_ok = require_role(
+                    self.sink,
+                    *source,
+                    |role| matches!(role, RegisterStorage::Home { .. }),
+                    "field replacement source must be a Home register",
+                );
+                let displaced_ok = require_role(
+                    self.sink,
+                    *displaced,
+                    |role| matches!(role, RegisterStorage::DropSlot),
+                    "field replacement displaced register must be a DropSlot",
+                );
+                if source_ok {
+                    require_live(self.sink, *source, "field replacement source is empty");
+                }
+                if displaced_ok {
+                    require_empty(self.sink, *displaced, "displaced slot is already live");
+                }
+            }
+            _ => {}
+        }
+        *state = transfer_home_states(
+            state,
+            std::slice::from_ref(instruction),
+            &self.function.register_storage,
+        );
+    }
+
+    fn validate_home_terminator(
+        &mut self,
+        terminator: &Terminator,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+    ) {
+        let Terminator::Return(value) = terminator else {
+            return;
+        };
+        for (register, home_state) in state {
+            if Some(*register) == *value {
+                continue;
+            }
+            if !matches!(home_state, HomeState::Live | HomeState::MaybeLive) {
+                continue;
+            }
+            let message = match self.register_storage(*register) {
+                Some(RegisterStorage::DropSlot) => "live displaced value at return",
+                Some(RegisterStorage::Home { .. }) => "live managed home at return",
+                _ => continue,
+            };
+            self.sink.error(STORAGE_ERROR, span, message);
+        }
     }
 
     fn validate_lifecycle_join(&mut self, block: IrBlockId) {
@@ -657,6 +1043,40 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             Instruction::ReadStructField {
                 dst, base, field, ..
             } => self.validate_struct_read(*dst, *base, *field, span),
+            Instruction::InstallHome {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                self.expect_same_type(*destination, *source, span);
+                self.expect_same_type(*destination, *displaced, span);
+            }
+            Instruction::MoveHome {
+                destination,
+                source,
+                ..
+            } => self.expect_same_type(*destination, *source, span),
+            Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => {
+                self.check_register(*home, span);
+            }
+            Instruction::DropSlot { slot, .. } => self.check_register(*slot, span),
+            Instruction::CleanupTrackedScope { .. } => {}
+            Instruction::ReplacePlace {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                self.expect_same_type(destination.base, *source, span);
+                self.expect_same_type(destination.base, *displaced, span);
+            }
+            Instruction::ReplaceField {
+                source, displaced, ..
+            } => {
+                self.check_register(*source, span);
+                self.expect_same_type(*source, *displaced, span);
+            }
             _ => self.validate_effect_instruction(instruction, views, active_lifecycles),
         }
     }
@@ -794,6 +1214,14 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             | Instruction::Phi { .. }
             | Instruction::ConstructStruct { .. }
             | Instruction::ReadStructField { .. }
+            | Instruction::InstallHome { .. }
+            | Instruction::MoveHome { .. }
+            | Instruction::DropHome { .. }
+            | Instruction::DropIfLive { .. }
+            | Instruction::DropSlot { .. }
+            | Instruction::CleanupTrackedScope { .. }
+            | Instruction::ReplacePlace { .. }
+            | Instruction::ReplaceField { .. }
             | Instruction::BeginLifecycle { .. }
             | Instruction::EndLifecycle { .. }
             | Instruction::AllocateEntity { .. }
@@ -1169,11 +1597,144 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
     }
 }
 
+fn join_home_state(left: HomeState, right: HomeState) -> HomeState {
+    match (left, right) {
+        (HomeState::Live, HomeState::Live) => HomeState::Live,
+        (HomeState::Empty, HomeState::Empty) => HomeState::Empty,
+        _ => HomeState::MaybeLive,
+    }
+}
+
+fn transfer_home_states(
+    incoming: &BTreeMap<Register, HomeState>,
+    instructions: &[Instruction],
+    storage: &[RegisterStorage],
+) -> BTreeMap<Register, HomeState> {
+    let mut state = incoming.clone();
+    for instruction in instructions {
+        let role = |register: Register| storage.get(register.0 as usize);
+        let set_live = |state: &mut BTreeMap<Register, HomeState>, register: Register| {
+            if matches!(role(register), Some(RegisterStorage::Home { .. })) {
+                state.insert(register, HomeState::Live);
+            }
+        };
+        match instruction {
+            Instruction::Copy { dst, .. }
+            | Instruction::ConstInt { dst, .. }
+            | Instruction::ConstBool { dst, .. }
+            | Instruction::ConstText { dst, .. }
+            | Instruction::ConstNoneLink { dst, .. }
+            | Instruction::ListNew { dst, .. }
+            | Instruction::ListRemove { dst, .. }
+            | Instruction::ListRemovePlace { dst, .. }
+            | Instruction::TextConcat { dst, .. }
+            | Instruction::CheckedUnaryInt { dst, .. }
+            | Instruction::CheckedBinaryInt { dst, .. }
+            | Instruction::Not { dst, .. }
+            | Instruction::Compare { dst, .. }
+            | Instruction::Phi { dst, .. }
+            | Instruction::ConstructStruct { dst, .. }
+            | Instruction::ReadStructField { dst, .. }
+            | Instruction::ReadField { dst, .. }
+            | Instruction::BeginLifecycle { dst, .. }
+            | Instruction::AllocateEntity { dst, .. }
+            | Instruction::EntityToLink { dst, .. } => set_live(&mut state, *dst),
+            Instruction::ListLength { dst, .. }
+            | Instruction::TextByteLength { dst, .. }
+            | Instruction::TextIsEmpty { dst, .. } => set_live(&mut state, *dst),
+            Instruction::Take { dst, src, .. }
+            | Instruction::MoveHome {
+                destination: dst,
+                source: src,
+                ..
+            } => {
+                set_live(&mut state, *dst);
+                if matches!(role(*src), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*src, HomeState::Empty);
+                }
+            }
+            Instruction::InstallHome {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                let previous = state.get(destination).copied().unwrap_or(HomeState::Empty);
+                set_live(&mut state, *destination);
+                if matches!(role(*source), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*source, HomeState::Empty);
+                }
+                if matches!(role(*displaced), Some(RegisterStorage::DropSlot)) {
+                    state.insert(*displaced, previous);
+                }
+            }
+            Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => {
+                if matches!(role(*home), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*home, HomeState::Empty);
+                }
+            }
+            Instruction::DropSlot { slot, .. } => {
+                if matches!(role(*slot), Some(RegisterStorage::DropSlot)) {
+                    state.insert(*slot, HomeState::Empty);
+                }
+            }
+            Instruction::CleanupTrackedScope { scope, .. } => {
+                for (index, register_role) in storage.iter().enumerate() {
+                    if let RegisterStorage::Home {
+                        scope: home_scope, ..
+                    } = register_role
+                        && home_scope == scope
+                    {
+                        state.insert(
+                            Register(u32::try_from(index).expect("register index fits in u32")),
+                            HomeState::Empty,
+                        );
+                    }
+                }
+            }
+            Instruction::ReplacePlace {
+                source, displaced, ..
+            }
+            | Instruction::ReplaceField {
+                source, displaced, ..
+            } => {
+                if matches!(role(*source), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*source, HomeState::Empty);
+                }
+                if matches!(role(*displaced), Some(RegisterStorage::DropSlot)) {
+                    state.insert(*displaced, HomeState::Live);
+                }
+            }
+            Instruction::Call { dst, .. } => {
+                if let Some(dst) = dst {
+                    set_live(&mut state, *dst);
+                }
+            }
+            Instruction::OpenView { .. }
+            | Instruction::WriteField { .. }
+            | Instruction::CloseView { .. }
+            | Instruction::EndLifecycle { .. }
+            | Instruction::KeepEntity { .. }
+            | Instruction::RetireEntity { .. }
+            | Instruction::ListPush { .. }
+            | Instruction::ListPushPlace { .. } => {}
+        }
+    }
+    state
+}
+
 fn add_block_definitions(block: &crate::IrBlock, definitions: &mut BTreeSet<Register>) {
     for instruction in &block.instructions {
-        if let Some(destination) = instruction_destination(instruction) {
-            definitions.insert(destination);
-        }
+        add_instruction_definitions(instruction, definitions);
+    }
+}
+
+fn add_instruction_definitions(instruction: &Instruction, definitions: &mut BTreeSet<Register>) {
+    if let Some(destination) = instruction_destination(instruction) {
+        definitions.insert(destination);
+    }
+    if let Instruction::InstallHome { destination, .. } = instruction {
+        definitions.insert(*destination);
     }
 }
 
@@ -1231,8 +1792,16 @@ fn instruction_destination(instruction: &Instruction) -> Option<Register> {
         | Instruction::AllocateEntity { dst, .. }
         | Instruction::EntityToLink { dst, .. }
         | Instruction::ReadField { dst, .. } => Some(*dst),
+        Instruction::MoveHome { destination, .. } => Some(*destination),
+        Instruction::InstallHome { displaced, .. }
+        | Instruction::ReplacePlace { displaced, .. }
+        | Instruction::ReplaceField { displaced, .. } => Some(*displaced),
         Instruction::Call { dst, .. } => *dst,
         Instruction::EndLifecycle { .. }
+        | Instruction::DropHome { .. }
+        | Instruction::DropIfLive { .. }
+        | Instruction::DropSlot { .. }
+        | Instruction::CleanupTrackedScope { .. }
         | Instruction::OpenView { .. }
         | Instruction::WriteField { .. }
         | Instruction::CloseView { .. }
@@ -1257,6 +1826,18 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         | Instruction::Take { src, .. }
         | Instruction::CheckedUnaryInt { src, .. }
         | Instruction::Not { src, .. } => vec![*src],
+        Instruction::InstallHome { source, .. } | Instruction::MoveHome { source, .. } => {
+            vec![*source]
+        }
+        Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => vec![*home],
+        Instruction::DropSlot { slot, .. } => vec![*slot],
+        Instruction::CleanupTrackedScope { .. } => Vec::new(),
+        Instruction::ReplacePlace {
+            destination,
+            source,
+            ..
+        } => vec![destination.base, *source],
+        Instruction::ReplaceField { source, .. } => vec![*source],
         Instruction::ListLength { list, .. } => vec![*list],
         Instruction::ListPush { list, value, .. } => vec![*list, *value],
         Instruction::ListPushPlace {
@@ -1343,6 +1924,13 @@ fn is_structural(instruction: &Instruction) -> bool {
             | Instruction::TextIsEmpty { .. }
             | Instruction::TextConcat { .. }
             | Instruction::Call { .. }
+            | Instruction::InstallHome { .. }
+            | Instruction::MoveHome { .. }
+            | Instruction::DropHome { .. }
+            | Instruction::DropIfLive { .. }
+            | Instruction::DropSlot { .. }
+            | Instruction::CleanupTrackedScope { .. }
+            | Instruction::ReplacePlace { .. }
     )
 }
 
@@ -1383,6 +1971,14 @@ fn instruction_span(instruction: &Instruction) -> Span {
         | Instruction::Phi { span, .. }
         | Instruction::ConstructStruct { span, .. }
         | Instruction::ReadStructField { span, .. }
+        | Instruction::InstallHome { span, .. }
+        | Instruction::MoveHome { span, .. }
+        | Instruction::DropHome { span, .. }
+        | Instruction::DropIfLive { span, .. }
+        | Instruction::DropSlot { span, .. }
+        | Instruction::CleanupTrackedScope { span, .. }
+        | Instruction::ReplacePlace { span, .. }
+        | Instruction::ReplaceField { span, .. }
         | Instruction::BeginLifecycle { span, .. }
         | Instruction::EndLifecycle { span, .. }
         | Instruction::AllocateEntity { span, .. }

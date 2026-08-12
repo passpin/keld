@@ -1,10 +1,23 @@
 use crate::{Instruction, Terminator};
+use keld_flow::StorageScopeId;
 use keld_semantics::{DefId, FieldId, FunctionId, ParameterMode};
 use keld_source::{SourceId, Span};
 use keld_storage::LoanEffect;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Register(pub u32);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegisterStorage {
+    Trivial,
+    EntityFlow,
+    Loan,
+    Home {
+        scope: StorageScopeId,
+        conditional: bool,
+    },
+    DropSlot,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArgumentSource {
@@ -60,6 +73,8 @@ pub struct Function {
     pub parameter_effects: Vec<LoanEffect>,
     pub current_lifecycle: Register,
     pub register_types: Vec<IrType>,
+    pub register_storage: Vec<RegisterStorage>,
+    pub storage_scope_parents: Vec<Option<StorageScopeId>>,
     pub return_type: IrType,
     pub blocks: Vec<IrBlock>,
     pub entry: IrBlockId,
@@ -140,6 +155,7 @@ impl TestModuleBuilder {
         definitions.sort_by_key(|definition| definition.id);
         register_types.push(IrType::Lifecycle);
         register_types.push(IrType::Int);
+        let register_storage = vec![RegisterStorage::Trivial; register_types.len()];
         let mut instructions = self.instructions;
         instructions.push(Instruction::ConstInt {
             dst: result,
@@ -160,6 +176,8 @@ impl TestModuleBuilder {
                 parameter_effects: vec![LoanEffect::Read; parameter_count],
                 current_lifecycle,
                 register_types,
+                register_storage,
+                storage_scope_parents: vec![None],
                 return_type: IrType::Int,
                 blocks: vec![IrBlock {
                     id: IrBlockId(0),

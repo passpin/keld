@@ -362,6 +362,77 @@ fn write_effect_instruction(output: &mut String, instruction: &Instruction) {
                 .expect("writing to String cannot fail");
             write_span(output, *span);
         }
+        Instruction::InstallHome {
+            destination,
+            source,
+            displaced,
+            span,
+        } => {
+            write!(
+                output,
+                "install-home r{} <- r{} displaced r{} ",
+                destination.0, source.0, displaced.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::MoveHome {
+            destination,
+            source,
+            span,
+        } => {
+            write!(output, "move-home r{} <- r{} ", destination.0, source.0)
+                .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::DropHome { home, span } => {
+            write!(output, "drop-home r{} ", home.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::DropIfLive { home, span } => {
+            write!(output, "drop-if-live r{} ", home.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::DropSlot { slot, span } => {
+            write!(output, "drop-slot r{} ", slot.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::CleanupTrackedScope { scope, span } => {
+            write!(output, "cleanup-scope s{} ", scope.0).expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ReplacePlace {
+            destination,
+            source,
+            displaced,
+            span,
+        } => {
+            write!(
+                output,
+                "replace-place base r{} fields{} <- r{} displaced r{} ",
+                destination.base.0,
+                destination.fields.len(),
+                source.0,
+                displaced.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
+        Instruction::ReplaceField {
+            view,
+            field,
+            source,
+            displaced,
+            span,
+        } => {
+            write!(
+                output,
+                "replace-field v{} f{} <- r{} displaced r{} ",
+                view.0, field.0, source.0, displaced.0
+            )
+            .expect("writing to String cannot fail");
+            write_span(output, *span);
+        }
         Instruction::ConstInt { .. }
         | Instruction::ConstBool { .. }
         | Instruction::ConstText { .. }

@@ -41,6 +41,46 @@ pub enum Instruction {
         src: Register,
         span: Span,
     },
+    InstallHome {
+        destination: Register,
+        source: Register,
+        displaced: Register,
+        span: Span,
+    },
+    MoveHome {
+        destination: Register,
+        source: Register,
+        span: Span,
+    },
+    DropHome {
+        home: Register,
+        span: Span,
+    },
+    DropIfLive {
+        home: Register,
+        span: Span,
+    },
+    DropSlot {
+        slot: Register,
+        span: Span,
+    },
+    CleanupTrackedScope {
+        scope: keld_flow::StorageScopeId,
+        span: Span,
+    },
+    ReplacePlace {
+        destination: crate::ArgumentSource,
+        source: Register,
+        displaced: Register,
+        span: Span,
+    },
+    ReplaceField {
+        view: ViewId,
+        field: FieldId,
+        source: Register,
+        displaced: Register,
+        span: Span,
+    },
     ListNew {
         dst: Register,
         span: Span,
