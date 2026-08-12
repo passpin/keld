@@ -334,8 +334,17 @@ fn annotate_exit_plan(
             continue;
         };
         let terminator = &function.blocks[block_index].terminator;
-        let Terminator::ExitScopes { storage_scopes, .. } = terminator else {
+        let Terminator::ExitScopes {
+            storage_scopes,
+            next,
+            ..
+        } = terminator
+        else {
             continue;
+        };
+        let returned_home = match next {
+            ExitTarget::Return(Some(value)) => Some(HomeId::Temporary(*value)),
+            ExitTarget::Goto(_) | ExitTarget::Return(None) => None,
         };
         let mut actions = Vec::new();
         for scope in storage_scopes {
@@ -353,16 +362,21 @@ fn annotate_exit_plan(
                 }
                 crate::state::CleanupOrder::Known(order) => {
                     for home in order.iter().rev() {
-                        let HomeId::Local(local) = home else {
+                        if Some(*home) == returned_home {
                             continue;
-                        };
-                        match state.homes[local.0 as usize] {
-                            Home::Live => actions.push(CleanupAction::Drop(*home)),
-                            Home::MaybeLive => {
-                                plan.drop_flags.insert(*home);
-                                actions.push(CleanupAction::DropIfLive(*home));
+                        }
+                        match home {
+                            HomeId::Local(local) => match state.homes[local.0 as usize] {
+                                Home::Live => actions.push(CleanupAction::Drop(*home)),
+                                Home::MaybeLive => {
+                                    plan.drop_flags.insert(*home);
+                                    actions.push(CleanupAction::DropIfLive(*home));
+                                }
+                                Home::Empty(_) => {}
+                            },
+                            HomeId::Temporary(_) => {
+                                actions.push(CleanupAction::Drop(*home));
                             }
-                            Home::Empty(_) => {}
                         }
                     }
                 }
@@ -512,12 +526,22 @@ fn initial_state(flow: &FlowModule, function: &FlowFunction) -> HomeState {
             homes[local.0 as usize] = Home::Live;
         }
     }
+    let mut cleanup_orders = cleanup::initial_cleanup_orders(function);
+    for (index, local) in function.parameters.iter().copied().enumerate() {
+        let ty = function.local_types[local.0 as usize];
+        if flow.types.storage_class(ty) == StorageClass::SingleHome
+            && function.parameter_modes.get(index).copied() != Some(ParameterMode::Loan)
+            && let Some(scope) = function.local_scopes.get(local.0 as usize).copied()
+        {
+            cleanup::activate_home(&mut cleanup_orders, scope, HomeId::Local(local));
+        }
+    }
     HomeState {
         homes,
         borrowed,
         origins: vec![ValueOrigin::Unknown; function.value_types.len()],
         pending: Vec::new(),
-        cleanup_orders: cleanup::initial_cleanup_orders(function),
+        cleanup_orders,
     }
 }
 

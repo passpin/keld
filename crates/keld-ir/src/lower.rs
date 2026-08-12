@@ -126,7 +126,12 @@ impl Registers {
                 push(
                     map_type(types, *ty),
                     storage_plan.map_or(RegisterStorage::Trivial, |plan| {
-                        value_register_storage(plan, keld_flow::ValueId(index as u32))
+                        value_register_storage(
+                            plan,
+                            keld_flow::ValueId(
+                                u32::try_from(index).expect("verified value count fits in u32"),
+                            ),
+                        )
                     }),
                 )
             })
@@ -139,7 +144,12 @@ impl Registers {
                 push(
                     map_type(types, *ty),
                     storage_plan.map_or(RegisterStorage::Trivial, |plan| {
-                        local_register_storage(plan, LocalId(index as u32))
+                        local_register_storage(
+                            plan,
+                            LocalId(
+                                u32::try_from(index).expect("verified local count fits in u32"),
+                            ),
+                        )
                     }),
                 )
             })

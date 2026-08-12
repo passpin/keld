@@ -446,6 +446,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 &self.incoming_homes[block.id.0 as usize],
                 &block.instructions,
                 &self.function.register_storage,
+                self.module,
             );
         }
         let iteration_limit = self
@@ -466,6 +467,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                     &incoming,
                     &block.instructions,
                     &self.function.register_storage,
+                    self.module,
                 );
                 changed |= incoming != self.incoming_homes[index]
                     || outgoing != self.outgoing_homes[index];
@@ -496,17 +498,17 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             .register_storage
             .iter()
             .enumerate()
-            .filter_map(|(index, storage)| {
+            .filter(|(_, storage)| {
                 matches!(
                     storage,
                     RegisterStorage::Home { .. } | RegisterStorage::DropSlot
                 )
-                .then(|| {
-                    (
-                        Register(u32::try_from(index).expect("register index fits in u32")),
-                        value,
-                    )
-                })
+            })
+            .map(|(index, _)| {
+                (
+                    Register(u32::try_from(index).expect("register index fits in u32")),
+                    value,
+                )
             })
             .collect()
     }
@@ -589,6 +591,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         self.validate_terminator(&block.terminator, &active_lifecycles);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate_home_instruction(
         &mut self,
         instruction: &Instruction,
@@ -604,27 +607,27 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                             register: Register,
                             expected: fn(&RegisterStorage) -> bool,
                             message: &str| {
-            if !role(register).is_some_and(|candidate| expected(&candidate)) {
+            if role(register).is_some_and(|candidate| expected(&candidate)) {
+                true
+            } else {
                 sink.error(STORAGE_ERROR, span, message);
                 false
-            } else {
-                true
             }
         };
         let require_live = |sink: &mut DiagnosticSink, register: Register, message: &str| {
-            if home_state(register) != HomeState::Live {
+            if home_state(register) == HomeState::Live {
+                true
+            } else {
                 sink.error(STORAGE_ERROR, span, message);
                 false
-            } else {
-                true
             }
         };
         let require_empty = |sink: &mut DiagnosticSink, register: Register, message: &str| {
-            if home_state(register) != HomeState::Empty {
+            if home_state(register) == HomeState::Empty {
+                true
+            } else {
                 sink.error(STORAGE_ERROR, span, message);
                 false
-            } else {
-                true
             }
         };
 
@@ -810,6 +813,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             state,
             std::slice::from_ref(instruction),
             &self.function.register_storage,
+            self.module,
         );
     }
 
@@ -1605,10 +1609,12 @@ fn join_home_state(left: HomeState, right: HomeState) -> HomeState {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn transfer_home_states(
     incoming: &BTreeMap<Register, HomeState>,
     instructions: &[Instruction],
     storage: &[RegisterStorage],
+    module: &Module,
 ) -> BTreeMap<Register, HomeState> {
     let mut state = incoming.clone();
     for instruction in instructions {
@@ -1632,16 +1638,31 @@ fn transfer_home_states(
             | Instruction::CheckedBinaryInt { dst, .. }
             | Instruction::Not { dst, .. }
             | Instruction::Compare { dst, .. }
+            | Instruction::ListLength { dst, .. }
             | Instruction::Phi { dst, .. }
-            | Instruction::ConstructStruct { dst, .. }
             | Instruction::ReadStructField { dst, .. }
             | Instruction::ReadField { dst, .. }
             | Instruction::BeginLifecycle { dst, .. }
-            | Instruction::AllocateEntity { dst, .. }
             | Instruction::EntityToLink { dst, .. } => set_live(&mut state, *dst),
-            Instruction::ListLength { dst, .. }
-            | Instruction::TextByteLength { dst, .. }
-            | Instruction::TextIsEmpty { dst, .. } => set_live(&mut state, *dst),
+            Instruction::ConstructStruct { dst, fields, .. } => {
+                set_live(&mut state, *dst);
+                for (_, source) in fields {
+                    if matches!(role(*source), Some(RegisterStorage::Home { .. })) {
+                        state.insert(*source, HomeState::Empty);
+                    }
+                }
+            }
+            Instruction::AllocateEntity { dst, fields, .. } => {
+                set_live(&mut state, *dst);
+                for (_, source) in fields {
+                    if matches!(role(*source), Some(RegisterStorage::Home { .. })) {
+                        state.insert(*source, HomeState::Empty);
+                    }
+                }
+            }
+            Instruction::TextByteLength { dst, .. } | Instruction::TextIsEmpty { dst, .. } => {
+                set_live(&mut state, *dst);
+            }
             Instruction::Take { dst, src, .. }
             | Instruction::MoveHome {
                 destination: dst,
@@ -1705,19 +1726,38 @@ fn transfer_home_states(
                     state.insert(*displaced, HomeState::Live);
                 }
             }
-            Instruction::Call { dst, .. } => {
+            Instruction::Call {
+                dst,
+                function,
+                arguments,
+                ..
+            } => {
+                if let Some(callee) = module.functions.get(function.0 as usize) {
+                    for (parameter, argument) in arguments {
+                        if callee.parameter_modes.get(parameter.0 as usize)
+                            == Some(&keld_semantics::ParameterMode::Take)
+                            && matches!(role(*argument), Some(RegisterStorage::Home { .. }))
+                        {
+                            state.insert(*argument, HomeState::Empty);
+                        }
+                    }
+                }
                 if let Some(dst) = dst {
                     set_live(&mut state, *dst);
                 }
             }
+            Instruction::ListPush { value, .. }
+            | Instruction::ListPushPlace { value, .. }
+            | Instruction::WriteField { value, .. } => {
+                if matches!(role(*value), Some(RegisterStorage::Home { .. })) {
+                    state.insert(*value, HomeState::Empty);
+                }
+            }
             Instruction::OpenView { .. }
-            | Instruction::WriteField { .. }
             | Instruction::CloseView { .. }
             | Instruction::EndLifecycle { .. }
             | Instruction::KeepEntity { .. }
-            | Instruction::RetireEntity { .. }
-            | Instruction::ListPush { .. }
-            | Instruction::ListPushPlace { .. } => {}
+            | Instruction::RetireEntity { .. } => {}
         }
     }
     state
@@ -1821,7 +1861,8 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         | Instruction::ListNew { .. }
         | Instruction::Phi { .. }
         | Instruction::ReadField { .. }
-        | Instruction::CloseView { .. } => Vec::new(),
+        | Instruction::CloseView { .. }
+        | Instruction::CleanupTrackedScope { .. } => Vec::new(),
         Instruction::Copy { src, .. }
         | Instruction::Take { src, .. }
         | Instruction::CheckedUnaryInt { src, .. }
@@ -1831,7 +1872,6 @@ fn instruction_uses(instruction: &Instruction) -> Vec<Register> {
         }
         Instruction::DropHome { home, .. } | Instruction::DropIfLive { home, .. } => vec![*home],
         Instruction::DropSlot { slot, .. } => vec![*slot],
-        Instruction::CleanupTrackedScope { .. } => Vec::new(),
         Instruction::ReplacePlace {
             destination,
             source,
