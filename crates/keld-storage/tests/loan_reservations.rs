@@ -66,3 +66,35 @@ fn outer_reservation_survives_nested_argument_evaluation() {
         result.diagnostics
     );
 }
+
+#[test]
+fn nested_structural_field_access_checks_every_active_call_reservation() {
+    let result = verify_source(
+        "entity Holder {\nitems: List[Int]\n}\nfn identity(value: Int) -> Int { return value }\nfn inspect(items: List[Int], marker: Int) { return }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); holder.items.push(1); inspect(holder.items, identity(holder.items.remove(0))); return 0; }; }\n",
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "KLD2005"),
+        "{:#?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn nested_structural_access_checks_reservations_beyond_the_immediate_call() {
+    let result = verify_source(
+        "fn identity(value: Int) -> Int { return value }\nfn inspect(items: List[Int], marker: Int) { return }\nfn main() -> Int { let items: List[Int] = List(); items.push(1); inspect(items, identity(identity(items.remove(0)))); return 0; }\n",
+    );
+
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "KLD2005"),
+        "{:#?}",
+        result.diagnostics
+    );
+}

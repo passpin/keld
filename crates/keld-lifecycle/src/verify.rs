@@ -24,6 +24,7 @@ pub struct VerifiedFlowModule {
     pub summaries: Vec<FunctionSummary>,
     pub proofs: Vec<ProofAnnotation>,
     entity_facts: Vec<BTreeMap<(BlockId, u32), EntityOperationFacts>>,
+    reachable_blocks: Vec<BTreeSet<BlockId>>,
 }
 
 impl VerifiedFlowModule {
@@ -37,6 +38,13 @@ impl VerifiedFlowModule {
         self.entity_facts
             .get(function.0 as usize)?
             .get(&(block, operation_index))
+    }
+
+    #[must_use]
+    pub fn is_block_reachable(&self, function: FunctionId, block: BlockId) -> bool {
+        self.reachable_blocks
+            .get(function.0 as usize)
+            .is_some_and(|blocks| blocks.contains(&block))
     }
 }
 
@@ -53,6 +61,7 @@ pub fn verify(flow: FlowModule) -> Verification {
     validate_persistent_fields(&flow, &mut sink);
     let mut proofs = Vec::new();
     let mut entity_facts = vec![BTreeMap::new(); flow.functions.len()];
+    let mut reachable_blocks = vec![BTreeSet::new(); flow.functions.len()];
 
     for function in &flow.functions {
         let outcome = analyze_function(&flow, function, &summaries, true);
@@ -67,6 +76,7 @@ pub fn verify(flow: FlowModule) -> Verification {
         }
         proofs.extend(outcome.proofs);
         entity_facts[function.id.0 as usize] = outcome.entity_facts;
+        reachable_blocks[function.id.0 as usize] = outcome.reachable_blocks;
     }
 
     let diagnostics = sink.finish();
@@ -75,6 +85,7 @@ pub fn verify(flow: FlowModule) -> Verification {
         summaries,
         proofs,
         entity_facts,
+        reachable_blocks,
     });
     Verification {
         module,
@@ -107,6 +118,7 @@ struct AnalysisOutcome {
     diagnostics: Vec<Diagnostic>,
     proofs: Vec<ProofAnnotation>,
     entity_facts: BTreeMap<(BlockId, u32), EntityOperationFacts>,
+    reachable_blocks: BTreeSet<BlockId>,
 }
 
 #[derive(Clone)]
@@ -174,6 +186,7 @@ fn analyze_function(
         inference: Inference::default(),
         next_proof: 0,
         entity_facts: BTreeMap::new(),
+        reachable_blocks: BTreeSet::new(),
     };
     analyzer.run();
     AnalysisOutcome {
@@ -181,6 +194,7 @@ fn analyze_function(
         diagnostics: analyzer.sink.finish(),
         proofs: analyzer.proofs,
         entity_facts: analyzer.entity_facts,
+        reachable_blocks: analyzer.reachable_blocks,
     }
 }
 
@@ -195,6 +209,7 @@ struct Analyzer<'module> {
     inference: Inference,
     next_proof: u32,
     entity_facts: BTreeMap<(BlockId, u32), EntityOperationFacts>,
+    reachable_blocks: BTreeSet<BlockId>,
 }
 
 impl Analyzer<'_> {
@@ -221,6 +236,7 @@ impl Analyzer<'_> {
                 self.complete_predecessor(block_id, &mut indegree, &mut queue);
                 continue;
             }
+            self.reachable_blocks.insert(block_id);
             let block = &self.function.blocks[block_id.0 as usize];
             let mut state = AbstractState::join(states, self.function.span);
             for (index, operation) in block.operations.iter().enumerate() {

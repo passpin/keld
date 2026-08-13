@@ -176,6 +176,9 @@ fn verify_function(
     incoming[function.entry.0 as usize] = Some(initial);
     let mut queue = VecDeque::from([function.entry]);
     while let Some(block_id) = queue.pop_front() {
+        if !lifecycle.is_block_reachable(function.id, block_id) {
+            continue;
+        }
         let Some(state) = incoming[block_id.0 as usize].clone() else {
             continue;
         };
@@ -223,6 +226,9 @@ fn verify_function(
             cleanup::exit_scopes(&mut outgoing.cleanup_orders, storage_scopes);
         }
         for successor in successors(&block.terminator) {
+            if !lifecycle.is_block_reachable(function.id, successor) {
+                continue;
+            }
             let slot = &mut incoming[successor.0 as usize];
             let changed = if let Some(existing) = slot {
                 let joined = join_states(existing, &outgoing);
@@ -478,6 +484,9 @@ fn infer_summary(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut origins = vec![None::<LocalId>; function.value_types.len()];
     for block in &function.blocks {
+        if !lifecycle.is_block_reachable(function.id, block.id) {
+            continue;
+        }
         for (operation_index, operation) in block.operations.iter().enumerate() {
             let facts = access::operation_facts(
                 lifecycle,
@@ -2247,12 +2256,11 @@ fn check_pending_access_inner(
     diagnostics: &mut Vec<Diagnostic>,
     check_indexed: bool,
 ) {
-    let call_conflict = state.pending.last().is_some_and(|pending| {
-        pending
-            .reservations
-            .iter()
-            .any(|reservation| reservation_conflicts(facts, reservation, access_path, effect))
-    });
+    let call_conflict = state
+        .pending
+        .iter()
+        .flat_map(|pending| pending.reservations.iter())
+        .any(|reservation| reservation_conflicts(facts, reservation, access_path, effect));
     let indexed_conflict = check_indexed
         && matches!(effect, LoanEffect::Structural | LoanEffect::Take)
         && state.indexed.iter().any(|reservation| {

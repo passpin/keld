@@ -15,6 +15,7 @@ use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
 use keld_semantics::{CompareOp, DefId, FieldId, ParameterIndex};
 use keld_source::Span;
+use std::borrow::Cow;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -112,6 +113,26 @@ impl<'module> Interpreter<'module> {
     ///
     /// Returns a Keld runtime fault or an internal invariant error.
     pub fn run_main(&mut self) -> Result<ExecutionResult, InterpreterFailure> {
+        self.run_main_with_hook(&mut |_| {})
+    }
+
+    /// Runs main while invoking a test-only callback before each instruction.
+    ///
+    /// This is intentionally hidden from normal API documentation. It lets
+    /// integration tests begin instrumentation at a specific instruction
+    /// after setup has completed without exposing interpreter internals.
+    #[doc(hidden)]
+    pub fn run_main_with_test_hook(
+        &mut self,
+        before_instruction: &mut dyn FnMut(&Instruction),
+    ) -> Result<ExecutionResult, InterpreterFailure> {
+        self.run_main_with_hook(before_instruction)
+    }
+
+    fn run_main_with_hook(
+        &mut self,
+        before_instruction: &mut dyn FnMut(&Instruction),
+    ) -> Result<ExecutionResult, InterpreterFailure> {
         if self.started {
             return Err(internal("interpreter is already executing"));
         }
@@ -142,6 +163,9 @@ impl<'module> Interpreter<'module> {
             &mut self.controls,
         )?;
         loop {
+            if let Some(instruction) = self.current_instruction() {
+                before_instruction(instruction);
+            }
             if let Some(value) = self.step()? {
                 let module = self.module;
                 let cleanup_trace = &mut self.cleanup_trace;
@@ -154,6 +178,13 @@ impl<'module> Interpreter<'module> {
                 return Ok(ExecutionResult { value });
             }
         }
+    }
+
+    fn current_instruction(&self) -> Option<&Instruction> {
+        let frame = self.frames.last()?;
+        let function = self.module.functions.get(frame.function.0 as usize)?;
+        let block = function.blocks.get(frame.block.0 as usize)?;
+        block.instructions.get(frame.instruction)
     }
 
     fn step(&mut self) -> Result<Option<Value>, InterpreterFailure> {
@@ -419,25 +450,27 @@ fn execute_instruction(
             ..
         } => {
             let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let Some(index) = checked_receiver_index(module, store, frames, &place, *index, span)?
+            let Some(index) =
+                checked_receiver_index(module, store, frames, place.as_ref(), *index, span)?
             else {
                 return Err(bounds_failure(span));
             };
             if is_loan_register(module, frames, *dst) {
-                let loan = place.project(RuntimeProjection::Index(index));
+                let loan = place.into_owned().project(RuntimeProjection::Index(index));
                 frames
                     .last_mut()
                     .ok_or_else(|| internal("indexed loan has no active frame"))?
                     .set_loan(*dst, loan)
                     .map_err(|()| internal("validated indexed loan destination is not empty"))?;
             } else {
-                let value = with_place_value(module, store, frames, &place, span, |list| {
-                    let ValueKind::List(elements) = list.kind() else {
-                        return Err(internal("validated list index received a non-list"));
-                    };
-                    let element = elements.get(index).ok_or_else(|| bounds_failure(span))?;
-                    structural_copy(element, span, controls)
-                })?;
+                let value =
+                    with_place_value(module, store, frames, place.as_ref(), span, |list| {
+                        let ValueKind::List(elements) = list.kind() else {
+                            return Err(internal("validated list index received a non-list"));
+                        };
+                        let element = elements.get(index).ok_or_else(|| bounds_failure(span))?;
+                        structural_copy(element, span, controls)
+                    })?;
                 set_register(module, frames, *dst, value)?;
             }
         }
@@ -448,16 +481,25 @@ fn execute_instruction(
             ..
         } => {
             let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
-                Some(index) => with_place_value(module, store, frames, &place, span, |list| {
-                    let ValueKind::List(elements) = list.kind() else {
-                        return Err(internal("validated list get received a non-list"));
-                    };
-                    let element = elements.get(index).ok_or_else(|| {
-                        internal("validated list get index changed during access")
-                    })?;
-                    structural_copy(element, span, controls).map(|value| Some(Box::new(value)))
-                })?,
+            let value = match checked_receiver_index(
+                module,
+                store,
+                frames,
+                place.as_ref(),
+                *index,
+                span,
+            )? {
+                Some(index) => {
+                    with_place_value(module, store, frames, place.as_ref(), span, |list| {
+                        let ValueKind::List(elements) = list.kind() else {
+                            return Err(internal("validated list get received a non-list"));
+                        };
+                        let element = elements.get(index).ok_or_else(|| {
+                            internal("validated list get index changed during access")
+                        })?;
+                        structural_copy(element, span, controls).map(|value| Some(Box::new(value)))
+                    })?
+                }
                 None => None,
             };
             let expected = register_type(module, frames, *dst)?;
@@ -477,21 +519,24 @@ fn execute_instruction(
             displaced,
             ..
         } => {
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let Some(index) = checked_receiver_index(module, store, frames, &place, *index, span)?
-            else {
-                return Err(bounds_failure(span));
-            };
-            let incoming = take_argument(module, store, frames, *value, span, controls)?;
-            let previous = with_place_mut(module, store, frames, &place, span, |list| {
-                let ValueKind::List(elements) = list.kind_mut() else {
-                    return Err(internal("validated list replacement received a non-list"));
-                };
-                let destination = elements
-                    .get_mut(index)
-                    .ok_or_else(|| bounds_failure(span))?;
-                Ok(std::mem::replace(destination, incoming))
-            })?;
+            let previous =
+                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+                    let Some(index) =
+                        checked_receiver_index(module, store, frames, place, *index, span)?
+                    else {
+                        return Err(bounds_failure(span));
+                    };
+                    let incoming = take_argument(module, store, frames, *value, span, controls)?;
+                    with_place_mut(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind_mut() else {
+                            return Err(internal("validated list replacement received a non-list"));
+                        };
+                        let destination = elements
+                            .get_mut(index)
+                            .ok_or_else(|| bounds_failure(span))?;
+                        Ok(std::mem::replace(destination, incoming))
+                    })
+                })?;
             set_register(module, frames, *displaced, previous)?;
         }
         Instruction::ListTryRemove {
@@ -500,21 +545,23 @@ fn execute_instruction(
             index,
             ..
         } => {
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
-                Some(index) => {
-                    let removed = with_place_mut(module, store, frames, &place, span, |list| {
-                        let ValueKind::List(elements) = list.kind_mut() else {
-                            return Err(internal("validated try_remove received a non-list"));
-                        };
-                        elements.try_remove(index).ok_or_else(|| {
-                            internal("validated try_remove index changed during access")
-                        })
-                    })?;
-                    Some(removed)
-                }
-                None => None,
-            };
+            let value =
+                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+                    match checked_receiver_index(module, store, frames, place, *index, span)? {
+                        Some(index) => with_place_mut(module, store, frames, place, span, |list| {
+                            let ValueKind::List(elements) = list.kind_mut() else {
+                                return Err(internal("validated try_remove received a non-list"));
+                            };
+                            elements
+                                .try_remove(index)
+                                .ok_or_else(|| {
+                                    internal("validated try_remove index changed during access")
+                                })
+                                .map(Some)
+                        }),
+                        None => Ok(None),
+                    }
+                })?;
             let expected = register_type(module, frames, *dst)?;
             let value = match value {
                 Some(value) => value
@@ -526,32 +573,34 @@ fn execute_instruction(
             set_register(module, frames, *dst, value)?;
         }
         Instruction::ListClear { receiver, .. } => {
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let length = with_place_value(module, store, frames, &place, span, |list| {
-                let ValueKind::List(elements) = list.kind() else {
-                    return Err(internal("validated clear received a non-list"));
-                };
-                Ok(elements.length())
-            })?;
-            let mut index = length;
-            while index > 0 {
-                index -= 1;
-                let value = with_place_mut(module, store, frames, &place, span, |list| {
-                    let ValueKind::List(elements) = list.kind_mut() else {
+            with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+                let length = with_place_value(module, store, frames, place, span, |list| {
+                    let ValueKind::List(elements) = list.kind() else {
                         return Err(internal("validated clear received a non-list"));
                     };
-                    elements
-                        .pop()
-                        .ok_or_else(|| internal("validated clear length changed during access"))
+                    Ok(elements.length())
                 })?;
-                cleanup_value(
-                    module,
-                    value,
-                    CleanupPath::ListElement { index },
-                    cleanup_scratch,
-                    cleanup_trace.as_mut(),
-                );
-            }
+                let mut index = length;
+                while index > 0 {
+                    index -= 1;
+                    let value = with_place_mut(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind_mut() else {
+                            return Err(internal("validated clear received a non-list"));
+                        };
+                        elements
+                            .pop()
+                            .ok_or_else(|| internal("validated clear length changed during access"))
+                    })?;
+                    cleanup_value(
+                        module,
+                        value,
+                        CleanupPath::ListElement { index },
+                        cleanup_scratch,
+                        cleanup_trace.as_mut(),
+                    );
+                }
+                Ok(())
+            })?;
         }
         Instruction::ListReserve {
             receiver,
@@ -562,14 +611,15 @@ fn execute_instruction(
                 with_register_value(module, store, frames, *additional, span, |value| {
                     expect_int(value)
                 })?;
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
-            with_place_mut(module, store, frames, &place, span, |list| {
-                let ValueKind::List(elements) = list.kind_mut() else {
-                    return Err(internal("validated reserve received a non-list"));
-                };
-                elements
-                    .reserve(additional, &mut controls.allocations)
-                    .map_err(|failure| reserve_failure(failure, span))
+            with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+                with_place_mut(module, store, frames, place, span, |list| {
+                    let ValueKind::List(elements) = list.kind_mut() else {
+                        return Err(internal("validated reserve received a non-list"));
+                    };
+                    elements
+                        .reserve(additional, &mut controls.allocations)
+                        .map_err(|failure| reserve_failure(failure, span))
+                })
             })?;
         }
         Instruction::ListTryReserve {
@@ -582,13 +632,15 @@ fn execute_instruction(
                 with_register_value(module, store, frames, *additional, span, |value| {
                     expect_int(value)
                 })?;
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
-            let success = with_place_mut(module, store, frames, &place, span, |list| {
-                let ValueKind::List(elements) = list.kind_mut() else {
-                    return Err(internal("validated try_reserve received a non-list"));
-                };
-                Ok(elements.try_reserve(additional, &mut controls.allocations))
-            })?;
+            let success =
+                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+                    with_place_mut(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind_mut() else {
+                            return Err(internal("validated try_reserve received a non-list"));
+                        };
+                        Ok(elements.try_reserve(additional, &mut controls.allocations))
+                    })
+                })?;
             set_register(module, frames, *dst, Value::Bool(success))?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
@@ -1480,18 +1532,50 @@ fn runtime_place_for_register(frames: &[Frame], register: Register) -> RuntimePl
     RuntimePlace::frame(frame, register)
 }
 
-fn runtime_place_for_receiver(
-    frames: &[Frame],
+fn runtime_place_for_receiver<'a>(
+    frames: &'a [Frame],
     receiver: &Receiver,
     span: Span,
-) -> Result<RuntimePlace, InterpreterFailure> {
+) -> Result<Cow<'a, RuntimePlace>, InterpreterFailure> {
     if let Some(place) = frames.last().and_then(|frame| frame.loan(receiver.list)) {
-        return Ok(place.clone());
+        return Ok(Cow::Borrowed(place));
     }
     receiver.source.as_ref().map_or_else(
-        || Ok(runtime_place_for_register(frames, receiver.list)),
-        |source| runtime_place_for_source(frames, source, span),
+        || {
+            Ok(Cow::Owned(runtime_place_for_register(
+                frames,
+                receiver.list,
+            )))
+        },
+        |source| runtime_place_for_source(frames, source, span).map(Cow::Owned),
     )
+}
+
+fn with_receiver_place_mut<R>(
+    store: &mut Store<EntityPayload>,
+    frames: &mut Vec<Frame>,
+    receiver: &Receiver,
+    span: Span,
+    access: impl FnOnce(
+        &RuntimePlace,
+        &mut Store<EntityPayload>,
+        &mut Vec<Frame>,
+    ) -> Result<R, InterpreterFailure>,
+) -> Result<R, InterpreterFailure> {
+    let loan = frames
+        .last_mut()
+        .and_then(|frame| frame.take_loan(receiver.list));
+    if let Some(place) = loan {
+        let result = access(&place, store, frames);
+        let restored = frames
+            .last_mut()
+            .ok_or_else(|| internal("receiver loan has no active frame"))?
+            .set_loan(receiver.list, place)
+            .map_err(|()| internal("receiver loan could not be restored"));
+        return restored.and(result);
+    }
+    let place = runtime_place_for_receiver(frames, receiver, span).map(Cow::into_owned)?;
+    access(&place, store, frames)
 }
 
 fn checked_receiver_index(

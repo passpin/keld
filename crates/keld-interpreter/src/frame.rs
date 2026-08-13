@@ -143,6 +143,18 @@ impl Frame {
         Ok(())
     }
 
+    pub fn take_loan(&mut self, register: Register) -> Option<RuntimePlace> {
+        let slot = self.registers.get_mut(register.0 as usize)?;
+        let previous = std::mem::replace(slot, RegisterSlot::Empty);
+        match previous {
+            RegisterSlot::Loan(place) => Some(place),
+            other => {
+                *slot = other;
+                None
+            }
+        }
+    }
+
     pub fn take(&mut self, register: Register) -> Option<Value> {
         let slot = self.registers.get_mut(register.0 as usize)?;
         let value = match slot {
