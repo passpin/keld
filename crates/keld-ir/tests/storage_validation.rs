@@ -734,3 +734,209 @@ fn indexed_replacement_requires_displaced_cleanup() {
     remove_drop_after_list_replace(&mut module);
     assert_ir_error(&module, "live displaced value at return");
 }
+
+fn rewrite_first_output_role(
+    module: &mut Module,
+    select: impl Fn(&Instruction) -> Option<keld_ir::Register>,
+    role: RegisterStorage,
+) {
+    for function in &mut module.functions {
+        if let Some(register) = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find_map(&select)
+        {
+            function.register_storage[register.0 as usize] = role;
+            return;
+        }
+    }
+    panic!("compiler-produced instruction output exists");
+}
+
+#[test]
+fn const_text_destination_must_be_an_owned_home() {
+    let mut module = lower_ok("fn main() -> Int { let value: Text = \"Keld\"; return 0; }\n");
+    rewrite_first_output_role(
+        &mut module,
+        |instruction| match instruction {
+            Instruction::ConstText { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Trivial,
+    );
+
+    assert_ir_error(&module, "owned instruction result must be a Home");
+}
+
+#[test]
+fn managed_construction_results_must_not_be_loans() {
+    let mut list = lower_ok("fn main() -> Int { let items: List[Int] = List(); return 0; }\n");
+    rewrite_first_output_role(
+        &mut list,
+        |instruction| match instruction {
+            Instruction::ListNew { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Loan,
+    );
+    assert_ir_error(&list, "owned instruction result must be a Home");
+
+    let mut text = lower_ok("fn main() -> Int { let value = \"a\" + \"b\"; return 0; }\n");
+    rewrite_first_output_role(
+        &mut text,
+        |instruction| match instruction {
+            Instruction::TextConcat { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Loan,
+    );
+    assert_ir_error(&text, "owned instruction result must be a Home");
+}
+
+#[test]
+fn managed_field_and_list_reads_must_produce_loans() {
+    let mut field = lower_ok(
+        "struct Holder { value: Text }\nfn main() -> Int { let holder = Holder(value: \"Keld\"); return holder.value.byte_length; }\n",
+    );
+    rewrite_first_output_role(
+        &mut field,
+        |instruction| match instruction {
+            Instruction::ReadStructField { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Home {
+            scope: StorageScopeId(0),
+            conditional: false,
+        },
+    );
+    assert_ir_error(&field, "loan instruction result must be a Loan");
+
+    let mut list = lower_ok(
+        "fn size(items: List[Text]) -> Int { return items[0].byte_length; }\nfn main() -> Int { return 0; }\n",
+    );
+    rewrite_first_output_role(
+        &mut list,
+        |instruction| match instruction {
+            Instruction::ListIndex { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Home {
+            scope: StorageScopeId(0),
+            conditional: false,
+        },
+    );
+    assert_ir_error(&list, "loan instruction result must be a Loan");
+}
+
+#[test]
+fn entity_results_must_use_entity_flow_registers() {
+    let mut module = lower_ok(
+        "entity Holder { value: Int }\nfn main() -> Int { lifecycle level { let holder = Holder(value: 1); return holder.value; }; }\n",
+    );
+    rewrite_first_output_role(
+        &mut module,
+        |instruction| match instruction {
+            Instruction::AllocateEntity { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Trivial,
+    );
+
+    assert_ir_error(&module, "entity-flow register must use EntityFlow storage");
+}
+
+#[test]
+fn plain_results_must_not_be_managed_homes() {
+    let mut module = lower_ok("fn main() -> Int { let value = 1; return value; }\n");
+    rewrite_first_output_role(
+        &mut module,
+        |instruction| match instruction {
+            Instruction::ConstInt { dst, .. } => Some(*dst),
+            _ => None,
+        },
+        RegisterStorage::Home {
+            scope: StorageScopeId(0),
+            conditional: false,
+        },
+    );
+
+    assert_ir_error(&module, "plain register must use Trivial storage");
+}
+
+#[test]
+fn managed_parameter_roles_follow_their_parameter_modes() {
+    let mut loan = lower_ok(
+        "fn inspect(value: Text) -> Int { return value.byte_length; }\nfn main() -> Int { return 0; }\n",
+    );
+    let parameter = loan.functions[0].parameters[0];
+    loan.functions[0].register_storage[parameter.0 as usize] = RegisterStorage::Trivial;
+    assert_ir_error(&loan, "managed loan parameter must be a Loan");
+
+    let mut take =
+        lower_ok("fn consume(take value: Text) { return; }\nfn main() -> Int { return 0; }\n");
+    let parameter = take.functions[0].parameters[0];
+    take.functions[0].register_storage[parameter.0 as usize] = RegisterStorage::Loan;
+    assert_ir_error(&take, "managed consuming parameter must be a Home");
+}
+
+#[test]
+fn managed_phi_inputs_must_match_the_destination_role() {
+    let mut module = lower_ok(
+        "fn choose(left: Bool, right: Bool) -> Bool { return left && right; }\nfn main() -> Int { return 0; }\n",
+    );
+    let (function_index, destination, inputs) = module
+        .functions
+        .iter()
+        .enumerate()
+        .find_map(|(function_index, function)| {
+            function.blocks.iter().find_map(|block| {
+                block
+                    .instructions
+                    .iter()
+                    .find_map(|instruction| match instruction {
+                        Instruction::Phi { dst, inputs, .. } => {
+                            Some((function_index, *dst, inputs.clone()))
+                        }
+                        _ => None,
+                    })
+            })
+        })
+        .expect("compiler-produced Phi exists");
+    let function = &mut module.functions[function_index];
+    function.register_types[destination.0 as usize] = IrType::Text;
+    function.register_storage[destination.0 as usize] = RegisterStorage::Loan;
+    for (_, input) in &inputs {
+        function.register_types[input.0 as usize] = IrType::Text;
+        function.register_storage[input.0 as usize] = RegisterStorage::Loan;
+    }
+    let owned_input = inputs
+        .iter()
+        .map(|(_, input)| *input)
+        .find(|input| !function.parameters.contains(input))
+        .expect("short-circuit Phi has a non-parameter input");
+    function.register_storage[owned_input.0 as usize] = RegisterStorage::Home {
+        scope: StorageScopeId(0),
+        conditional: false,
+    };
+
+    assert_ir_error(
+        &module,
+        "managed Phi input storage role must match its destination",
+    );
+}
+
+#[test]
+fn compiler_produced_register_categories_validate() {
+    for source in [
+        "fn main() -> Int { return 1; }\n",
+        "fn main() -> Int { let value: Text = \"Keld\"; return 0; }\n",
+        "struct Holder { value: Text }\nfn main() -> Int { let holder = Holder(value: \"Keld\"); return holder.value.byte_length; }\n",
+        "entity Holder { value: Int }\nfn main() -> Int { lifecycle level { let holder = Holder(value: 1); return holder.value; }; }\n",
+        "entity Holder { value: Int }\nfn same(left: Holder, right: Holder) -> Bool { return left == right; }\nfn main() -> Int { return 0; }\n",
+        "fn main() -> Int { var value: Text = \"old\"; value = \"new\"; return 0; }\n",
+    ] {
+        let module = lower_ok(source);
+        assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
+    }
+}

@@ -168,7 +168,12 @@ impl TestModuleBuilder {
         definitions.sort_by_key(|definition| definition.id);
         register_types.push(IrType::Lifecycle);
         register_types.push(IrType::Int);
-        let register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+        let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+        for (register, ty) in &self.parameters {
+            if matches!(ty, IrType::Entity(_)) {
+                register_storage[register.0 as usize] = RegisterStorage::EntityFlow;
+            }
+        }
         let mut instructions = self.instructions;
         instructions.push(Instruction::ConstInt {
             dst: result,

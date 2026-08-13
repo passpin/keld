@@ -6,7 +6,9 @@ use crate::{
 use keld_flow::FlowModule;
 use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection, ValueId};
 use keld_lifecycle::VerifiedFlowModule;
-use keld_semantics::{CompareOp, DefinitionKind, LocalId, TypeId, TypeKind, TypeStore};
+use keld_semantics::{
+    CompareOp, DefinitionKind, LocalId, StorageClass, TypeId, TypeKind, TypeStore,
+};
 use keld_storage::{
     CleanupAction, FunctionStoragePlan, FunctionStorageSummary, HomeId, LocalStorage, StoreKind,
     ValueStorage, VerifiedStorageModule,
@@ -124,16 +126,17 @@ impl Registers {
             .iter()
             .enumerate()
             .map(|(index, ty)| {
+                let planned = storage_plan.map_or(RegisterStorage::Trivial, |plan| {
+                    value_register_storage(
+                        plan,
+                        keld_flow::ValueId(
+                            u32::try_from(index).expect("verified value count fits in u32"),
+                        ),
+                    )
+                });
                 push(
                     map_type(types, *ty),
-                    storage_plan.map_or(RegisterStorage::Trivial, |plan| {
-                        value_register_storage(
-                            plan,
-                            keld_flow::ValueId(
-                                u32::try_from(index).expect("verified value count fits in u32"),
-                            ),
-                        )
-                    }),
+                    normalize_entity_storage(types, *ty, planned),
                 )
             })
             .collect();
@@ -142,16 +145,15 @@ impl Registers {
             .iter()
             .enumerate()
             .map(|(index, ty)| {
+                let planned = storage_plan.map_or(RegisterStorage::Trivial, |plan| {
+                    local_register_storage(
+                        plan,
+                        LocalId(u32::try_from(index).expect("verified local count fits in u32")),
+                    )
+                });
                 push(
                     map_type(types, *ty),
-                    storage_plan.map_or(RegisterStorage::Trivial, |plan| {
-                        local_register_storage(
-                            plan,
-                            LocalId(
-                                u32::try_from(index).expect("verified local count fits in u32"),
-                            ),
-                        )
-                    }),
+                    normalize_entity_storage(types, *ty, planned),
                 )
             })
             .collect();
@@ -1059,6 +1061,18 @@ fn map_type(types: &TypeStore, ty: TypeId) -> IrType {
         TypeKind::Error => {
             unreachable!("verified bootstrap flow contains only executable types")
         }
+    }
+}
+
+fn normalize_entity_storage(
+    types: &TypeStore,
+    ty: TypeId,
+    planned: RegisterStorage,
+) -> RegisterStorage {
+    if types.storage_class(ty) == StorageClass::EntityFlow {
+        RegisterStorage::EntityFlow
+    } else {
+        planned
     }
 }
 

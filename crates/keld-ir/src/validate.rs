@@ -3,7 +3,7 @@ use crate::{
     IrDefinitionKind, IrType, Module, Receiver, Register, RegisterStorage, Terminator, ViewId,
     ViewMode,
 };
-use keld_semantics::{CompareOp, DefId, FieldId};
+use keld_semantics::{CompareOp, DefId, FieldId, ParameterMode};
 use keld_source::{Diagnostic, DiagnosticCode, Span};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -141,6 +141,29 @@ enum HomeState {
     MaybeLive,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IrStorageClass {
+    Plain,
+    Managed,
+    EntityFlow,
+    Lifecycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProducedRegisterClass {
+    Plain,
+    Owned,
+    Loan,
+    EntityFlow,
+    Displaced,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedPhiRole {
+    Owned,
+    Loan,
+}
+
 impl<'module, 'sink> FunctionValidator<'module, 'sink> {
     fn new(
         module: &'module Module,
@@ -239,6 +262,9 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 );
             }
         }
+        self.validate_parameter_storage_roles();
+        self.validate_register_storage_roles();
+        self.validate_produced_register_roles();
         self.expect_type(
             self.function.current_lifecycle,
             &IrType::Lifecycle,
@@ -252,6 +278,176 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             );
         }
         self.validate_unique_definitions(&predefined);
+    }
+
+    fn validate_parameter_storage_roles(&mut self) {
+        for (index, parameter) in self.function.parameters.iter().copied().enumerate() {
+            let Some(ty) = self.function.register_types.get(parameter.0 as usize) else {
+                continue;
+            };
+            if ir_storage_class(self.module, ty) != IrStorageClass::Managed {
+                continue;
+            }
+            match self.function.parameter_modes.get(index) {
+                Some(ParameterMode::Loan)
+                    if !matches!(
+                        self.register_storage(parameter),
+                        Some(RegisterStorage::Loan)
+                    ) =>
+                {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        self.function.span,
+                        "managed loan parameter must be a Loan",
+                    );
+                }
+                Some(ParameterMode::Take)
+                    if !matches!(
+                        self.register_storage(parameter),
+                        Some(RegisterStorage::Home { .. })
+                    ) =>
+                {
+                    self.sink.error(
+                        STORAGE_ERROR,
+                        self.function.span,
+                        "managed consuming parameter must be a Home",
+                    );
+                }
+                Some(ParameterMode::Loan | ParameterMode::Take) | None => {}
+            }
+        }
+    }
+
+    fn validate_register_storage_roles(&mut self) {
+        let displaced = self
+            .function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .flat_map(|instruction| produced_registers(self.module, self.function, instruction))
+            .filter_map(|(register, class)| {
+                (class == ProducedRegisterClass::Displaced).then_some(register)
+            })
+            .collect::<BTreeSet<_>>();
+        let register_count = self
+            .function
+            .register_types
+            .len()
+            .min(self.function.register_storage.len());
+        for index in 0..register_count {
+            let register = Register(u32::try_from(index).expect("register index fits in u32"));
+            let ty = &self.function.register_types[index];
+            let storage = &self.function.register_storage[index];
+            match ir_storage_class(self.module, ty) {
+                IrStorageClass::Managed => {
+                    if !matches!(
+                        storage,
+                        RegisterStorage::Home { .. }
+                            | RegisterStorage::Loan
+                            | RegisterStorage::DropSlot
+                    ) {
+                        self.sink.error(
+                            STORAGE_ERROR,
+                            contract_span(self.function.span),
+                            "managed register must use Home, Loan, or DropSlot storage",
+                        );
+                    }
+                }
+                IrStorageClass::EntityFlow => {
+                    if !matches!(storage, RegisterStorage::EntityFlow) {
+                        self.sink.error(
+                            STORAGE_ERROR,
+                            contract_span(self.function.span),
+                            "entity-flow register must use EntityFlow storage",
+                        );
+                    }
+                }
+                IrStorageClass::Plain => match storage {
+                    RegisterStorage::Trivial => {}
+                    RegisterStorage::DropSlot if displaced.contains(&register) => {}
+                    RegisterStorage::DropSlot => self.sink.error(
+                        STORAGE_ERROR,
+                        contract_span(self.function.span),
+                        "plain DropSlot register must be produced as a displaced value",
+                    ),
+                    RegisterStorage::EntityFlow
+                    | RegisterStorage::Loan
+                    | RegisterStorage::Home { .. } => self.sink.error(
+                        STORAGE_ERROR,
+                        contract_span(self.function.span),
+                        "plain register must use Trivial storage",
+                    ),
+                },
+                IrStorageClass::Lifecycle => {
+                    if !matches!(storage, RegisterStorage::Trivial) {
+                        self.sink.error(
+                            STORAGE_ERROR,
+                            contract_span(self.function.span),
+                            "lifecycle register must use Trivial storage",
+                        );
+                    }
+                }
+            }
+            if let RegisterStorage::Home { scope, .. } = storage
+                && scope.0 as usize >= self.function.storage_scope_parents.len()
+            {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    contract_span(self.function.span),
+                    "Home register references an unknown storage scope",
+                );
+            }
+        }
+    }
+
+    fn validate_produced_register_roles(&mut self) {
+        for block in &self.function.blocks {
+            for instruction in &block.instructions {
+                let span = contract_span(instruction_span(instruction));
+                for (register, class) in produced_registers(self.module, self.function, instruction)
+                {
+                    let valid = match class {
+                        ProducedRegisterClass::Plain => matches!(
+                            self.register_storage(register),
+                            Some(RegisterStorage::Trivial)
+                        ),
+                        ProducedRegisterClass::Owned => matches!(
+                            self.register_storage(register),
+                            Some(RegisterStorage::Home { .. })
+                        ),
+                        ProducedRegisterClass::Loan => {
+                            matches!(self.register_storage(register), Some(RegisterStorage::Loan))
+                        }
+                        ProducedRegisterClass::EntityFlow => matches!(
+                            self.register_storage(register),
+                            Some(RegisterStorage::EntityFlow)
+                        ),
+                        ProducedRegisterClass::Displaced => matches!(
+                            self.register_storage(register),
+                            Some(RegisterStorage::DropSlot)
+                        ),
+                    };
+                    if !valid {
+                        let message = match class {
+                            ProducedRegisterClass::Plain => {
+                                "plain instruction result must use Trivial storage"
+                            }
+                            ProducedRegisterClass::Owned => {
+                                "owned instruction result must be a Home"
+                            }
+                            ProducedRegisterClass::Loan => "loan instruction result must be a Loan",
+                            ProducedRegisterClass::EntityFlow => {
+                                "entity-flow instruction result must use EntityFlow storage"
+                            }
+                            ProducedRegisterClass::Displaced => {
+                                "displaced instruction result must be a DropSlot"
+                            }
+                        };
+                        self.sink.error(STORAGE_ERROR, span, message);
+                    }
+                }
+            }
+        }
     }
 
     fn validate_unique_definitions(&mut self, predefined: &BTreeSet<Register>) {
@@ -1162,6 +1358,10 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             );
         }
         let destination_type = self.register_type(*dst, *span).cloned();
+        let expected_managed_phi_role = destination_type
+            .as_ref()
+            .filter(|ty| ir_storage_class(self.module, ty) == IrStorageClass::Managed)
+            .and_then(|_| managed_phi_role(self.register_storage(*dst)));
         for (predecessor, register) in inputs {
             let Some(predecessor_block) = self.function.blocks.get(predecessor.0 as usize) else {
                 self.sink
@@ -1184,6 +1384,15 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                     REGISTER_ERROR,
                     *span,
                     "Phi input type does not match its destination",
+                );
+            }
+            if let Some(expected_role) = expected_managed_phi_role
+                && managed_phi_role(self.register_storage(*register)) != Some(expected_role)
+            {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    *span,
+                    "managed Phi input storage role must match its destination",
                 );
             }
         }
@@ -2141,26 +2350,69 @@ fn is_implicit_copy_type(module: &Module, ty: &IrType) -> bool {
 }
 
 fn is_managed_type(module: &Module, ty: &IrType) -> bool {
+    ir_storage_class(module, ty) == IrStorageClass::Managed
+}
+
+fn ir_storage_class(module: &Module, ty: &IrType) -> IrStorageClass {
+    ir_storage_class_inner(module, ty, &mut BTreeSet::new())
+}
+
+fn ir_storage_class_inner(
+    module: &Module,
+    ty: &IrType,
+    visiting: &mut BTreeSet<DefId>,
+) -> IrStorageClass {
     match ty {
-        IrType::Text | IrType::List(_) => true,
-        IrType::Optional(inner) => is_managed_type(module, inner),
-        IrType::Struct(definition) => module
-            .definitions
-            .iter()
-            .find(|candidate| candidate.id == *definition)
-            .is_some_and(|definition| {
-                definition
-                    .fields
-                    .iter()
-                    .any(|(_, field)| is_managed_type(module, field))
-            }),
-        IrType::Unit
-        | IrType::Bool
-        | IrType::Int
-        | IrType::Entity(_)
-        | IrType::Link { .. }
-        | IrType::Lifecycle => false,
+        IrType::Unit | IrType::Bool | IrType::Int | IrType::Link { .. } => IrStorageClass::Plain,
+        IrType::Text | IrType::List(_) => IrStorageClass::Managed,
+        IrType::Entity(_) => IrStorageClass::EntityFlow,
+        IrType::Lifecycle => IrStorageClass::Lifecycle,
+        IrType::Optional(inner) => ir_storage_class_inner(module, inner, visiting),
+        IrType::Struct(definition_id) => {
+            if !visiting.insert(*definition_id) {
+                return IrStorageClass::Managed;
+            }
+            let mut has_managed = false;
+            let mut has_entity_flow = false;
+            if let Some(definition) = module
+                .definitions
+                .iter()
+                .find(|candidate| candidate.id == *definition_id)
+            {
+                for (_, field) in &definition.fields {
+                    match ir_storage_class_inner(module, field, visiting) {
+                        IrStorageClass::Managed => has_managed = true,
+                        IrStorageClass::EntityFlow => has_entity_flow = true,
+                        IrStorageClass::Plain | IrStorageClass::Lifecycle => {}
+                    }
+                }
+            }
+            visiting.remove(definition_id);
+            if has_managed {
+                IrStorageClass::Managed
+            } else if has_entity_flow {
+                IrStorageClass::EntityFlow
+            } else {
+                IrStorageClass::Plain
+            }
+        }
     }
+}
+
+fn managed_phi_role(storage: Option<&RegisterStorage>) -> Option<ManagedPhiRole> {
+    match storage {
+        Some(RegisterStorage::Home { .. }) => Some(ManagedPhiRole::Owned),
+        Some(RegisterStorage::Loan) => Some(ManagedPhiRole::Loan),
+        Some(
+            RegisterStorage::Trivial | RegisterStorage::EntityFlow | RegisterStorage::DropSlot,
+        )
+        | None => None,
+    }
+}
+
+fn contract_span(span: Span) -> Span {
+    Span::new(span.source(), span.start().0, span.start().0)
+        .expect("instruction start is a valid diagnostic span")
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2374,6 +2626,146 @@ fn intersect_sets(mut sets: impl Iterator<Item = BTreeSet<Register>>) -> BTreeSe
     sets.fold(first, |current, next| {
         current.intersection(&next).copied().collect()
     })
+}
+
+fn owned_produced_class(
+    module: &Module,
+    function: &Function,
+    register: Register,
+) -> ProducedRegisterClass {
+    match function
+        .register_types
+        .get(register.0 as usize)
+        .map(|ty| ir_storage_class(module, ty))
+    {
+        Some(IrStorageClass::Managed) => ProducedRegisterClass::Owned,
+        Some(IrStorageClass::EntityFlow) => ProducedRegisterClass::EntityFlow,
+        Some(IrStorageClass::Plain | IrStorageClass::Lifecycle) | None => {
+            ProducedRegisterClass::Plain
+        }
+    }
+}
+
+fn loan_produced_class(
+    module: &Module,
+    function: &Function,
+    register: Register,
+) -> ProducedRegisterClass {
+    match function
+        .register_types
+        .get(register.0 as usize)
+        .map(|ty| ir_storage_class(module, ty))
+    {
+        Some(IrStorageClass::Managed) => ProducedRegisterClass::Loan,
+        Some(IrStorageClass::EntityFlow) => ProducedRegisterClass::EntityFlow,
+        Some(IrStorageClass::Plain | IrStorageClass::Lifecycle) | None => {
+            ProducedRegisterClass::Plain
+        }
+    }
+}
+
+fn role_directed_produced_class(
+    module: &Module,
+    function: &Function,
+    register: Register,
+) -> ProducedRegisterClass {
+    if function
+        .register_types
+        .get(register.0 as usize)
+        .is_some_and(|ty| ir_storage_class(module, ty) == IrStorageClass::Managed)
+    {
+        if matches!(
+            function.register_storage.get(register.0 as usize),
+            Some(RegisterStorage::Loan)
+        ) {
+            ProducedRegisterClass::Loan
+        } else {
+            ProducedRegisterClass::Owned
+        }
+    } else {
+        owned_produced_class(module, function, register)
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn produced_registers(
+    module: &Module,
+    function: &Function,
+    instruction: &Instruction,
+) -> Vec<(Register, ProducedRegisterClass)> {
+    match instruction {
+        Instruction::ConstInt { dst, .. }
+        | Instruction::ConstBool { dst, .. }
+        | Instruction::ConstNoneLink { dst, .. }
+        | Instruction::ListLength { dst, .. }
+        | Instruction::ListGet { dst, .. }
+        | Instruction::ListTryReserve { dst, .. }
+        | Instruction::TextByteLength { dst, .. }
+        | Instruction::TextIsEmpty { dst, .. }
+        | Instruction::CheckedUnaryInt { dst, .. }
+        | Instruction::CheckedBinaryInt { dst, .. }
+        | Instruction::Not { dst, .. }
+        | Instruction::Compare { dst, .. }
+        | Instruction::BeginLifecycle { dst, .. }
+        | Instruction::EntityToLink { dst, .. } => {
+            vec![(*dst, ProducedRegisterClass::Plain)]
+        }
+        Instruction::ConstText { dst, .. }
+        | Instruction::ListNew { dst, .. }
+        | Instruction::TextConcat { dst, .. }
+        | Instruction::MoveHome {
+            destination: dst, ..
+        } => vec![(*dst, ProducedRegisterClass::Owned)],
+        Instruction::Copy { dst, .. } | Instruction::Phi { dst, .. } => {
+            vec![(*dst, role_directed_produced_class(module, function, *dst))]
+        }
+        Instruction::Take { dst, .. }
+        | Instruction::ListRemove { dst, .. }
+        | Instruction::ListRemovePlace { dst, .. }
+        | Instruction::ListTryRemove { dst, .. }
+        | Instruction::ConstructStruct { dst, .. } => {
+            vec![(*dst, owned_produced_class(module, function, *dst))]
+        }
+        Instruction::InstallHome {
+            destination,
+            displaced,
+            ..
+        } => vec![
+            (*destination, ProducedRegisterClass::Owned),
+            (*displaced, ProducedRegisterClass::Displaced),
+        ],
+        Instruction::ReplacePlace { displaced, .. }
+        | Instruction::ReplaceField { displaced, .. }
+        | Instruction::ListReplace { displaced, .. } => {
+            vec![(*displaced, ProducedRegisterClass::Displaced)]
+        }
+        Instruction::ListIndex { dst, .. }
+        | Instruction::ReadStructField { dst, .. }
+        | Instruction::ReadField { dst, .. } => {
+            vec![(*dst, loan_produced_class(module, function, *dst))]
+        }
+        Instruction::AllocateEntity { dst, .. } => {
+            vec![(*dst, ProducedRegisterClass::EntityFlow)]
+        }
+        Instruction::Call { dst, .. } => dst
+            .map(|dst| (dst, owned_produced_class(module, function, dst)))
+            .into_iter()
+            .collect(),
+        Instruction::DropHome { .. }
+        | Instruction::DropIfLive { .. }
+        | Instruction::DropSlot { .. }
+        | Instruction::CleanupTrackedScope { .. }
+        | Instruction::ListPush { .. }
+        | Instruction::ListPushPlace { .. }
+        | Instruction::ListClear { .. }
+        | Instruction::ListReserve { .. }
+        | Instruction::EndLifecycle { .. }
+        | Instruction::OpenView { .. }
+        | Instruction::WriteField { .. }
+        | Instruction::CloseView { .. }
+        | Instruction::KeepEntity { .. }
+        | Instruction::RetireEntity { .. } => Vec::new(),
+    }
 }
 
 fn instruction_destination(instruction: &Instruction) -> Option<Register> {
