@@ -734,6 +734,57 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         self.function.register_storage.get(register.0 as usize)
     }
 
+    fn require_live_storage_use(
+        &mut self,
+        register: Register,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+        message: &'static str,
+    ) {
+        if matches!(
+            self.register_storage(register),
+            Some(RegisterStorage::Home { .. } | RegisterStorage::DropSlot)
+        ) && state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Live
+        {
+            self.sink.error(STORAGE_ERROR, span, message);
+        }
+    }
+
+    fn validate_live_instruction_uses(
+        &mut self,
+        instruction: &Instruction,
+        state: &BTreeMap<Register, HomeState>,
+    ) {
+        if matches!(instruction, Instruction::DropIfLive { .. }) {
+            return;
+        }
+        let span = use_contract_span(instruction_span(instruction));
+        for register in instruction_uses(instruction) {
+            self.require_live_storage_use(
+                register,
+                state,
+                span,
+                "managed operand must be a live Home",
+            );
+        }
+    }
+
+    fn validate_live_terminator_uses(
+        &mut self,
+        terminator: &Terminator,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+    ) {
+        for register in terminator_uses(terminator) {
+            self.require_live_storage_use(
+                register,
+                state,
+                use_contract_span(span),
+                "managed operand must be a live Home",
+            );
+        }
+    }
+
     fn require_take_source(
         &mut self,
         register: Register,
@@ -896,6 +947,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 );
             }
             self.validate_instruction(instruction, &mut views, &mut active_lifecycles);
+            self.validate_live_instruction_uses(instruction, &home_states);
             add_instruction_definitions(instruction, &mut available);
             self.validate_home_instruction(instruction, &mut home_states, &views);
         }
@@ -910,6 +962,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         for register in terminator_uses(&block.terminator) {
             self.require_available(register, &available, terminator_span);
         }
+        self.validate_live_terminator_uses(&block.terminator, &home_states, terminator_span);
         self.validate_home_terminator(&block.terminator, &home_states, terminator_span);
         self.validate_terminator(&block.terminator, &active_lifecycles);
     }
@@ -1377,6 +1430,13 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 edge_available.insert(live_value);
             }
             self.require_available(*register, &edge_available, *span);
+            let predecessor_homes = self.outgoing_homes[predecessor.0 as usize].clone();
+            self.require_live_storage_use(
+                *register,
+                &predecessor_homes,
+                use_contract_span(*span),
+                "managed Phi input must be a live Home",
+            );
             if let Some(destination_type) = &destination_type
                 && self.register_type(*register, *span) != Some(destination_type)
             {
@@ -2413,6 +2473,11 @@ fn managed_phi_role(storage: Option<&RegisterStorage>) -> Option<ManagedPhiRole>
 fn contract_span(span: Span) -> Span {
     Span::new(span.source(), span.start().0, span.start().0)
         .expect("instruction start is a valid diagnostic span")
+}
+
+fn use_contract_span(span: Span) -> Span {
+    Span::new(span.source(), span.end().0, span.end().0)
+        .expect("instruction end is a valid diagnostic span")
 }
 
 #[allow(clippy::too_many_lines)]

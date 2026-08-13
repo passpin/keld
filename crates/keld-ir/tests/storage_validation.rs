@@ -2,6 +2,7 @@ use keld_flow::StorageScopeId;
 use keld_ir::{
     ArgumentProjection, Instruction, IrType, Module, RegisterStorage, Terminator, lower, validate,
 };
+use keld_source::Span;
 use keld_storage::verify_text_for_test;
 
 fn lower_ok(source: &str) -> Module {
@@ -516,6 +517,70 @@ fn remove_drop_after_list_replace(module: &mut Module) {
     panic!("compiler-produced list replacement exists");
 }
 
+fn drop_home_before(
+    module: &mut Module,
+    select: impl Fn(&Instruction) -> Option<(keld_ir::Register, Span)>,
+) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            let Some((index, home, span)) =
+                block
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, instruction)| {
+                        let (home, span) = select(instruction)?;
+                        matches!(
+                            function.register_storage.get(home.0 as usize),
+                            Some(RegisterStorage::Home { .. })
+                        )
+                        .then_some((index, home, span))
+                    })
+            else {
+                continue;
+            };
+            block
+                .instructions
+                .insert(index, Instruction::DropHome { home, span });
+            return;
+        }
+    }
+    panic!("compiler-produced managed operand exists");
+}
+
+fn drop_one_managed_phi_input(module: &mut Module) {
+    for function in &mut module.functions {
+        let Some((destination, inputs, span)) = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .find_map(|instruction| match instruction {
+                Instruction::Phi { dst, inputs, span } => Some((*dst, inputs.clone(), *span)),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        let storage = RegisterStorage::Home {
+            scope: StorageScopeId(0),
+            conditional: false,
+        };
+        function.register_types[destination.0 as usize] = IrType::Text;
+        function.register_storage[destination.0 as usize] = storage.clone();
+        for (_, input) in &inputs {
+            function.register_types[input.0 as usize] = IrType::Text;
+            function.register_storage[input.0 as usize] = storage.clone();
+        }
+        let (predecessor, input) = inputs[0];
+        let block = &mut function.blocks[predecessor.0 as usize];
+        block
+            .instructions
+            .push(Instruction::DropHome { home: input, span });
+        return;
+    }
+    panic!("compiler-produced Phi exists");
+}
+
 #[test]
 fn managed_home_cannot_return_live_without_cleanup() {
     let mut module = lower_ok("fn main() -> Int { let value: Text = \"Keld\"; return 0; }\n");
@@ -733,6 +798,116 @@ fn indexed_replacement_requires_displaced_cleanup() {
     );
     remove_drop_after_list_replace(&mut module);
     assert_ir_error(&module, "live displaced value at return");
+}
+
+#[test]
+fn text_read_requires_a_live_managed_home() {
+    let mut module = lower_ok("fn main() -> Int { return \"Keld\".byte_length; }\n");
+    drop_home_before(&mut module, |instruction| match instruction {
+        Instruction::TextByteLength { text, span, .. } => Some((*text, *span)),
+        _ => None,
+    });
+
+    assert_ir_error(&module, "managed operand must be a live Home");
+}
+
+#[test]
+fn text_compare_and_concat_require_live_managed_homes() {
+    let mut compare = lower_ok("fn main() -> Int { if \"a\" == \"b\" { return 1; }; return 0; }\n");
+    drop_home_before(&mut compare, |instruction| match instruction {
+        Instruction::Compare { lhs, span, .. } => Some((*lhs, *span)),
+        _ => None,
+    });
+    assert_ir_error(&compare, "managed operand must be a live Home");
+
+    let mut concat = lower_ok("fn main() -> Int { let value = \"a\" + \"b\"; return 0; }\n");
+    drop_home_before(&mut concat, |instruction| match instruction {
+        Instruction::TextConcat { lhs, span, .. } => Some((*lhs, *span)),
+        _ => None,
+    });
+    assert_ir_error(&concat, "managed operand must be a live Home");
+}
+
+#[test]
+fn list_read_and_structural_operations_require_a_live_home() {
+    let mut read = lower_ok(
+        "fn make() -> List[Int] { return List(); }\nfn main() -> Int { return make().length; }\n",
+    );
+    drop_home_before(&mut read, |instruction| match instruction {
+        Instruction::ListLength { list, span, .. } => Some((*list, *span)),
+        _ => None,
+    });
+    assert_ir_error(&read, "managed operand must be a live Home");
+
+    let mut structural = lower_ok(
+        "fn make() -> List[Int] { return List(); }\nfn main() -> Int { make().reserve(1); return 0; }\n",
+    );
+    drop_home_before(&mut structural, |instruction| match instruction {
+        Instruction::ListReserve { receiver, span, .. } => Some((receiver.list, *span)),
+        _ => None,
+    });
+    assert_ir_error(&structural, "managed operand must be a live Home");
+}
+
+#[test]
+fn calls_require_live_managed_arguments_and_projected_bases() {
+    let mut argument = lower_ok(
+        "fn inspect(value: Text) -> Int { return value.byte_length; }\nfn main() -> Int { return inspect(\"Keld\"); }\n",
+    );
+    drop_home_before(&mut argument, |instruction| match instruction {
+        Instruction::Call {
+            arguments, span, ..
+        } => arguments.first().map(|(_, argument)| (*argument, *span)),
+        _ => None,
+    });
+    assert_ir_error(&argument, "managed operand must be a live Home");
+
+    let mut projected = lower_ok(
+        "fn inspect(items: List[Int]) -> Int { return items.length; }\nfn main() -> Int { let matrix: List[List[Int]] = List(); return inspect(matrix[0]); }\n",
+    );
+    drop_home_before(&mut projected, |instruction| match instruction {
+        Instruction::Call {
+            argument_sources,
+            span,
+            ..
+        } => argument_sources
+            .iter()
+            .find_map(|(_, source)| source.as_ref().map(|source| (source.base, *span))),
+        _ => None,
+    });
+    assert_ir_error(&projected, "managed operand must be a live Home");
+}
+
+#[test]
+fn managed_phi_inputs_must_be_live_on_each_predecessor() {
+    let mut module = lower_ok("fn main() -> Int { let value = false && true; return 0; }\n");
+    drop_one_managed_phi_input(&mut module);
+
+    assert_ir_error(&module, "managed Phi input must be a live Home");
+}
+
+#[test]
+fn managed_return_is_also_an_exhaustive_live_use() {
+    let mut module =
+        lower_ok("fn make() -> Text { return \"ok\"; }\nfn main() -> Int { return 0; }\n");
+    empty_first_managed_return(&mut module);
+
+    assert_ir_error(&module, "managed operand must be a live Home");
+}
+
+#[test]
+fn conditional_drop_accepts_a_maybe_live_home() {
+    let module = lower_ok(
+        "fn maybe(flag: Bool) -> Int { var value: Text; if flag { value = \"yes\"; }; return 0; }\nfn main() -> Int { return maybe(true); }\n",
+    );
+    assert!(module.functions.iter().any(|function| {
+        function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction, Instruction::DropIfLive { .. }))
+    }));
+    assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
 }
 
 fn rewrite_first_output_role(
