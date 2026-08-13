@@ -7,7 +7,7 @@ use keld_flow::FlowModule;
 use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection, ValueId};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{
-    CompareOp, DefinitionKind, LocalId, StorageClass, TypeId, TypeKind, TypeStore,
+    CompareOp, Definition, DefinitionKind, LocalId, StorageClass, TypeId, TypeKind, TypeStore,
 };
 use keld_storage::{
     CleanupAction, FunctionStoragePlan, FunctionStorageSummary, HomeId, LocalStorage, StoreKind,
@@ -85,6 +85,7 @@ pub fn lower<V: VerifiedInput>(verified: &V) -> Module {
             .map(|function| {
                 FunctionLowerer::new(
                     function,
+                    &flow.definitions,
                     &flow.types,
                     verified.storage_summary(function.id),
                     verified.storage_plan(function.id),
@@ -210,6 +211,7 @@ impl Registers {
 
 struct FunctionLowerer<'flow> {
     function: &'flow FlowFunction,
+    definitions: &'flow [Definition],
     types: &'flow TypeStore,
     registers: Registers,
     next_view: u32,
@@ -220,12 +222,14 @@ struct FunctionLowerer<'flow> {
 impl<'flow> FunctionLowerer<'flow> {
     fn new(
         function: &'flow FlowFunction,
+        definitions: &'flow [Definition],
         types: &'flow TypeStore,
         storage_summary: Option<&'flow FunctionStorageSummary>,
         storage_plan: Option<&'flow FunctionStoragePlan>,
     ) -> Self {
         Self {
             function,
+            definitions,
             types,
             registers: Registers::new(function, types, storage_plan),
             next_view: 0,
@@ -909,6 +913,23 @@ impl<'flow> FunctionLowerer<'flow> {
         span: keld_source::Span,
         output: &mut Vec<Instruction>,
     ) {
+        let entity_type = self.function.value_types[entity.0 as usize];
+        let TypeKind::EntityRef(definition) = self.types.kind(entity_type) else {
+            unreachable!("verified entity field write has an entity receiver")
+        };
+        let field_type = self
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == *definition)
+            .and_then(|definition| {
+                definition
+                    .fields
+                    .iter()
+                    .find(|candidate| candidate.id == field)
+            })
+            .map(|field| field.ty)
+            .expect("verified entity field write names a declared field");
+        let source = self.registers.value(value);
         let view = self.new_view();
         output.push(Instruction::OpenView {
             view,
@@ -916,13 +937,37 @@ impl<'flow> FunctionLowerer<'flow> {
             mode: ViewMode::Edit,
             span,
         });
-        output.push(Instruction::WriteField {
-            view,
-            field,
-            value: self.registers.value(value),
-            span,
-        });
-        output.push(Instruction::CloseView { view, span });
+        match self.types.storage_class(field_type) {
+            StorageClass::SingleHome => {
+                let displaced = self
+                    .registers
+                    .add_scratch(map_type(self.types, field_type), RegisterStorage::DropSlot);
+                output.push(Instruction::ReplaceField {
+                    view,
+                    field,
+                    source,
+                    displaced,
+                    span,
+                });
+                output.push(Instruction::CloseView { view, span });
+                output.push(Instruction::DropSlot {
+                    slot: displaced,
+                    span,
+                });
+            }
+            StorageClass::ImplicitCopy => {
+                output.push(Instruction::WriteField {
+                    view,
+                    field,
+                    value: source,
+                    span,
+                });
+                output.push(Instruction::CloseView { view, span });
+            }
+            StorageClass::EntityFlow | StorageClass::Error => {
+                unreachable!("verified entity field has executable storage")
+            }
+        }
     }
 
     fn new_view(&mut self) -> ViewId {

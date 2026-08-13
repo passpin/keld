@@ -93,3 +93,27 @@ fn inline_and_heap_text_use_the_same_home_cleanup_rules() {
 
     assert_eq!(trace.text_markers(), vec![(26, b'a'), (1, b'a')]);
 }
+
+#[test]
+fn entity_field_replacement_cleans_displaced_then_installed_text() {
+    let trace = trace_text_for_test(
+        "entity Holder { value: Text }\nfn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0; } }\n",
+    )
+    .expect("managed entity field replacement executes");
+
+    assert_eq!(trace.text_markers(), vec![(3, b'o'), (3, b'n')]);
+}
+
+#[test]
+fn nested_entity_field_replacement_preserves_recursive_reverse_cleanup() {
+    let trace = trace_text_for_test(
+        "entity Holder { values: List[Text] }\nfn main() -> Int { lifecycle level { let old: List[Text] = List(); old.push(\"a\"); old.push(\"b\"); let holder = Holder(values: take old); let new: List[Text] = List(); new.push(\"c\"); new.push(\"d\"); holder.values = take new; return 0; } }\n",
+    )
+    .expect("nested managed entity field replacement executes");
+
+    assert_eq!(trace.list_indices(), vec![1, 0, 1, 0]);
+    assert_eq!(
+        trace.text_markers(),
+        vec![(1, b'b'), (1, b'a'), (1, b'd'), (1, b'c')]
+    );
+}

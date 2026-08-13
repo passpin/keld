@@ -1,5 +1,5 @@
 use keld_ir::{Instruction, Terminator, ViewMode, lower, validate};
-use keld_lifecycle::verify_text_for_test;
+use keld_storage::verify_text_for_test;
 
 #[test]
 fn entity_fields_are_lowered_to_closed_access_windows() {
@@ -99,5 +99,75 @@ fn resolved_link_edges_and_phi_inputs_validate_as_edge_definitions() {
             .flat_map(|function| &function.blocks)
             .flat_map(|block| &block.instructions)
             .any(|instruction| matches!(instruction, Instruction::Phi { .. }))
+    );
+}
+
+#[test]
+fn managed_entity_field_replacement_is_a_closed_non_failing_transaction() {
+    let verified = verify_text_for_test(
+        "entity Holder {\nvalue: Text\n}\nfn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0; } }\n",
+    )
+    .module
+    .expect("program must verify");
+    let module = lower(&verified);
+    let instructions = &module.functions[0].blocks[0].instructions;
+    let (replace_index, view, source, displaced) = instructions
+        .iter()
+        .enumerate()
+        .find_map(|(index, instruction)| match instruction {
+            Instruction::ReplaceField {
+                view,
+                source,
+                displaced,
+                ..
+            } => Some((index, *view, *source, *displaced)),
+            _ => None,
+        })
+        .expect("managed field replacement lowers explicitly");
+
+    assert!(instructions[..replace_index - 1].iter().any(
+        |instruction| matches!(instruction, Instruction::ConstText { dst, .. } if *dst == source)
+    ));
+    assert!(matches!(
+        instructions[replace_index - 1],
+        Instruction::OpenView {
+            view: open,
+            mode: ViewMode::Edit,
+            ..
+        } if open == view
+    ));
+    assert!(matches!(
+        instructions[replace_index + 1],
+        Instruction::CloseView { view: close, .. } if close == view
+    ));
+    assert!(matches!(
+        instructions[replace_index + 2],
+        Instruction::DropSlot { slot, .. } if slot == displaced
+    ));
+    assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
+}
+
+#[test]
+fn plain_entity_field_assignment_keeps_the_write_instruction() {
+    let verified = verify_text_for_test(
+        "entity Holder {\nvalue: Int\n}\nfn main() -> Int { lifecycle level { let holder = Holder(value: 1); holder.value = 2; return holder.value; } }\n",
+    )
+    .module
+    .expect("program must verify");
+    let module = lower(&verified);
+
+    assert!(
+        module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction, Instruction::WriteField { .. }))
+    );
+    assert!(
+        !module.functions[0]
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(instruction, Instruction::ReplaceField { .. }))
     );
 }

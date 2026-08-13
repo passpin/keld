@@ -326,10 +326,14 @@ fn replace_first_allocated_field_with_loan(module: &mut Module) {
 fn replace_first_field_write_value_with_loan(module: &mut Module) {
     for function in &mut module.functions {
         for block in &mut function.blocks {
-            if let Some(Instruction::WriteField { value, .. }) = block
+            if let Some(value) = block
                 .instructions
                 .iter()
-                .find(|instruction| matches!(instruction, Instruction::WriteField { .. }))
+                .find_map(|instruction| match instruction {
+                    Instruction::WriteField { value, .. } => Some(*value),
+                    Instruction::ReplaceField { source, .. } => Some(*source),
+                    _ => None,
+                })
                 && matches!(
                     function.register_storage.get(value.0 as usize),
                     Some(RegisterStorage::Home { .. })
@@ -341,6 +345,86 @@ fn replace_first_field_write_value_with_loan(module: &mut Module) {
         }
     }
     panic!("compiler-produced field write with an owned value exists");
+}
+
+fn force_managed_entity_write_instruction(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            for instruction in &mut block.instructions {
+                match instruction.clone() {
+                    Instruction::WriteField { .. } => return,
+                    Instruction::ReplaceField {
+                        view,
+                        field,
+                        source,
+                        span,
+                        ..
+                    } => {
+                        *instruction = Instruction::WriteField {
+                            view,
+                            field,
+                            value: source,
+                            span,
+                        };
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    panic!("compiler-produced managed entity field update exists");
+}
+
+fn mismatch_entity_field_replacement_type(module: &mut Module, source_mismatch: bool) {
+    for function in &mut module.functions {
+        for block_index in 0..function.blocks.len() {
+            for instruction_index in 0..function.blocks[block_index].instructions.len() {
+                let instruction =
+                    function.blocks[block_index].instructions[instruction_index].clone();
+                let (view, field, source, existing_displaced, span) = match instruction {
+                    Instruction::WriteField {
+                        view,
+                        field,
+                        value,
+                        span,
+                    } => (view, field, value, None, span),
+                    Instruction::ReplaceField {
+                        view,
+                        field,
+                        source,
+                        displaced,
+                        span,
+                    } => (view, field, source, Some(displaced), span),
+                    _ => continue,
+                };
+                let displaced = existing_displaced.unwrap_or_else(|| {
+                    let register = keld_ir::Register(
+                        u32::try_from(function.register_types.len())
+                            .expect("register count fits in u32"),
+                    );
+                    function.register_types.push(IrType::Text);
+                    function.register_storage.push(RegisterStorage::DropSlot);
+                    register
+                });
+                if source_mismatch {
+                    function.register_types[source.0 as usize] = IrType::Int;
+                } else {
+                    function.register_types[displaced.0 as usize] = IrType::Int;
+                }
+                function.blocks[block_index].instructions[instruction_index] =
+                    Instruction::ReplaceField {
+                        view,
+                        field,
+                        source,
+                        displaced,
+                        span,
+                    };
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced managed entity field update exists");
 }
 
 fn replace_first_place_replacement_source_with_loan(module: &mut Module) {
@@ -697,6 +781,34 @@ fn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder
     );
     replace_first_field_write_value_with_loan(&mut module);
     assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn managed_entity_fields_must_not_use_write_field_ir() {
+    let mut module = lower_ok(
+        "entity Holder { value: Text }\nfn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0; } }\n",
+    );
+    force_managed_entity_write_instruction(&mut module);
+
+    assert_ir_error(&module, "managed entity field requires ReplaceField");
+}
+
+#[test]
+fn entity_field_replacement_registers_must_match_the_selected_field() {
+    let source = "entity Holder { value: Text }\nfn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0; } }\n";
+    let mut wrong_source = lower_ok(source);
+    mismatch_entity_field_replacement_type(&mut wrong_source, true);
+    assert_ir_error(
+        &wrong_source,
+        "field replacement source type does not match the selected field",
+    );
+
+    let mut wrong_displaced = lower_ok(source);
+    mismatch_entity_field_replacement_type(&mut wrong_displaced, false);
+    assert_ir_error(
+        &wrong_displaced,
+        "field replacement displaced type does not match the selected field",
+    );
 }
 
 #[test]

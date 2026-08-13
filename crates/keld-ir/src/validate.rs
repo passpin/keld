@@ -759,7 +759,11 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             return;
         }
         let span = use_contract_span(instruction_span(instruction));
+        let provenance_only_call_sources = self.provenance_only_call_source_bases(instruction);
         for register in instruction_uses(instruction) {
+            if provenance_only_call_sources.contains(&register) {
+                continue;
+            }
             self.require_live_storage_use(
                 register,
                 state,
@@ -767,6 +771,47 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 "managed operand must be a live Home",
             );
         }
+    }
+
+    fn provenance_only_call_source_bases(&self, instruction: &Instruction) -> BTreeSet<Register> {
+        let Instruction::Call {
+            arguments,
+            argument_sources,
+            ..
+        } = instruction
+        else {
+            return BTreeSet::new();
+        };
+        let is_provenance_only = |parameter: &keld_semantics::ParameterIndex,
+                                  source: &ArgumentSource| {
+            let argument = arguments
+                .iter()
+                .find_map(|(candidate, argument)| (candidate == parameter).then_some(argument));
+            source.projections.is_empty()
+                && argument.is_some_and(|argument| {
+                    matches!(
+                        self.register_storage(*argument),
+                        Some(RegisterStorage::Home { .. })
+                    )
+                })
+                && argument != Some(&source.base)
+        };
+        argument_sources
+            .iter()
+            .filter_map(|(parameter, source)| {
+                let source = source.as_ref()?;
+                (is_provenance_only(parameter, source)
+                    && !arguments
+                        .iter()
+                        .any(|(_, argument)| *argument == source.base)
+                    && !argument_sources.iter().any(|(other_parameter, other)| {
+                        other.as_ref().is_some_and(|other| {
+                            other.base == source.base && !is_provenance_only(other_parameter, other)
+                        })
+                    }))
+                .then_some(source.base)
+            })
+            .collect()
     }
 
     fn validate_live_terminator_uses(
@@ -1216,6 +1261,10 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                         span,
                         "field replacement requires an open edit view",
                     );
+                }
+                if matches!(role(*source), Some(RegisterStorage::Loan)) {
+                    self.sink
+                        .error(STORAGE_ERROR, span, "loan register used as an owned source");
                 }
                 let source_ok = require_role(
                     self.sink,
@@ -1757,10 +1806,47 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 }
             }
             Instruction::ReplaceField {
-                source, displaced, ..
+                view,
+                field,
+                source,
+                displaced,
+                ..
             } => {
-                self.check_register(*source, span);
-                self.expect_same_type(*source, *displaced, span);
+                let Some((mode, definition)) = views.get(view).copied() else {
+                    self.sink.error(
+                        VIEW_ERROR,
+                        span,
+                        "field replacement uses an unknown field view",
+                    );
+                    self.check_register(*source, span);
+                    self.check_register(*displaced, span);
+                    return;
+                };
+                if mode != ViewMode::Edit {
+                    self.sink
+                        .error(VIEW_ERROR, span, "field replacement requires an edit view");
+                }
+                if let Some(field_type) = self.field_type(definition, *field, span).cloned() {
+                    if !is_managed_type(self.module, &field_type) {
+                        self.sink.error(
+                            STORAGE_ERROR,
+                            span,
+                            "ReplaceField requires a managed entity field",
+                        );
+                    }
+                    self.expect_field_replacement_type(
+                        *source,
+                        &field_type,
+                        span,
+                        "field replacement source type does not match the selected field",
+                    );
+                    self.expect_field_replacement_type(
+                        *displaced,
+                        &field_type,
+                        span,
+                        "field replacement displaced type does not match the selected field",
+                    );
+                }
             }
             _ => self.validate_effect_instruction(instruction, views, active_lifecycles),
         }
@@ -2060,6 +2146,25 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
         if let Some(field_type) = self.field_type(*definition, field, span).cloned() {
             self.expect_type(value, &field_type, span);
+            if is_managed_type(self.module, &field_type) {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    span,
+                    "managed entity field requires ReplaceField",
+                );
+            }
+        }
+    }
+
+    fn expect_field_replacement_type(
+        &mut self,
+        register: Register,
+        expected: &IrType,
+        span: Span,
+        message: &'static str,
+    ) {
+        if self.register_type(register, span) != Some(expected) {
+            self.sink.error(STORAGE_ERROR, span, message);
         }
     }
 
