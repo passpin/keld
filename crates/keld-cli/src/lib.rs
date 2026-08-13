@@ -5,7 +5,7 @@ mod render;
 pub use driver::{Compilation, DriverFailure, check_source, compile_source, run_source};
 
 use args::{Command, USAGE, parse_args};
-use keld_interpreter::Value;
+use keld_interpreter::ValueKind;
 use std::ffi::OsString;
 use std::io::Write;
 
@@ -57,7 +57,7 @@ fn execute_command(command: &Command, stdout: &mut impl Write, stderr: &mut impl
         }
         Command::Run(_) => match run_source(&path, bytes) {
             Ok(result) => {
-                if let Value::Int(value) = result.value {
+                if let ValueKind::Int(value) = result.value.kind() {
                     let _ = writeln!(stdout, "{value}");
                     0
                 } else {
