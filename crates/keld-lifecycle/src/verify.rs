@@ -1,5 +1,6 @@
 use crate::diagnostics::{DiagnosticSink, lifecycle_diagnostic};
 use crate::effects::{FunctionSummary, ReturnProvenance};
+use crate::facts::EntityOperationFacts;
 use crate::provenance::{AbstractState, FailureKind, Origin, RefValue};
 use crate::{LifecycleFact, ProofId, ProvenanceId, RefState};
 use keld_flow::{
@@ -22,6 +23,21 @@ pub struct VerifiedFlowModule {
     pub flow: FlowModule,
     pub summaries: Vec<FunctionSummary>,
     pub proofs: Vec<ProofAnnotation>,
+    entity_facts: Vec<BTreeMap<(BlockId, u32), EntityOperationFacts>>,
+}
+
+impl VerifiedFlowModule {
+    #[must_use]
+    pub fn entity_facts_at(
+        &self,
+        function: FunctionId,
+        block: BlockId,
+        operation_index: u32,
+    ) -> Option<&EntityOperationFacts> {
+        self.entity_facts
+            .get(function.0 as usize)?
+            .get(&(block, operation_index))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +52,7 @@ pub fn verify(flow: FlowModule) -> Verification {
     let mut sink = DiagnosticSink::default();
     validate_persistent_fields(&flow, &mut sink);
     let mut proofs = Vec::new();
+    let mut entity_facts = vec![BTreeMap::new(); flow.functions.len()];
 
     for function in &flow.functions {
         let outcome = analyze_function(&flow, function, &summaries, true);
@@ -49,6 +66,7 @@ pub fn verify(flow: FlowModule) -> Verification {
             sink.push(diagnostic);
         }
         proofs.extend(outcome.proofs);
+        entity_facts[function.id.0 as usize] = outcome.entity_facts;
     }
 
     let diagnostics = sink.finish();
@@ -56,6 +74,7 @@ pub fn verify(flow: FlowModule) -> Verification {
         flow,
         summaries,
         proofs,
+        entity_facts,
     });
     Verification {
         module,
@@ -87,6 +106,7 @@ struct AnalysisOutcome {
     inference: Inference,
     diagnostics: Vec<Diagnostic>,
     proofs: Vec<ProofAnnotation>,
+    entity_facts: BTreeMap<(BlockId, u32), EntityOperationFacts>,
 }
 
 #[derive(Clone)]
@@ -153,12 +173,14 @@ fn analyze_function(
         proofs: Vec::new(),
         inference: Inference::default(),
         next_proof: 0,
+        entity_facts: BTreeMap::new(),
     };
     analyzer.run();
     AnalysisOutcome {
         inference: analyzer.inference,
         diagnostics: analyzer.sink.finish(),
         proofs: analyzer.proofs,
+        entity_facts: analyzer.entity_facts,
     }
 }
 
@@ -172,6 +194,7 @@ struct Analyzer<'module> {
     proofs: Vec<ProofAnnotation>,
     inference: Inference,
     next_proof: u32,
+    entity_facts: BTreeMap<(BlockId, u32), EntityOperationFacts>,
 }
 
 impl Analyzer<'_> {
@@ -201,12 +224,14 @@ impl Analyzer<'_> {
             let block = &self.function.blocks[block_id.0 as usize];
             let mut state = AbstractState::join(states, self.function.span);
             for (index, operation) in block.operations.iter().enumerate() {
-                self.operation(
-                    block_id,
-                    u32::try_from(index).expect("flow operation index fits in u32"),
-                    operation,
-                    &mut state,
-                );
+                let index = u32::try_from(index).expect("flow operation index fits in u32");
+                if self.diagnose {
+                    let previous = self
+                        .entity_facts
+                        .insert((block_id, index), EntityOperationFacts::project(&state));
+                    debug_assert!(previous.is_none(), "operation facts are recorded once");
+                }
+                self.operation(block_id, index, operation, &mut state);
             }
             for (successor, successor_state) in self.terminator(block_id, &block.terminator, state)
             {
