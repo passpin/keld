@@ -5,11 +5,11 @@ use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFa
 use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
-use crate::value::{CopyAllocation, EntityPayload, Value, try_copy_value};
+use crate::value::{CopyAllocation, EntityPayload, Value, ValueKind, try_copy_value};
 use crate::{AllocationController, ReserveFailure};
 use keld_ir::{
-    ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, Module,
-    Receiver, Register, Terminator, ViewMode,
+    ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, IrType,
+    Module, Receiver, Register, Terminator, ViewMode,
 };
 use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
@@ -122,7 +122,15 @@ impl<'module> Interpreter<'module> {
             .get(self.module.main.0 as usize)
             .ok_or_else(|| internal("validated main function is missing"))?;
         let root = self.store.root_lifecycle();
-        let frame = build_frame(main, Vec::new(), Vec::new(), root, None, main.span)?;
+        let frame = build_frame(
+            self.module,
+            main,
+            Vec::new(),
+            Vec::new(),
+            root,
+            None,
+            main.span,
+        )?;
         self.frames.push(frame);
         enter_block(
             self.module,
@@ -296,20 +304,21 @@ fn execute_instruction(
     let span = instruction_span(instruction);
     match instruction {
         Instruction::ConstInt { dst, value, .. } => {
-            set_register(frames, *dst, Value::Int(*value))?;
+            set_register(module, frames, *dst, Value::Int(*value))?;
         }
         Instruction::ConstBool { dst, value, .. } => {
-            set_register(frames, *dst, Value::Bool(*value))?;
+            set_register(module, frames, *dst, Value::Bool(*value))?;
         }
         Instruction::ConstText { dst, value, .. } => {
             set_register(
+                module,
                 frames,
                 *dst,
                 Value::Text(RuntimeText::from_string(value.clone())),
             )?;
         }
         Instruction::ConstNoneLink { dst, .. } => {
-            set_register(frames, *dst, Value::Link(None))?;
+            set_register(module, frames, *dst, Value::Link(None))?;
         }
         Instruction::Copy { dst, src, .. } => {
             if is_loan_register(module, frames, *dst) {
@@ -323,30 +332,30 @@ fn execute_instruction(
                 let value = with_register_value(module, store, frames, *src, span, |value| {
                     structural_copy(value, span, controls)
                 })?;
-                set_register(frames, *dst, value)?;
+                set_register(module, frames, *dst, value)?;
             }
         }
         Instruction::Take { dst, src, .. } => {
             let value = take_register(frames, *src)?;
-            set_register(frames, *dst, value)?;
+            set_register(module, frames, *dst, value)?;
         }
         Instruction::ListNew { dst, .. } => {
-            set_register(frames, *dst, Value::List(crate::RuntimeList::new()))?;
+            set_register(module, frames, *dst, Value::List(crate::RuntimeList::new()))?;
         }
         Instruction::ListLength { dst, list, .. } => {
             let length = with_register_value(module, store, frames, *list, span, |value| {
-                let Value::List(elements) = value else {
+                let ValueKind::List(elements) = value.kind() else {
                     return Err(internal("validated list length received a non-list"));
                 };
                 i64::try_from(elements.length())
                     .map_err(|_| internal("validated List length exceeds Int"))
             })?;
-            set_register(frames, *dst, Value::Int(length))?;
+            set_register(module, frames, *dst, Value::Int(length))?;
         }
         Instruction::ListPush { list, value, .. } => {
             let value = take_argument(module, store, frames, *value, span, controls)?;
             with_register_mut(module, store, frames, *list, span, |list_value| {
-                let Value::List(elements) = list_value else {
+                let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
@@ -359,7 +368,7 @@ fn execute_instruction(
             let value = take_argument(module, store, frames, *value, span, controls)?;
             let place = runtime_place_for_source(frames, source, span)?;
             with_place_mut(module, store, frames, &place, span, |list_value| {
-                let Value::List(elements) = list_value else {
+                let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
@@ -375,7 +384,7 @@ fn execute_instruction(
                 usize::try_from(expect_int(value)?).map_err(|_| bounds_failure(span))
             })?;
             let removed = with_register_mut(module, store, frames, *list, span, |list_value| {
-                let Value::List(elements) = list_value else {
+                let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list remove received a non-list"));
                 };
                 if index >= elements.length() {
@@ -383,7 +392,7 @@ fn execute_instruction(
                 }
                 Ok(elements.remove(index))
             })?;
-            set_register(frames, *dst, removed)?;
+            set_register(module, frames, *dst, removed)?;
         }
         Instruction::ListRemovePlace {
             dst, source, index, ..
@@ -393,7 +402,7 @@ fn execute_instruction(
             })?;
             let place = runtime_place_for_source(frames, source, span)?;
             let removed = with_place_mut(module, store, frames, &place, span, |list_value| {
-                let Value::List(elements) = list_value else {
+                let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list remove received a non-list"));
                 };
                 if index >= elements.length() {
@@ -401,7 +410,7 @@ fn execute_instruction(
                 }
                 Ok(elements.remove(index))
             })?;
-            set_register(frames, *dst, removed)?;
+            set_register(module, frames, *dst, removed)?;
         }
         Instruction::ListIndex {
             dst,
@@ -423,13 +432,13 @@ fn execute_instruction(
                     .map_err(|()| internal("validated indexed loan destination is not empty"))?;
             } else {
                 let value = with_place_value(module, store, frames, &place, span, |list| {
-                    let Value::List(elements) = list else {
+                    let ValueKind::List(elements) = list.kind() else {
                         return Err(internal("validated list index received a non-list"));
                     };
                     let element = elements.get(index).ok_or_else(|| bounds_failure(span))?;
                     structural_copy(element, span, controls)
                 })?;
-                set_register(frames, *dst, value)?;
+                set_register(module, frames, *dst, value)?;
             }
         }
         Instruction::ListGet {
@@ -441,7 +450,7 @@ fn execute_instruction(
             let place = runtime_place_for_receiver(frames, receiver, span)?;
             let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
                 Some(index) => with_place_value(module, store, frames, &place, span, |list| {
-                    let Value::List(elements) = list else {
+                    let ValueKind::List(elements) = list.kind() else {
                         return Err(internal("validated list get received a non-list"));
                     };
                     let element = elements.get(index).ok_or_else(|| {
@@ -451,7 +460,15 @@ fn execute_instruction(
                 })?,
                 None => None,
             };
-            set_register(frames, *dst, Value::Optional(value))?;
+            let expected = register_type(module, frames, *dst)?;
+            let value = match value {
+                Some(value) => value
+                    .into_optional_some(module, optional_inner(expected)?)
+                    .map_err(|_| internal("validated list get produced an invalid optional"))?,
+                None => Value::optional_none(module, expected)
+                    .map_err(|_| internal("validated list get destination is not optional"))?,
+            };
+            set_register(module, frames, *dst, value)?;
         }
         Instruction::ListReplace {
             receiver,
@@ -467,7 +484,7 @@ fn execute_instruction(
             };
             let incoming = take_argument(module, store, frames, *value, span, controls)?;
             let previous = with_place_mut(module, store, frames, &place, span, |list| {
-                let Value::List(elements) = list else {
+                let ValueKind::List(elements) = list.kind_mut() else {
                     return Err(internal("validated list replacement received a non-list"));
                 };
                 let destination = elements
@@ -475,7 +492,7 @@ fn execute_instruction(
                     .ok_or_else(|| bounds_failure(span))?;
                 Ok(std::mem::replace(destination, incoming))
             })?;
-            set_register(frames, *displaced, previous)?;
+            set_register(module, frames, *displaced, previous)?;
         }
         Instruction::ListTryRemove {
             dst,
@@ -487,23 +504,31 @@ fn execute_instruction(
             let value = match checked_receiver_index(module, store, frames, &place, *index, span)? {
                 Some(index) => {
                     let removed = with_place_mut(module, store, frames, &place, span, |list| {
-                        let Value::List(elements) = list else {
+                        let ValueKind::List(elements) = list.kind_mut() else {
                             return Err(internal("validated try_remove received a non-list"));
                         };
                         elements.try_remove(index).ok_or_else(|| {
                             internal("validated try_remove index changed during access")
                         })
                     })?;
-                    Some(Box::new(removed))
+                    Some(removed)
                 }
                 None => None,
             };
-            set_register(frames, *dst, Value::Optional(value))?;
+            let expected = register_type(module, frames, *dst)?;
+            let value = match value {
+                Some(value) => value
+                    .into_optional_some(module, optional_inner(expected)?)
+                    .map_err(|_| internal("validated try_remove produced an invalid optional"))?,
+                None => Value::optional_none(module, expected)
+                    .map_err(|_| internal("validated try_remove destination is not optional"))?,
+            };
+            set_register(module, frames, *dst, value)?;
         }
         Instruction::ListClear { receiver, .. } => {
             let place = runtime_place_for_receiver(frames, receiver, span)?;
             let length = with_place_value(module, store, frames, &place, span, |list| {
-                let Value::List(elements) = list else {
+                let ValueKind::List(elements) = list.kind() else {
                     return Err(internal("validated clear received a non-list"));
                 };
                 Ok(elements.length())
@@ -512,7 +537,7 @@ fn execute_instruction(
             while index > 0 {
                 index -= 1;
                 let value = with_place_mut(module, store, frames, &place, span, |list| {
-                    let Value::List(elements) = list else {
+                    let ValueKind::List(elements) = list.kind_mut() else {
                         return Err(internal("validated clear received a non-list"));
                     };
                     elements
@@ -539,7 +564,7 @@ fn execute_instruction(
                 })?;
             let place = runtime_place_for_receiver(frames, receiver, span)?;
             with_place_mut(module, store, frames, &place, span, |list| {
-                let Value::List(elements) = list else {
+                let ValueKind::List(elements) = list.kind_mut() else {
                     return Err(internal("validated reserve received a non-list"));
                 };
                 elements
@@ -559,39 +584,39 @@ fn execute_instruction(
                 })?;
             let place = runtime_place_for_receiver(frames, receiver, span)?;
             let success = with_place_mut(module, store, frames, &place, span, |list| {
-                let Value::List(elements) = list else {
+                let ValueKind::List(elements) = list.kind_mut() else {
                     return Err(internal("validated try_reserve received a non-list"));
                 };
                 Ok(elements.try_reserve(additional, &mut controls.allocations))
             })?;
-            set_register(frames, *dst, Value::Bool(success))?;
+            set_register(module, frames, *dst, Value::Bool(success))?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
             let length = with_register_value(module, store, frames, *text, span, |value| {
-                let Value::Text(value) = value else {
+                let ValueKind::Text(value) = value.kind() else {
                     return Err(internal("validated text byte length received a non-text"));
                 };
                 i64::try_from(value.byte_length())
                     .map_err(|_| internal("validated Text length exceeds Int"))
             })?;
-            set_register(frames, *dst, Value::Int(length))?;
+            set_register(module, frames, *dst, Value::Int(length))?;
         }
         Instruction::TextIsEmpty { dst, text, .. } => {
             let is_empty = with_register_value(module, store, frames, *text, span, |value| {
-                let Value::Text(value) = value else {
+                let ValueKind::Text(value) = value.kind() else {
                     return Err(internal("validated text is_empty received a non-text"));
                 };
                 Ok(value.byte_length() == 0)
             })?;
-            set_register(frames, *dst, Value::Bool(is_empty))?;
+            set_register(module, frames, *dst, Value::Bool(is_empty))?;
         }
         Instruction::TextConcat { dst, lhs, rhs, .. } => {
             let value = with_register_value(module, store, frames, *lhs, span, |left| {
-                let Value::Text(left) = left else {
+                let ValueKind::Text(left) = left.kind() else {
                     return Err(internal("validated text concat received a non-text lhs"));
                 };
                 with_register_value(module, store, frames, *rhs, span, |right| {
-                    let Value::Text(right) = right else {
+                    let ValueKind::Text(right) = right.kind() else {
                         return Err(internal("validated text concat received a non-text rhs"));
                     };
                     RuntimeText::concat(left, right)
@@ -599,12 +624,12 @@ fn execute_instruction(
                         .map(Value::Text)
                 })
             })?;
-            set_register(frames, *dst, value)?;
+            set_register(module, frames, *dst, value)?;
         }
         Instruction::CheckedUnaryInt { dst, op, src, .. } => {
             let value = expect_int(frame_value(frames, *src)?)?;
             let result = eval_unary(*op, value).map_err(|fault| numeric_failure(fault, span))?;
-            set_register(frames, *dst, Value::Int(result))?;
+            set_register(module, frames, *dst, Value::Int(result))?;
         }
         Instruction::CheckedBinaryInt {
             dst, op, lhs, rhs, ..
@@ -613,11 +638,11 @@ fn execute_instruction(
             let rhs = expect_int(frame_value(frames, *rhs)?)?;
             let result =
                 eval_binary(*op, lhs, rhs).map_err(|fault| numeric_failure(fault, span))?;
-            set_register(frames, *dst, Value::Int(result))?;
+            set_register(module, frames, *dst, Value::Int(result))?;
         }
         Instruction::Not { dst, src, .. } => {
             let value = expect_bool(frame_value(frames, *src)?)?;
-            set_register(frames, *dst, Value::Bool(!value))?;
+            set_register(module, frames, *dst, Value::Bool(!value))?;
         }
         Instruction::Compare {
             dst, op, lhs, rhs, ..
@@ -627,7 +652,7 @@ fn execute_instruction(
                     compare_values(*op, left, right)
                 })
             })?;
-            set_register(frames, *dst, Value::Bool(result))?;
+            set_register(module, frames, *dst, Value::Bool(result))?;
         }
         Instruction::Phi { .. } => {
             return Err(internal("Phi executed outside block-entry processing"));
@@ -641,12 +666,10 @@ fn execute_instruction(
             let values =
                 materialize_fields(module, store, frames, *definition, fields, span, controls)?;
             set_register(
+                module,
                 frames,
                 *dst,
-                Value::Struct {
-                    definition: *definition,
-                    fields: values,
-                },
+                Value::struct_value(*definition, values),
             )?;
         }
         Instruction::ReadStructField {
@@ -662,7 +685,7 @@ fn execute_instruction(
                     .map_err(|()| internal("validated struct loan destination is not empty"))?;
             } else {
                 let value = with_register_value(module, store, frames, *base, span, |base| {
-                    let Value::Struct { definition, fields } = base else {
+                    let ValueKind::Struct { definition, fields } = base.kind() else {
                         return Err(internal("validated struct read received a non-struct"));
                     };
                     let field_index = field_index(module, *definition, *field)?;
@@ -671,7 +694,7 @@ fn execute_instruction(
                         .ok_or_else(|| internal("struct payload does not match its definition"))?;
                     structural_copy(value, span, controls)
                 })?;
-                set_register(frames, *dst, value)?;
+                set_register(module, frames, *dst, value)?;
             }
         }
         Instruction::InstallHome {
@@ -682,9 +705,9 @@ fn execute_instruction(
         } => {
             let incoming = take_register(frames, *source)?;
             let previous = take_register(frames, *destination).ok();
-            set_register(frames, *destination, incoming)?;
+            set_register(module, frames, *destination, incoming)?;
             if let Some(previous) = previous {
-                set_register(frames, *displaced, previous)?;
+                set_register(module, frames, *displaced, previous)?;
             }
         }
         Instruction::MoveHome {
@@ -693,7 +716,7 @@ fn execute_instruction(
             ..
         } => {
             let value = take_register(frames, *source)?;
-            set_register(frames, *destination, value)?;
+            set_register(module, frames, *destination, value)?;
         }
         Instruction::DropHome { home, .. } => {
             let value = take_register(frames, *home)?;
@@ -753,7 +776,7 @@ fn execute_instruction(
             let previous = take_source(module, store, frames, destination, span).ok();
             write_source(module, store, frames, destination, incoming, span)?;
             if let Some(previous) = previous {
-                set_register(frames, *displaced, previous)?;
+                set_register(module, frames, *displaced, previous)?;
             }
         }
         Instruction::ReplaceField {
@@ -778,7 +801,7 @@ fn execute_instruction(
                     Ok::<Value, InterpreterFailure>(std::mem::replace(destination, incoming))
                 })
                 .map_err(|error| store_failure(error, span))??;
-            set_register(frames, *displaced, previous)?;
+            set_register(module, frames, *displaced, previous)?;
         }
         _ => {
             return execute_effect_instruction(
@@ -812,7 +835,7 @@ fn execute_effect_instruction(
             let lifecycle = store
                 .begin_lifecycle(parent)
                 .map_err(|error| store_failure(error, span))?;
-            set_register(frames, *dst, Value::Lifecycle(lifecycle))?;
+            set_register(module, frames, *dst, Value::Lifecycle(lifecycle))?;
         }
         Instruction::EndLifecycle { lifecycle, .. } => {
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
@@ -842,14 +865,14 @@ fn execute_effect_instruction(
                     },
                 )
                 .map_err(|error| store_failure(error, span))?;
-            set_register(frames, *dst, Value::Entity(entity))?;
+            set_register(module, frames, *dst, Value::Entity(entity))?;
         }
         Instruction::EntityToLink { dst, entity, .. } => {
             let entity = expect_entity(frame_value(frames, *entity)?)?;
             let link = store
                 .link(entity)
                 .map_err(|error| store_failure(error, span))?;
-            set_register(frames, *dst, Value::Link(Some(link)))?;
+            set_register(module, frames, *dst, Value::Link(Some(link)))?;
         }
         _ => {
             return execute_view_instruction(
@@ -924,7 +947,7 @@ fn execute_view_instruction(
                         structural_copy(field, span, controls)
                     })
                     .map_err(|error| store_failure(error, span))??;
-                set_register(frames, *dst, value)?;
+                set_register(module, frames, *dst, value)?;
             }
         }
         Instruction::WriteField {
@@ -1127,7 +1150,15 @@ fn execute_call(
     }
     let lifecycle = expect_lifecycle(frame_value(frames, current_lifecycle)?)?;
     advance(frames)?;
-    let frame = build_frame(callee, materialized, loans, lifecycle, destination, span)?;
+    let frame = build_frame(
+        module,
+        callee,
+        materialized,
+        loans,
+        lifecycle,
+        destination,
+        span,
+    )?;
     frames
         .try_reserve(1)
         .map_err(|_| allocation_failure(span))?;
@@ -1136,6 +1167,7 @@ fn execute_call(
 }
 
 fn build_frame(
+    module: &Module,
     function: &Function,
     arguments: Vec<(ParameterIndex, Value)>,
     loans: Vec<(Register, RuntimePlace)>,
@@ -1147,6 +1179,7 @@ fn build_frame(
         .map_err(|CopyAllocation| allocation_failure(span))?;
     frame
         .set(
+            module,
             function.current_lifecycle,
             Value::Lifecycle(current_lifecycle),
         )
@@ -1158,7 +1191,7 @@ fn build_frame(
             .copied()
             .ok_or_else(|| internal("validated call parameter is missing"))?;
         frame
-            .set(register, value)
+            .set(module, register, value)
             .map_err(|()| internal("parameter register is outside the frame"))?;
     }
     for (register, place) in loans {
@@ -1221,7 +1254,7 @@ fn execute_terminator(
         } => {
             let link = expect_link(frame_value(frames, *link)?)?;
             if let Some(entity) = link.and_then(|link| store.resolve(link)) {
-                set_register(frames, *live_value, Value::Entity(entity))?;
+                set_register(module, frames, *live_value, Value::Entity(entity))?;
                 enter_block(
                     module,
                     store,
@@ -1244,7 +1277,7 @@ fn execute_terminator(
             }
             Ok(None)
         }
-        Terminator::Return(register) => return_from_frame(frames, *register),
+        Terminator::Return(register) => return_from_frame(module, frames, *register),
         Terminator::Fault { kind, span } => Err(InterpreterFailure::Runtime(RuntimeFault {
             kind: match kind {
                 FaultKind::Arithmetic => RuntimeFaultKind::Arithmetic,
@@ -1260,9 +1293,19 @@ fn execute_terminator(
 }
 
 fn return_from_frame(
+    module: &Module,
     frames: &mut Vec<Frame>,
     register: Option<Register>,
 ) -> Result<Option<Value>, InterpreterFailure> {
+    let function_id = frames
+        .last()
+        .ok_or_else(|| internal("return has no active frame"))?
+        .function;
+    let return_type = &module
+        .functions
+        .get(function_id.0 as usize)
+        .ok_or_else(|| internal("return function is missing"))?
+        .return_type;
     let frame = frames
         .last_mut()
         .ok_or_else(|| internal("return has no active frame"))?;
@@ -1273,13 +1316,16 @@ fn return_from_frame(
     } else {
         Value::Unit
     };
+    value
+        .validate_for_type(module, return_type)
+        .map_err(|_| internal("runtime return value does not match the validated return type"))?;
     let destination = frame.return_destination;
     frames.pop();
     if frames.last().is_none() {
         return Ok(Some(value));
     }
     if let Some(destination) = destination {
-        set_register(frames, destination, value)?;
+        set_register(module, frames, destination, value)?;
     }
     Ok(None)
 }
@@ -1347,7 +1393,7 @@ fn enter_block(
     frame.instruction = phi_count;
     for (destination, value) in pending_values {
         frame
-            .set(destination, value)
+            .set(module, destination, value)
             .map_err(|()| internal("Phi destination is outside the frame"))?;
     }
     for (destination, place) in pending_loans {
@@ -1460,7 +1506,7 @@ fn checked_receiver_index(
         expect_int(value)
     })?;
     let length = with_place_value(module, store, frames, place, span, |value| {
-        let Value::List(elements) = value else {
+        let ValueKind::List(elements) = value.kind() else {
             return Err(internal("validated indexed receiver is not a List"));
         };
         Ok(elements.length())
@@ -1492,8 +1538,12 @@ fn runtime_place_for_source(
     let mut place = if source.projections.is_empty() {
         runtime_place_for_register(frames, source.base)
     } else {
-        match frames.last().and_then(|frame| frame.value(source.base)) {
-            Some(Value::Entity(entity)) => RuntimePlace {
+        match frames
+            .last()
+            .and_then(|frame| frame.value(source.base))
+            .map(Value::kind)
+        {
+            Some(ValueKind::Entity(entity)) => RuntimePlace {
                 root: RuntimePlaceRoot::Entity { entity: *entity },
                 projections: Vec::new(),
             },
@@ -1628,7 +1678,7 @@ fn access_projected<R>(
     for projection in projections {
         value = match projection {
             RuntimeProjection::Field(field) => {
-                let Value::Struct { definition, fields } = value else {
+                let ValueKind::Struct { definition, fields } = value.kind() else {
                     return Err(internal("loan field projection requires a struct"));
                 };
                 let index = field_index(module, *definition, *field)?;
@@ -1637,7 +1687,7 @@ fn access_projected<R>(
                     .ok_or_else(|| internal("struct payload layout is invalid"))?
             }
             RuntimeProjection::Index(index) => {
-                let Value::List(elements) = value else {
+                let ValueKind::List(elements) = value.kind() else {
                     return Err(internal("loan index projection requires a list"));
                 };
                 elements.get(*index).ok_or_else(|| bounds_failure(span))?
@@ -1657,7 +1707,7 @@ fn access_projected_mut<R>(
     for projection in projections {
         value = match projection {
             RuntimeProjection::Field(field) => {
-                let Value::Struct { definition, fields } = value else {
+                let ValueKind::Struct { definition, fields } = value.kind_mut() else {
                     return Err(internal("loan field projection requires a struct"));
                 };
                 let index = field_index(module, *definition, *field)?;
@@ -1666,7 +1716,7 @@ fn access_projected_mut<R>(
                     .ok_or_else(|| internal("struct payload layout is invalid"))?
             }
             RuntimeProjection::Index(index) => {
-                let Value::List(elements) = value else {
+                let ValueKind::List(elements) = value.kind_mut() else {
                     return Err(internal("loan index projection requires a list"));
                 };
                 elements
@@ -1707,6 +1757,7 @@ fn take_argument(
 }
 
 fn set_register(
+    module: &Module,
     frames: &mut [Frame],
     register: Register,
     value: Value,
@@ -1714,8 +1765,30 @@ fn set_register(
     frames
         .last_mut()
         .ok_or_else(|| internal("register write has no active frame"))?
-        .set(register, value)
-        .map_err(|()| internal("validated destination is outside the frame"))
+        .set(module, register, value)
+        .map_err(|()| internal("runtime value does not match its validated destination"))
+}
+
+fn register_type<'module>(
+    module: &'module Module,
+    frames: &[Frame],
+    register: Register,
+) -> Result<&'module IrType, InterpreterFailure> {
+    let function = frames
+        .last()
+        .and_then(|frame| module.functions.get(frame.function.0 as usize))
+        .ok_or_else(|| internal("register type lookup has no active function"))?;
+    function
+        .register_types
+        .get(register.0 as usize)
+        .ok_or_else(|| internal("validated register type is missing"))
+}
+
+fn optional_inner(ty: &IrType) -> Result<&IrType, InterpreterFailure> {
+    let IrType::Optional(inner) = ty else {
+        return Err(internal("validated optional destination is not Optional"));
+    };
+    Ok(inner)
 }
 
 fn take_register(frames: &mut [Frame], register: Register) -> Result<Value, InterpreterFailure> {
@@ -1774,8 +1847,8 @@ fn advance(frames: &mut [Frame]) -> Result<(), InterpreterFailure> {
 }
 
 fn expect_int(value: &Value) -> Result<i64, InterpreterFailure> {
-    match value {
-        Value::Int(value) => Ok(*value),
+    match value.kind() {
+        ValueKind::Int(value) => Ok(*value),
         _ => Err(internal(
             "validated Int register contains another value kind",
         )),
@@ -1783,8 +1856,8 @@ fn expect_int(value: &Value) -> Result<i64, InterpreterFailure> {
 }
 
 fn expect_bool(value: &Value) -> Result<bool, InterpreterFailure> {
-    match value {
-        Value::Bool(value) => Ok(*value),
+    match value.kind() {
+        ValueKind::Bool(value) => Ok(*value),
         _ => Err(internal(
             "validated Bool register contains another value kind",
         )),
@@ -1792,8 +1865,8 @@ fn expect_bool(value: &Value) -> Result<bool, InterpreterFailure> {
 }
 
 fn expect_entity(value: &Value) -> Result<keld_runtime::EntityId, InterpreterFailure> {
-    match value {
-        Value::Entity(entity) => Ok(*entity),
+    match value.kind() {
+        ValueKind::Entity(entity) => Ok(*entity),
         _ => Err(internal(
             "validated entity register contains another value kind",
         )),
@@ -1801,8 +1874,8 @@ fn expect_entity(value: &Value) -> Result<keld_runtime::EntityId, InterpreterFai
 }
 
 fn expect_link(value: &Value) -> Result<Option<keld_runtime::Link>, InterpreterFailure> {
-    match value {
-        Value::Link(link) => Ok(*link),
+    match value.kind() {
+        ValueKind::Link(link) => Ok(*link),
         _ => Err(internal(
             "validated link register contains another value kind",
         )),
@@ -1810,8 +1883,8 @@ fn expect_link(value: &Value) -> Result<Option<keld_runtime::Link>, InterpreterF
 }
 
 fn expect_lifecycle(value: &Value) -> Result<RuntimeLifecycleId, InterpreterFailure> {
-    match value {
-        Value::Lifecycle(lifecycle) => Ok(*lifecycle),
+    match value.kind() {
+        ValueKind::Lifecycle(lifecycle) => Ok(*lifecycle),
         _ => Err(internal(
             "validated lifecycle register contains another value kind",
         )),
@@ -1823,11 +1896,11 @@ fn compare_values(
     lhs: &Value,
     rhs: &Value,
 ) -> Result<bool, InterpreterFailure> {
-    let equality = || match (lhs, rhs) {
-        (Value::Int(lhs), Value::Int(rhs)) => Ok(lhs == rhs),
-        (Value::Bool(lhs), Value::Bool(rhs)) => Ok(lhs == rhs),
-        (Value::Text(lhs), Value::Text(rhs)) => Ok(lhs == rhs),
-        (Value::Entity(lhs), Value::Entity(rhs)) => Ok(lhs == rhs),
+    let equality = || match (lhs.kind(), rhs.kind()) {
+        (ValueKind::Int(lhs), ValueKind::Int(rhs)) => Ok(lhs == rhs),
+        (ValueKind::Bool(lhs), ValueKind::Bool(rhs)) => Ok(lhs == rhs),
+        (ValueKind::Text(lhs), ValueKind::Text(rhs)) => Ok(lhs == rhs),
+        (ValueKind::Entity(lhs), ValueKind::Entity(rhs)) => Ok(lhs == rhs),
         _ => Err(internal(
             "validated equality operands have invalid value kinds",
         )),

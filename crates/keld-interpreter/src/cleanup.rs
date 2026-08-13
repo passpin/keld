@@ -1,4 +1,4 @@
-use crate::value::{EntityPayload, Value};
+use crate::value::{EntityPayload, Value, ValueKind};
 use keld_flow::StorageScopeId;
 use keld_ir::{Module, Register};
 use keld_semantics::{DefId, FieldId};
@@ -179,39 +179,32 @@ fn cleanup_work(
         match task {
             CleanupTask::Value { value, path } => {
                 record_path(path, trace.as_deref_mut());
-                match value {
-                    Value::Struct { definition, fields } => {
+                match value.into_kind() {
+                    ValueKind::Struct { definition, fields } => {
                         work.push(CleanupTask::StructFields {
                             definition,
                             fields: fields.into_iter(),
                         });
                     }
-                    Value::List(elements) => {
+                    ValueKind::List(elements) => {
                         work.push(CleanupTask::ListElements {
                             elements: elements.into_elements(),
                         });
                     }
-                    Value::Optional(value) => {
-                        if let Some(value) = value {
-                            work.push(CleanupTask::Value {
-                                value: *value,
-                                path,
-                            });
-                        }
-                    }
-                    Value::Text(text) => record(
+                    ValueKind::Text(text) => record(
                         trace.as_deref_mut(),
                         CleanupEvent::Text {
                             byte_length: text.byte_length(),
                             first_byte: text.as_bytes().first().copied(),
                         },
                     ),
-                    Value::Unit
-                    | Value::Int(_)
-                    | Value::Bool(_)
-                    | Value::Entity(_)
-                    | Value::Link(_)
-                    | Value::Lifecycle(_) => {}
+                    ValueKind::Absent
+                    | ValueKind::Unit
+                    | ValueKind::Int(_)
+                    | ValueKind::Bool(_)
+                    | ValueKind::Entity(_)
+                    | ValueKind::Link(_)
+                    | ValueKind::Lifecycle(_) => {}
                 }
             }
             CleanupTask::StructFields {
@@ -301,8 +294,8 @@ fn declared_field(module: &Module, definition: DefId, index: usize) -> FieldId {
 #[cfg(test)]
 mod tests {
     use super::{CleanupPath, CleanupScratch, CleanupTask, CleanupTrace, cleanup_work};
-    use crate::{RuntimeList, Value};
-    use keld_ir::{Module, Register};
+    use crate::{RuntimeList, RuntimeText, Value};
+    use keld_ir::{IrType, Module, Register};
     use keld_semantics::FunctionId;
 
     #[test]
@@ -349,5 +342,31 @@ mod tests {
 
         assert_eq!(scratch.work.capacity(), capacity);
         assert_eq!(trace.list_indices().len(), 256);
+    }
+
+    #[test]
+    fn nested_optional_envelopes_clean_the_managed_payload_once() {
+        let module = Module {
+            definitions: Vec::new(),
+            functions: Vec::new(),
+            main: FunctionId(0),
+        };
+        let text = IrType::Text;
+        let optional_text = IrType::Optional(Box::new(text.clone()));
+        let value = Value::Text(RuntimeText::from_string("managed".to_owned()))
+            .into_optional_some(&module, &text)
+            .expect("first optional layer")
+            .into_optional_some(&module, &optional_text)
+            .expect("second optional layer");
+        let mut scratch = CleanupScratch::new().expect("cleanup scratch allocates");
+        let mut trace = CleanupTrace::default();
+        scratch.work.push(CleanupTask::Value {
+            value,
+            path: CleanupPath::Home(Register(0)),
+        });
+
+        cleanup_work(&module, &mut scratch.work, Some(&mut trace));
+
+        assert_eq!(trace.text_markers(), vec![(7, b'm')]);
     }
 }

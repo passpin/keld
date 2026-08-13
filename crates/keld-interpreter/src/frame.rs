@@ -2,7 +2,7 @@ use crate::Value;
 use crate::cleanup::ActiveHomeTracker;
 use crate::place::{RegisterSlot, RuntimePlace};
 use keld_flow::StorageScopeId;
-use keld_ir::{Function, IrBlockId, Register, RegisterStorage, ViewId, ViewMode};
+use keld_ir::{Function, IrBlockId, Module, Register, RegisterStorage, ViewId, ViewMode};
 use keld_runtime::EntityId;
 
 #[derive(Clone, Copy)]
@@ -109,7 +109,13 @@ impl Frame {
         }
     }
 
-    pub fn set(&mut self, register: Register, value: Value) -> Result<(), ()> {
+    pub fn set(&mut self, module: &Module, register: Register, value: Value) -> Result<(), ()> {
+        let expected = module
+            .functions
+            .get(self.function.0 as usize)
+            .and_then(|function| function.register_types.get(register.0 as usize))
+            .ok_or(())?;
+        value.validate_for_type(module, expected).map_err(|_| ())?;
         let destination = self.registers.get_mut(register.0 as usize).ok_or(())?;
         let result = match destination {
             RegisterSlot::Empty | RegisterSlot::Owned(_) => {
@@ -205,5 +211,38 @@ impl Frame {
 
     pub fn view(&self, view: ViewId) -> Option<ActiveView> {
         self.views.get(view.0 as usize).copied().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Frame;
+    use crate::{Value, ValueKind};
+    use keld_ir::{IrType, Register, lower};
+
+    #[test]
+    fn register_installation_rejects_a_malformed_optional_envelope() {
+        let verified = keld_storage::verify_text_for_test("fn main() -> Int { return 0 }\n")
+            .module
+            .expect("source verifies");
+        let module = lower(&verified);
+        let function = &module.functions[module.main.0 as usize];
+        let register = function
+            .register_types
+            .iter()
+            .position(|ty| *ty == IrType::Int)
+            .map(|index| Register(u32::try_from(index).expect("test register fits")))
+            .expect("main has an Int register");
+        let mut frame = Frame::new(function, None).expect("frame allocates");
+
+        assert_eq!(
+            frame.set(
+                &module,
+                register,
+                Value::from_parts_for_test(1, ValueKind::Int(0)),
+            ),
+            Err(())
+        );
+        assert_eq!(frame.set(&module, register, Value::Int(0)), Ok(()));
     }
 }

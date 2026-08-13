@@ -8,7 +8,7 @@ pub use instruction::{FaultKind, Instruction, Terminator, ViewMode};
 pub use lower::{VerifiedInput, lower};
 pub use module::{
     ArgumentProjection, ArgumentSource, Function, IrBlock, IrBlockId, IrDefinition,
-    IrDefinitionKind, IrType, Module, Receiver, Register, RegisterStorage, TestModuleBuilder,
-    ViewId,
+    IrDefinitionKind, IrType, Module, OptionalDepthOverflow, Receiver, Register, RegisterStorage,
+    TestModuleBuilder, ViewId,
 };
 pub use validate::validate;

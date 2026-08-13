@@ -58,6 +58,57 @@ pub enum IrType {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OptionalDepthOverflow;
+
+impl IrType {
+    /// Returns the number of surrounding `Optional` layers and their base type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OptionalDepthOverflow`] if the nesting depth cannot be
+    /// represented by the runtime optional envelope.
+    pub fn optional_depth(&self) -> Result<(u32, &Self), OptionalDepthOverflow> {
+        self.optional_depth_from(0)
+    }
+
+    pub(crate) fn optional_depth_from(
+        &self,
+        mut depth: u32,
+    ) -> Result<(u32, &Self), OptionalDepthOverflow> {
+        let mut current = self;
+        while let Self::Optional(inner) = current {
+            depth = depth.checked_add(1).ok_or(OptionalDepthOverflow)?;
+            current = inner;
+        }
+        Ok((depth, current))
+    }
+}
+
+#[cfg(test)]
+mod optional_depth_tests {
+    use super::{IrType, OptionalDepthOverflow};
+
+    #[test]
+    fn optional_depth_reports_checked_overflow() {
+        assert_eq!(
+            IrType::Optional(Box::new(IrType::Int)).optional_depth_from(u32::MAX),
+            Err(OptionalDepthOverflow)
+        );
+    }
+
+    #[test]
+    fn optional_link_is_a_base_type_not_an_envelope_layer() {
+        let ty = IrType::Optional(Box::new(IrType::Link {
+            entity: keld_semantics::DefId(0),
+            optional: true,
+        }));
+        let (depth, base) = ty.optional_depth().expect("depth is representable");
+        assert_eq!(depth, 1);
+        assert!(matches!(base, IrType::Link { optional: true, .. }));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrDefinitionKind {
     Struct,
     Entity,

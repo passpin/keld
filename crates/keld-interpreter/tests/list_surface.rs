@@ -67,10 +67,14 @@ fn get_returns_none_without_fault_and_does_not_change_the_list() {
 }
 
 #[test]
-fn try_remove_invalid_returns_none_and_preserves_length() {
-    let mut list = RuntimeList::from_values(vec![Value::Int(7)]);
+fn try_remove_invalid_returns_none_and_preserves_storage_and_values() {
+    let mut list = RuntimeList::with_capacity_for_test(8);
+    list.push_for_test(Value::Int(7));
+    let capacity = list.capacity_for_test();
     assert_eq!(list.try_remove(1), None);
     assert_eq!(list.length(), 1);
+    assert_eq!(list.capacity_for_test(), capacity);
+    assert_eq!(list.values_for_test(), &[Value::Int(7)]);
 }
 
 #[test]

@@ -90,6 +90,9 @@ fn validate_module_shape(module: &Module, sink: &mut DiagnosticSink) {
 }
 
 fn validate_named_type(module: &Module, ty: &IrType, span: Span, sink: &mut DiagnosticSink) {
+    if !validate_optional_depth_from(ty, 0, span, sink) {
+        return;
+    }
     let (definition, expected_kind) = match ty {
         IrType::Struct(definition) => (*definition, IrDefinitionKind::Struct),
         IrType::Entity(definition)
@@ -112,6 +115,24 @@ fn validate_named_type(module: &Module, ty: &IrType, span: Span, sink: &mut Diag
             span,
             "IR type references an unknown or incompatible definition",
         );
+    }
+}
+
+fn validate_optional_depth_from(
+    ty: &IrType,
+    initial_depth: u32,
+    span: Span,
+    sink: &mut DiagnosticSink,
+) -> bool {
+    if ty.optional_depth_from(initial_depth).is_err() {
+        sink.error(
+            STORAGE_ERROR,
+            span,
+            "Optional nesting exceeds executable runtime depth",
+        );
+        false
+    } else {
+        true
     }
 }
 
@@ -3259,5 +3280,35 @@ fn terminator_span(terminator: &Terminator, fallback: Span) -> Span {
         | Terminator::Branch { .. }
         | Terminator::Return(_)
         | Terminator::Unreachable => fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DiagnosticSink, validate_optional_depth_from};
+    use crate::IrType;
+    use keld_source::{SourceId, Span};
+
+    #[test]
+    fn optional_depth_overflow_is_owned_by_kld9006() {
+        let span = Span::new(SourceId(0), 0, 0).expect("empty test span is valid");
+        let mut sink = DiagnosticSink::default();
+
+        assert!(!validate_optional_depth_from(
+            &IrType::Optional(Box::new(IrType::Int)),
+            u32::MAX,
+            span,
+            &mut sink,
+        ));
+
+        let diagnostics = sink.finish();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code.0, "KLD9006");
+        assert!(
+            diagnostics[0]
+                .primary
+                .message
+                .contains("Optional nesting exceeds executable runtime depth")
+        );
     }
 }
