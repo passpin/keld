@@ -32,9 +32,9 @@ lowered or executed. `check` runs every static stage through IR validation.
 | `keld-syntax` | `SourceText`, then `Lexed` | lossless tokens, immutable syntax tree, typed AST projections | name resolution, types, lifecycle proofs, or recovery by later stages |
 | `keld-semantics` | source plus successful `ParsedFile` | definitions, types, typed HIR, entrypoint contract | CFG scheduling, entity liveness, cleanup, or executable operations |
 | `keld-flow` | `TypedModule` | CFG with explicit evaluation order, locals, and provenance sites | deciding lifecycle safety, runtime storage, or backend layout |
-| `keld-lifecycle` | `FlowModule` | function effects, liveness facts, proof annotations, verified flow | executable instruction selection, slot mutation, or interpretation |
-| `keld-storage` | `VerifiedFlowModule` | `VerifiedStorageModule` with Home/value classifications, call effects, `MaybeLive` flags, transfer/drop actions, and per-exit cleanup actions | entity liveness, runtime mutation, or backend policy |
-| `keld-ir` | `VerifiedStorageModule` | executable IR with explicit move/loan/install/drop and checked List operations, stable textual dump, and validation diagnostics | source recovery, runtime policy, or executing unvalidated modules |
+| `keld-lifecycle` | `FlowModule` | function retirement effects, liveness/proof annotations, immutable per-operation entity provenance and alias facts, verified flow | executable instruction selection, slot mutation, or interpretation |
+| `keld-storage` | `VerifiedFlowModule` | `VerifiedStorageModule` with provenance-backed access paths, Home/value classifications, pending-call effects, `MaybeLive` flags, transfer/drop actions, and per-exit cleanup actions | entity liveness, runtime mutation, or backend policy |
+| `keld-ir` | `VerifiedStorageModule` | executable IR with explicit move/loan/install/drop, transactional entity-field replacement, checked List operations, stable textual dump, and exhaustive role/liveness validation | source recovery, runtime policy, or executing unvalidated modules |
 | `keld-runtime` | opaque branded identities, lifecycle IDs, type IDs, payloads | segmented entity store, weak links, deterministic cleanup | source-language types, IR, diagnostics, or user-visible control flow |
 | `keld-interpreter` | validated executable `Module` | explicit-frame execution result or classified fault | parsing, static recovery, accepting invalid IR, or language extensions |
 | `keld-cli` | OS arguments, selected file bytes | `Compilation`, CLI output, documented exit status | new syntax, type, lifecycle, numeric, or runtime semantics |
@@ -50,7 +50,8 @@ The storage verifier is the sole owner of executable managed-storage decisions:
 ```text
 VerifiedStorageModule
   = verified lifecycle flow
-  + call effects
+  + provenance-backed storage access paths
+  + call effects, including lifecycle retirement summaries
   + Home/value classifications
   + MaybeLive flags
   + per-operation transfer/drop actions
@@ -58,9 +59,19 @@ VerifiedStorageModule
 
 keld-ir
   = explicit move/loan/install/drop
+  + explicit replace/close/drop transactions for managed entity fields
   + explicit checked List operations
   + no unresolved cleanup or alias decision
 ```
+
+`VerifiedFlowModule` carries immutable entity provenance, equivalence,
+proven-distinct, and retirement facts. Storage roots entity-backed access paths
+in those lifecycle facts rather than entity local identity, and applies callee
+mutation and lifecycle retirement summaries while checking pending calls.
+Managed entity-field replacement lowers to an explicit replacement inside a
+closed edit view followed by displaced-value cleanup. IR validation classifies
+every register type, producer role, and owned-value use, so storage role and
+liveness enforcement remains exhaustive as instructions evolve.
 
 Uniform cleanup paths lower to direct reverse-order drops. A hidden per-scope
 order tracker is emitted only for a scope whose successful-initialization order
