@@ -1084,7 +1084,7 @@ fn execute_call(
     destination: Option<Register>,
     function: keld_semantics::FunctionId,
     arguments: &[(ParameterIndex, Register)],
-    argument_sources: &[(ParameterIndex, Option<ArgumentSource>)],
+    _argument_sources: &[(ParameterIndex, Option<ArgumentSource>)],
     current_lifecycle: Register,
     span: Span,
     controls: &mut TestControls,
@@ -1114,21 +1114,7 @@ fn execute_call(
             .copied()
             .ok_or_else(|| internal("validated call parameter is missing"))?;
         if mode == keld_semantics::ParameterMode::Loan {
-            let source = argument_sources
-                .iter()
-                .find(|(candidate, _)| *candidate == *parameter)
-                .and_then(|(_, source)| source.as_ref());
-            let place = if frames
-                .last()
-                .and_then(|frame| frame.loan(*register))
-                .is_some()
-            {
-                runtime_place_for_register(frames, *register)
-            } else if let Some(source) = source {
-                runtime_place_for_source(frames, source, span)?
-            } else {
-                runtime_place_for_register(frames, *register)
-            };
+            let place = runtime_place_for_register(frames, *register);
             loans.push((callee_register, place));
             continue;
         }

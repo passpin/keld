@@ -574,22 +574,42 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         span: Span,
     ) {
         match self.register_storage(register) {
-            Some(RegisterStorage::Home { .. }) if is_managed_type(self.module, ty) => {
-                if state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Empty {
+            Some(RegisterStorage::Home { .. }) => {
+                if is_managed_type(self.module, ty)
+                    && state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Empty
+                {
                     self.sink
                         .error(STORAGE_ERROR, span, "take destination is already live");
                 }
             }
-            Some(
-                RegisterStorage::Home { .. }
-                | RegisterStorage::Trivial
-                | RegisterStorage::EntityFlow,
-            ) => {}
+            Some(RegisterStorage::Trivial | RegisterStorage::EntityFlow)
+                if !is_managed_type(self.module, ty) => {}
+            Some(RegisterStorage::Trivial | RegisterStorage::EntityFlow)
+                if is_managed_type(self.module, ty) =>
+            {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    span,
+                    "managed take destination must be a Home",
+                );
+            }
             _ => self.sink.error(
                 STORAGE_ERROR,
                 span,
                 "take destination must be a Home or value register",
             ),
+        }
+    }
+
+    fn require_managed_loan_destination(&mut self, register: Register, ty: &IrType, span: Span) {
+        if is_managed_type(self.module, ty)
+            && !matches!(self.register_storage(register), Some(RegisterStorage::Loan))
+        {
+            self.sink.error(
+                STORAGE_ERROR,
+                span,
+                "managed field read destination must be a Loan",
+            );
         }
     }
 
@@ -1707,6 +1727,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         };
         if let Some(field_type) = self.field_type(definition, field, span).cloned() {
             self.expect_type(dst, &field_type, span);
+            self.require_managed_loan_destination(dst, &field_type, span);
         }
     }
 
@@ -1747,6 +1768,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         };
         if let Some(field_type) = self.field_type(*definition, field, span).cloned() {
             self.expect_type(dst, &field_type, span);
+            self.require_managed_loan_destination(dst, &field_type, span);
         }
     }
 

@@ -1,5 +1,7 @@
 use keld_flow::StorageScopeId;
-use keld_ir::{ArgumentProjection, Instruction, IrType, Module, Terminator, lower, validate};
+use keld_ir::{
+    ArgumentProjection, Instruction, IrType, Module, RegisterStorage, Terminator, lower, validate,
+};
 use keld_storage::verify_text_for_test;
 
 fn lower_ok(source: &str) -> Module {
@@ -111,6 +113,48 @@ fn replace_first_loan_read_with_take(module: &mut Module) {
     panic!("compiler-produced loan read exists");
 }
 
+fn replace_first_take_destination_with_trivial(module: &mut Module) {
+    let function = &mut module.functions[module.main.0 as usize];
+    let source = keld_ir::Register(
+        u32::try_from(function.register_types.len()).expect("register count fits"),
+    );
+    let destination = keld_ir::Register(
+        u32::try_from(function.register_types.len() + 1).expect("register count fits"),
+    );
+    let home = function
+        .register_storage
+        .iter()
+        .find(|storage| matches!(storage, RegisterStorage::Home { .. }))
+        .cloned()
+        .expect("main has a managed home");
+    function.register_types.extend([IrType::Text, IrType::Text]);
+    function
+        .register_storage
+        .extend([home, RegisterStorage::Trivial]);
+    let span = function.span;
+    let entry = function.entry;
+    let block = function
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == entry)
+        .expect("main entry block exists");
+    block.instructions.splice(
+        0..0,
+        [
+            Instruction::ConstText {
+                dst: source,
+                value: "owned".to_owned(),
+                span,
+            },
+            Instruction::Take {
+                dst: destination,
+                src: source,
+                span,
+            },
+        ],
+    );
+}
+
 fn replace_first_projected_call_index_with_lifecycle(module: &mut Module) {
     for function in &mut module.functions {
         let lifecycle = function.current_lifecycle;
@@ -158,6 +202,204 @@ fn replace_first_projected_call_base_with_lifecycle(module: &mut Module) {
     panic!("compiler-produced projected call exists");
 }
 
+fn replace_first_struct_read_destination_with_trivial(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::ReadStructField { dst, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::ReadStructField { .. }))
+            {
+                function.register_storage[dst.0 as usize] = RegisterStorage::Trivial;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced struct field read exists");
+}
+
+fn replace_first_entity_read_destination_with_trivial(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::ReadField { dst, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::ReadField { .. }))
+            {
+                function.register_storage[dst.0 as usize] = RegisterStorage::Trivial;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced entity field read exists");
+}
+
+fn replace_first_list_push_value_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(value) = block
+                .instructions
+                .iter()
+                .find_map(|instruction| match instruction {
+                    Instruction::ListPush { value, .. }
+                    | Instruction::ListPushPlace { value, .. } => Some(*value),
+                    _ => None,
+                })
+                && matches!(
+                    function.register_storage.get(value.0 as usize),
+                    Some(RegisterStorage::Home { .. })
+                )
+            {
+                function.register_storage[value.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced List push with an owned value exists");
+}
+
+fn replace_first_list_replace_value_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::ListReplace { value, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::ListReplace { .. }))
+                && matches!(
+                    function.register_storage.get(value.0 as usize),
+                    Some(RegisterStorage::Home { .. })
+                )
+            {
+                function.register_storage[value.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced List replacement with an owned value exists");
+}
+
+fn replace_first_constructed_field_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::ConstructStruct { fields, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::ConstructStruct { .. }))
+                && let Some((_, value)) = fields.iter().find(|(_, value)| {
+                    matches!(
+                        function.register_storage.get(value.0 as usize),
+                        Some(RegisterStorage::Home { .. })
+                    )
+                })
+            {
+                function.register_storage[value.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced aggregate with an owned field exists");
+}
+
+fn replace_first_allocated_field_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::AllocateEntity { fields, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::AllocateEntity { .. }))
+                && let Some((_, value)) = fields.iter().find(|(_, value)| {
+                    matches!(
+                        function.register_storage.get(value.0 as usize),
+                        Some(RegisterStorage::Home { .. })
+                    )
+                })
+            {
+                function.register_storage[value.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced entity aggregate with an owned field exists");
+}
+
+fn replace_first_field_write_value_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::WriteField { value, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::WriteField { .. }))
+                && matches!(
+                    function.register_storage.get(value.0 as usize),
+                    Some(RegisterStorage::Home { .. })
+                )
+            {
+                function.register_storage[value.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced field write with an owned value exists");
+}
+
+fn replace_first_place_replacement_source_with_loan(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(Instruction::ReplacePlace { source, .. }) = block
+                .instructions
+                .iter()
+                .find(|instruction| matches!(instruction, Instruction::ReplacePlace { .. }))
+                && matches!(
+                    function.register_storage.get(source.0 as usize),
+                    Some(RegisterStorage::Home { .. })
+                )
+            {
+                function.register_storage[source.0 as usize] = RegisterStorage::Loan;
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced place replacement with an owned source exists");
+}
+
+fn replace_first_consuming_call_argument_with_loan(module: &mut Module) {
+    for function_index in 0..module.functions.len() {
+        let argument = module.functions[function_index]
+            .blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .find_map(|instruction| {
+                let Instruction::Call {
+                    function: callee,
+                    arguments,
+                    ..
+                } = instruction
+                else {
+                    return None;
+                };
+                arguments.iter().find_map(|(parameter, argument)| {
+                    (module.functions[callee.0 as usize]
+                        .parameter_modes
+                        .get(parameter.0 as usize)
+                        == Some(&keld_semantics::ParameterMode::Take)
+                        && matches!(
+                            module.functions[function_index]
+                                .register_storage
+                                .get(argument.0 as usize),
+                            Some(RegisterStorage::Home { .. })
+                        ))
+                    .then_some(*argument)
+                })
+            });
+        if let Some(argument) = argument {
+            module.functions[function_index].register_storage[argument.0 as usize] =
+                RegisterStorage::Loan;
+            return;
+        }
+    }
+    panic!("compiler-produced consuming call with an owned argument exists");
+}
+
 fn empty_first_managed_return(module: &mut Module) {
     for function in &mut module.functions {
         if function.return_type != IrType::Text {
@@ -174,6 +416,54 @@ fn empty_first_managed_return(module: &mut Module) {
         }
     }
     panic!("compiler-produced managed return exists");
+}
+
+fn make_maybe_live_managed_return(module: &mut Module) {
+    for function in &mut module.functions {
+        if function.id == module.main {
+            continue;
+        }
+        let Some((candidate, scope)) =
+            function
+                .register_types
+                .iter()
+                .enumerate()
+                .find_map(|(index, ty)| {
+                    if *ty != IrType::Text {
+                        return None;
+                    }
+                    match function.register_storage.get(index) {
+                        Some(RegisterStorage::Home {
+                            scope,
+                            conditional: true,
+                        }) => Some((
+                            keld_ir::Register(u32::try_from(index).expect("register index fits")),
+                            *scope,
+                        )),
+                        _ => None,
+                    }
+                })
+        else {
+            continue;
+        };
+        function.return_type = IrType::Text;
+        for block in &mut function.blocks {
+            block.instructions.retain(|instruction| {
+                !matches!(
+                    instruction,
+                    Instruction::DropIfLive { home, .. } if *home == candidate
+                ) && !matches!(
+                    instruction,
+                    Instruction::CleanupTrackedScope { scope: current, .. } if *current == scope
+                )
+            });
+            if matches!(block.terminator, Terminator::Return(Some(_))) {
+                block.terminator = Terminator::Return(Some(candidate));
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced MaybeLive managed home exists");
 }
 
 fn rewrite_cleanup_scope(module: &mut Module, scope: StorageScopeId) {
@@ -261,6 +551,112 @@ fn a_loan_register_cannot_be_taken() {
 }
 
 #[test]
+fn managed_take_destination_must_be_a_home() {
+    let mut module = lower_ok(
+        "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { return inspect(\"Keld\") }\n",
+    );
+    replace_first_take_destination_with_trivial(&mut module);
+    assert_ir_error(&module, "managed take destination must be a Home");
+}
+
+#[test]
+fn managed_struct_field_read_destination_must_be_a_loan() {
+    let mut module = lower_ok(
+        "struct Holder { value: Text }
+fn main() -> Int { let holder = Holder(value: \"Keld\"); return holder.value.byte_length }
+",
+    );
+    replace_first_struct_read_destination_with_trivial(&mut module);
+    assert_ir_error(&module, "managed field read destination must be a Loan");
+}
+
+#[test]
+fn managed_entity_field_read_destination_must_be_a_loan() {
+    let mut module = lower_ok(
+        "entity Holder { value: Text }
+fn main() -> Int { lifecycle level { let holder = Holder(value: \"Keld\"); return holder.value.byte_length } }
+",
+    );
+    replace_first_entity_read_destination_with_trivial(&mut module);
+    assert_ir_error(&module, "managed field read destination must be a Loan");
+}
+
+#[test]
+fn list_push_must_not_consume_a_loan_register() {
+    let mut module = lower_ok(
+        "fn main() -> Int { let value: Text = \"Keld\"; let items: List[Text] = List(); items.push(take value); return 0 }
+",
+    );
+    replace_first_list_push_value_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn list_replacement_must_not_consume_a_loan_register() {
+    let mut module = lower_ok(
+        "fn main() -> Int { let old: Text = \"old\"; let items: List[Text] = List(); items.push(take old); let new: Text = \"new\"; items[0] = take new; return 0 }
+",
+    );
+    replace_first_list_replace_value_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn aggregate_construction_must_not_consume_a_loan_field() {
+    let mut module = lower_ok(
+        "struct Holder { value: Text }
+fn main() -> Int { let holder = Holder(value: \"Keld\"); return holder.value.byte_length }
+",
+    );
+    replace_first_constructed_field_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn entity_construction_must_not_consume_a_loan_field() {
+    let mut module = lower_ok(
+        "entity Holder { value: Text }
+fn main() -> Int { lifecycle level { let value: Text = \"Keld\"; let holder = Holder(value: take value); return holder.value.byte_length } }
+",
+    );
+    replace_first_allocated_field_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn entity_field_write_must_not_consume_a_loan_register() {
+    let mut module = lower_ok(
+        "entity Holder { value: Text }
+fn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0 } }
+",
+    );
+    replace_first_field_write_value_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn struct_field_replacement_must_not_consume_a_loan_register() {
+    let mut module = lower_ok(
+        "struct Holder { value: Text }
+fn main() -> Int { var holder = Holder(value: \"old\"); let new: Text = \"new\"; holder.value = take new; return holder.value.byte_length }
+",
+    );
+    replace_first_place_replacement_source_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn consuming_call_must_not_consume_a_loan_register() {
+    let mut module = lower_ok(
+        "fn consume(take value: Text) { return }
+fn main() -> Int { let value: Text = \"Keld\"; consume(take value); return 0 }
+",
+    );
+    replace_first_consuming_call_argument_with_loan(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
 fn projected_call_source_index_must_be_an_int() {
     let mut module = lower_ok(
         "fn inspect(items: List[Int]) -> Int { return items.length }\nfn main() -> Int { let matrix: List[List[Int]] = List(); return inspect(matrix[0]) }\n",
@@ -291,6 +687,17 @@ fn managed_return_register_must_be_live() {
     let mut module =
         lower_ok("fn make() -> Text { return \"ok\" }\nfn main() -> Int { return 0 }\n");
     empty_first_managed_return(&mut module);
+    assert_ir_error(&module, "returned managed home must be live");
+}
+
+#[test]
+fn maybe_live_managed_return_register_must_be_live() {
+    let mut module = lower_ok(
+        "fn make(flag: Bool) -> Int { var value: Text; if flag { value = \"yes\"; }; return 0; }
+fn main() -> Int { return 0; }
+",
+    );
+    make_maybe_live_managed_return(&mut module);
     assert_ir_error(&module, "returned managed home must be live");
 }
 

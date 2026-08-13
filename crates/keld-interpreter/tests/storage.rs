@@ -1,4 +1,69 @@
-use keld_interpreter::{TestControls, Value, run_text_for_test, run_text_with_controls_for_test};
+use keld_interpreter::{
+    Interpreter, TestControls, Value, run_text_for_test, run_text_with_controls_for_test,
+};
+
+fn lower_module_for_test(source: &str) -> keld_ir::Module {
+    let verification = keld_storage::verify_text_for_test(source);
+    let verified = verification
+        .module
+        .unwrap_or_else(|| panic!("source must verify: {:#?}", verification.diagnostics));
+    keld_ir::lower(&verified)
+}
+
+fn replace_first_call_source_with_unrelated_text(module: &mut keld_ir::Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            let Some(index) = block
+                .instructions
+                .iter()
+                .position(|instruction| matches!(instruction, keld_ir::Instruction::Call { .. }))
+            else {
+                continue;
+            };
+            let keld_ir::Instruction::Call {
+                argument_sources,
+                span,
+                ..
+            } = &mut block.instructions[index]
+            else {
+                unreachable!();
+            };
+            let source = argument_sources
+                .iter_mut()
+                .find_map(|(_, source)| source.as_mut())
+                .expect("compiler-produced call source exists");
+            let replacement = keld_ir::Register(
+                u32::try_from(function.register_types.len()).expect("register count fits"),
+            );
+            function.register_types.push(keld_ir::IrType::Text);
+            function
+                .register_storage
+                .push(keld_ir::RegisterStorage::Home {
+                    scope: keld_flow::StorageScopeId(0),
+                    conditional: false,
+                });
+            let span = *span;
+            source.base = replacement;
+            block.instructions.insert(
+                index,
+                keld_ir::Instruction::ConstText {
+                    dst: replacement,
+                    value: "unrelated".to_owned(),
+                    span,
+                },
+            );
+            block.instructions.insert(
+                index + 2,
+                keld_ir::Instruction::DropHome {
+                    home: replacement,
+                    span,
+                },
+            );
+            return;
+        }
+    }
+    panic!("compiler-produced call exists");
+}
 
 #[test]
 fn read_loan_of_heap_text_does_not_allocate_or_copy() {
@@ -144,6 +209,31 @@ fn loaned_text_projection_can_be_compared() {
     .expect("loaned Text equality executes");
 
     assert_eq!(result.value, Value::Int(1));
+}
+
+#[test]
+fn loan_call_uses_the_owned_temporary_from_take_argument() {
+    let result = run_text_for_test(
+        "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { let value: Text = \"Keld\"; return inspect(take value) }\n",
+    )
+    .expect("loan call reads the evaluated take result");
+
+    assert_eq!(result.value, Value::Int(4));
+}
+
+#[test]
+fn loan_call_uses_the_evaluated_operand_when_source_metadata_is_unrelated() {
+    let mut module = lower_module_for_test(
+        "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { let value: Text = \"actual\"; return inspect(take value) }\n",
+    );
+    replace_first_call_source_with_unrelated_text(&mut module);
+
+    let result = Interpreter::new(&module)
+        .expect("malformed source metadata remains type-valid")
+        .run_main()
+        .expect("loan call uses its evaluated operand");
+
+    assert_eq!(result.value, Value::Int(6));
 }
 
 #[test]

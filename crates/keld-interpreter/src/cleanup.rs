@@ -300,7 +300,7 @@ fn declared_field(module: &Module, definition: DefId, index: usize) -> FieldId {
 
 #[cfg(test)]
 mod tests {
-    use super::{CleanupPath, CleanupScratch, CleanupTask, cleanup_work};
+    use super::{CleanupPath, CleanupScratch, CleanupTask, CleanupTrace, cleanup_work};
     use crate::{RuntimeList, Value};
     use keld_ir::{Module, Register};
     use keld_semantics::FunctionId;
@@ -324,5 +324,30 @@ mod tests {
         cleanup_work(&module, &mut scratch.work, None);
 
         assert_eq!(scratch.work.capacity(), capacity);
+    }
+
+    #[test]
+    fn cleanup_handles_maximum_depth_nested_lists_without_growing_scratch() {
+        let module = Module {
+            definitions: Vec::new(),
+            functions: Vec::new(),
+            main: FunctionId(0),
+        };
+        let mut value = Value::Int(0);
+        for _ in 0..256 {
+            value = Value::List(RuntimeList::from_values(vec![value]));
+        }
+        let mut scratch = CleanupScratch::new().expect("cleanup scratch allocates");
+        let capacity = scratch.work.capacity();
+        let mut trace = CleanupTrace::default();
+        scratch.work.push(CleanupTask::Value {
+            value,
+            path: CleanupPath::Home(Register(0)),
+        });
+
+        cleanup_work(&module, &mut scratch.work, Some(&mut trace));
+
+        assert_eq!(scratch.work.capacity(), capacity);
+        assert_eq!(trace.list_indices().len(), 256);
     }
 }

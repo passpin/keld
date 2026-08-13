@@ -93,6 +93,16 @@ fn clear_destroys_elements_in_reverse_index_order() {
 }
 
 #[test]
+fn clear_executes_after_a_list_allocation_failure_injection() {
+    let result = run_text_with_controls_for_test(
+        "fn main() -> Int { let items: List[Text] = List(); items.reserve(2); items.push(\"a\"); items.push(\"b\"); let other: List[Int] = List(); let failed = other.try_reserve(1); items.clear(); if failed { return 1 }; return items.length }\n",
+        keld_interpreter::TestControls::fail_list_attempts([2, 3]),
+    )
+    .expect("clear executes after the injected allocation failure");
+    assert_eq!(result.value, Value::Int(0));
+}
+
+#[test]
 fn clear_pops_elements_without_releasing_list_storage() {
     let mut list = RuntimeList::with_capacity_for_test(8);
     list.push_for_test(Value::Int(1));
