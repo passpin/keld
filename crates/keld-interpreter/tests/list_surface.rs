@@ -142,8 +142,11 @@ fn reserve_negative_and_unaddressable_sizes_are_capacity_faults() {
 #[test]
 fn try_reserve_failure_returns_false_and_preserves_list() {
     let mut list = RuntimeList::from_values(vec![Value::Int(7)]);
+    let capacity = list.capacity_for_test();
     let mut allocations = AllocationController::fail_list_attempts([1, 2]);
     assert!(!list.try_reserve(8, &mut allocations));
+    assert_eq!(list.length(), 1);
+    assert_eq!(list.capacity_for_test(), capacity);
     assert_eq!(list.values_for_test(), &[Value::Int(7)]);
 }
 
@@ -158,6 +161,31 @@ fn preferred_growth_failure_retries_minimum_capacity() {
 }
 
 #[test]
+fn reserve_accounts_for_length_when_the_list_has_spare_capacity() {
+    let mut list = RuntimeList::with_capacity_for_test(4);
+    list.push_for_test(Value::Int(7));
+    let mut allocations = AllocationController::default();
+
+    list.reserve(100, &mut allocations)
+        .expect("reservation succeeds");
+
+    assert!(list.capacity_for_test() >= 101);
+}
+
+#[test]
+fn nonempty_minimum_capacity_retry_meets_the_exact_requirement() {
+    let mut list = RuntimeList::with_capacity_for_test(4);
+    list.push_for_test(Value::Int(7));
+    let mut allocations = AllocationController::fail_list_attempts([1]);
+
+    list.reserve(4, &mut allocations)
+        .expect("minimum retry succeeds");
+
+    assert_eq!(allocations.list_attempts(), 2);
+    assert!(list.capacity_for_test() >= 5);
+}
+
+#[test]
 fn successful_try_reserve_guarantees_the_next_n_pushes_do_not_grow() {
     let mut list = RuntimeList::new();
     let mut allocations = AllocationController::default();
@@ -168,6 +196,24 @@ fn successful_try_reserve_guarantees_the_next_n_pushes_do_not_grow() {
             .expect("reserved push succeeds");
     }
     assert_eq!(allocations.list_attempts(), attempts);
+}
+
+#[test]
+fn nonempty_reservation_guarantees_exactly_the_next_additional_pushes() {
+    let mut list = RuntimeList::with_capacity_for_test(4);
+    list.push_for_test(Value::Int(0));
+    let mut allocations = AllocationController::default();
+    list.reserve(5, &mut allocations)
+        .expect("reservation succeeds");
+    let attempts = allocations.list_attempts();
+
+    for value in 1..=5 {
+        list.push(Value::Int(value), &mut allocations)
+            .expect("reserved push succeeds");
+    }
+
+    assert_eq!(allocations.list_attempts(), attempts);
+    assert_eq!(list.length(), 6);
 }
 
 #[test]

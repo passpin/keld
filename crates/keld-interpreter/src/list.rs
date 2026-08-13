@@ -159,8 +159,17 @@ impl RuntimeList {
         if !allocations.allow_list_attempt() {
             return false;
         }
-        let additional = target.saturating_sub(self.elements.capacity());
-        self.elements.try_reserve(additional).is_ok()
+        let additional = target
+            .checked_sub(self.elements.len())
+            .expect("target exceeds current length");
+        if self.elements.try_reserve(additional).is_err() {
+            return false;
+        }
+        debug_assert!(
+            self.elements.capacity() >= target,
+            "successful Vec reservation must meet the requested target"
+        );
+        self.elements.capacity() >= target
     }
 
     #[doc(hidden)]
