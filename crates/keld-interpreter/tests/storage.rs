@@ -10,6 +10,22 @@ fn lower_module_for_test(source: &str) -> keld_ir::Module {
     keld_ir::lower(&verified)
 }
 
+#[test]
+fn retirement_during_pending_entity_field_access_is_rejected_before_interpretation() {
+    let source = "entity Holder {\nitems: List[Int]\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn retire_holder(holder: Holder) -> Int retires holder { retire holder; return 0; }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); inspect(holder.items, retire_holder(holder)); return 0; }; }\n";
+    let verification = keld_storage::verify_text_for_test(source);
+
+    assert!(verification.module.is_none());
+    assert!(
+        verification
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.0 == "KLD2005"),
+        "{:#?}",
+        verification.diagnostics
+    );
+}
+
 fn replace_first_call_source_with_unrelated_text(module: &mut keld_ir::Module) {
     for function in &mut module.functions {
         for block in &mut function.blocks {

@@ -7,7 +7,7 @@ use keld_flow::{
 };
 use keld_lifecycle::{EntityOperationFacts, VerifiedFlowModule};
 use keld_semantics::{
-    FieldId, FunctionId, LocalId, ParameterMode, StorageClass, TypeId, TypeKind, TypeStore,
+    DefId, FieldId, FunctionId, LocalId, ParameterMode, StorageClass, TypeId, TypeKind, TypeStore,
 };
 use keld_source::{Diagnostic, DiagnosticCode, Span, sort_diagnostics};
 use std::collections::{BTreeSet, VecDeque};
@@ -28,10 +28,24 @@ pub enum LoanEffect {
     Take,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntityEffectTarget {
+    Parameter(u32),
+    Any(DefId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntityStorageEffect {
+    pub target: EntityEffectTarget,
+    pub projections: Vec<PlaceProjection>,
+    pub effect: LoanEffect,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FunctionStorageSummary {
     pub parameters: Vec<StorageClass>,
     pub effects: Vec<LoanEffect>,
+    pub entity_effects: Vec<EntityStorageEffect>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -65,7 +79,7 @@ pub fn verify(lifecycle: VerifiedFlowModule) -> Verification {
         let next = flow
             .functions
             .iter()
-            .map(|function| infer_summary(flow, function, &summaries))
+            .map(|function| infer_summary(&lifecycle, function, &summaries))
             .collect::<Vec<_>>();
         if next == summaries {
             break;
@@ -182,6 +196,7 @@ fn verify_function(
                 operation,
                 &mut state,
                 summaries,
+                &lifecycle.summaries,
                 &mut diagnostics,
             );
             cleanup::record_operation(
@@ -443,14 +458,17 @@ fn initial_summary(flow: &FlowModule, function: &FlowFunction) -> FunctionStorag
                 }
             })
             .collect(),
+        entity_effects: Vec::new(),
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn infer_summary(
-    flow: &FlowModule,
+    lifecycle: &VerifiedFlowModule,
     function: &FlowFunction,
     summaries: &[FunctionStorageSummary],
 ) -> FunctionStorageSummary {
+    let flow = &lifecycle.flow;
     let mut summary = initial_summary(flow, function);
     let parameter_index = function
         .parameters
@@ -459,17 +477,14 @@ fn infer_summary(
         .map(|(index, local)| (*local, index))
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut origins = vec![None::<LocalId>; function.value_types.len()];
-    let mut mark = |local: LocalId, effect: LoanEffect| {
-        let Some(index) = parameter_index.get(&local).copied() else {
-            return;
-        };
-        if summary.parameters.get(index) != Some(&StorageClass::SingleHome) {
-            return;
-        }
-        summary.effects[index] = join_effect(summary.effects[index], effect);
-    };
     for block in &function.blocks {
-        for operation in &block.operations {
+        for (operation_index, operation) in block.operations.iter().enumerate() {
+            let facts = access::operation_facts(
+                lifecycle,
+                function,
+                block.id,
+                u32::try_from(operation_index).expect("flow operation index fits in u32"),
+            );
             match operation {
                 FlowOp::CopyLocal { dst, local, .. } | FlowOp::TakeLocal { dst, local, .. } => {
                     origins[dst.0 as usize] = Some(*local);
@@ -481,7 +496,21 @@ fn infer_summary(
                 FlowOp::ListLength { receiver, .. }
                 | FlowOp::ListIndex { receiver, .. }
                 | FlowOp::ListGet { receiver, .. } => {
-                    mark_receiver(&mut mark, &origins, receiver, LoanEffect::Read);
+                    mark_receiver(
+                        &mut summary,
+                        &parameter_index,
+                        &origins,
+                        receiver,
+                        LoanEffect::Read,
+                    );
+                    record_receiver_entity_effect(
+                        flow,
+                        function,
+                        facts,
+                        receiver,
+                        LoanEffect::Read,
+                        &mut summary,
+                    );
                 }
                 FlowOp::ListPush { receiver, .. }
                 | FlowOp::ListRemove { receiver, .. }
@@ -490,15 +519,43 @@ fn infer_summary(
                 | FlowOp::ListReserve { receiver, .. }
                 | FlowOp::ListTryReserve { receiver, .. }
                 | FlowOp::ListReplace { receiver, .. } => {
-                    mark_receiver(&mut mark, &origins, receiver, LoanEffect::Structural);
+                    mark_receiver(
+                        &mut summary,
+                        &parameter_index,
+                        &origins,
+                        receiver,
+                        LoanEffect::Structural,
+                    );
+                    record_receiver_entity_effect(
+                        flow,
+                        function,
+                        facts,
+                        receiver,
+                        LoanEffect::Structural,
+                        &mut summary,
+                    );
                 }
                 FlowOp::ReplacePlace { place, .. }
                 | FlowOp::BeginIndexedReplacement { list: place, .. } => {
-                    mark(place.base, LoanEffect::Structural);
+                    mark_parameter_effect(
+                        &mut summary,
+                        &parameter_index,
+                        place.base,
+                        LoanEffect::Structural,
+                    );
+                    record_place_entity_effect(
+                        flow,
+                        function,
+                        facts,
+                        place,
+                        LoanEffect::Structural,
+                        &mut summary,
+                    );
                 }
                 FlowOp::Call {
                     function: callee,
                     arguments,
+                    argument_places,
                     ..
                 } => {
                     let callee_summary = summaries.get(callee.0 as usize);
@@ -518,8 +575,56 @@ fn infer_summary(
                                 })
                             })
                             .unwrap_or(LoanEffect::Read);
-                        mark(local, effect);
+                        mark_parameter_effect(&mut summary, &parameter_index, local, effect);
                     }
+                    if let Some(callee_summary) = callee_summary {
+                        for (parameter, place) in argument_places {
+                            let Some(place) = place else { continue };
+                            let effect = callee_summary
+                                .effects
+                                .get(parameter.0 as usize)
+                                .copied()
+                                .unwrap_or(LoanEffect::Read);
+                            record_place_entity_effect(
+                                flow,
+                                function,
+                                facts,
+                                place,
+                                effect,
+                                &mut summary,
+                            );
+                        }
+                        for effect in &callee_summary.entity_effects {
+                            propagate_entity_effect(
+                                flow,
+                                function,
+                                facts,
+                                arguments,
+                                effect,
+                                &mut summary,
+                            );
+                        }
+                    }
+                }
+                FlowOp::ReadEntityField { entity, field, .. } => record_value_entity_effect(
+                    flow,
+                    function,
+                    facts,
+                    *entity,
+                    &[PlaceProjection::Field(*field)],
+                    LoanEffect::Read,
+                    &mut summary,
+                ),
+                FlowOp::WriteEntityField { entity, field, .. } => {
+                    record_value_entity_effect(
+                        flow,
+                        function,
+                        facts,
+                        *entity,
+                        &[PlaceProjection::Field(*field)],
+                        LoanEffect::Structural,
+                        &mut summary,
+                    );
                 }
                 FlowOp::Phi { dst, inputs, .. } => {
                     let first = inputs
@@ -539,15 +644,169 @@ fn infer_summary(
 }
 
 fn mark_receiver(
-    mark: &mut impl FnMut(LocalId, LoanEffect),
+    summary: &mut FunctionStorageSummary,
+    parameter_index: &std::collections::BTreeMap<LocalId, usize>,
     origins: &[Option<LocalId>],
     receiver: &StorageReceiver,
     effect: LoanEffect,
 ) {
     if let Some(place) = &receiver.place {
-        mark(place.base, effect);
+        mark_parameter_effect(summary, parameter_index, place.base, effect);
     } else if let Some(local) = origins.get(receiver.value.0 as usize).copied().flatten() {
-        mark(local, effect);
+        mark_parameter_effect(summary, parameter_index, local, effect);
+    }
+}
+
+fn mark_parameter_effect(
+    summary: &mut FunctionStorageSummary,
+    parameter_index: &std::collections::BTreeMap<LocalId, usize>,
+    local: LocalId,
+    effect: LoanEffect,
+) {
+    let Some(index) = parameter_index.get(&local).copied() else {
+        return;
+    };
+    if summary.parameters.get(index) != Some(&StorageClass::SingleHome) {
+        return;
+    }
+    summary.effects[index] = join_effect(summary.effects[index], effect);
+}
+
+fn record_receiver_entity_effect(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
+    receiver: &StorageReceiver,
+    effect: LoanEffect,
+    summary: &mut FunctionStorageSummary,
+) {
+    if let Some(place) = &receiver.place {
+        record_place_entity_effect(flow, function, facts, place, effect, summary);
+    }
+}
+
+fn record_place_entity_effect(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
+    place: &Place,
+    effect: LoanEffect,
+    summary: &mut FunctionStorageSummary,
+) {
+    let Some(definition) =
+        access::entity_definition(flow, function.local_types[place.base.0 as usize])
+    else {
+        return;
+    };
+    let targets = facts.local_reference(place.base).map_or_else(
+        || vec![EntityEffectTarget::Any(definition)],
+        |reference| entity_effect_targets(facts, reference),
+    );
+    for target in targets {
+        push_entity_effect(summary, target, place.projections.clone(), effect);
+    }
+}
+
+fn record_value_entity_effect(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
+    value: ValueId,
+    projections: &[PlaceProjection],
+    effect: LoanEffect,
+    summary: &mut FunctionStorageSummary,
+) {
+    let Some(definition) = access::entity_definition(flow, function.value_types[value.0 as usize])
+    else {
+        return;
+    };
+    let targets = facts.value_reference(value).map_or_else(
+        || vec![EntityEffectTarget::Any(definition)],
+        |reference| entity_effect_targets(facts, reference),
+    );
+    for target in targets {
+        push_entity_effect(summary, target, projections.to_vec(), effect);
+    }
+}
+
+fn entity_effect_targets(
+    facts: &EntityOperationFacts,
+    reference: keld_lifecycle::EntityReferenceFact,
+) -> Vec<EntityEffectTarget> {
+    let Some(origin) = facts.origin(reference.provenance) else {
+        return vec![EntityEffectTarget::Any(reference.definition)];
+    };
+    if origin.broad {
+        return vec![EntityEffectTarget::Any(reference.definition)];
+    }
+    if !origin.parameters.is_empty() {
+        return origin
+            .parameters
+            .iter()
+            .copied()
+            .map(EntityEffectTarget::Parameter)
+            .collect();
+    }
+    if origin.fresh {
+        Vec::new()
+    } else {
+        vec![EntityEffectTarget::Any(reference.definition)]
+    }
+}
+
+fn push_entity_effect(
+    summary: &mut FunctionStorageSummary,
+    target: EntityEffectTarget,
+    projections: Vec<PlaceProjection>,
+    effect: LoanEffect,
+) {
+    if let Some(existing) = summary
+        .entity_effects
+        .iter_mut()
+        .find(|existing| existing.target == target && existing.projections == projections)
+    {
+        existing.effect = join_effect(existing.effect, effect);
+    } else {
+        summary.entity_effects.push(EntityStorageEffect {
+            target,
+            projections,
+            effect,
+        });
+    }
+}
+
+fn propagate_entity_effect(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
+    arguments: &[(keld_semantics::ParameterIndex, ValueId)],
+    effect: &EntityStorageEffect,
+    summary: &mut FunctionStorageSummary,
+) {
+    match effect.target {
+        EntityEffectTarget::Any(definition) => push_entity_effect(
+            summary,
+            EntityEffectTarget::Any(definition),
+            effect.projections.clone(),
+            effect.effect,
+        ),
+        EntityEffectTarget::Parameter(parameter) => {
+            let Some((_, value)) = arguments
+                .iter()
+                .find(|(candidate, _)| candidate.0 == parameter)
+            else {
+                return;
+            };
+            record_value_entity_effect(
+                flow,
+                function,
+                facts,
+                *value,
+                &effect.projections,
+                effect.effect,
+                summary,
+            );
+        }
     }
 }
 
@@ -600,6 +859,7 @@ fn join_effect(left: LoanEffect, right: LoanEffect) -> LoanEffect {
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn transfer_operation(
     flow: &FlowModule,
     function: &FlowFunction,
@@ -607,6 +867,7 @@ fn transfer_operation(
     operation: &FlowOp,
     state: &mut HomeState,
     summaries: &[FunctionStorageSummary],
+    lifecycle_summaries: &[keld_lifecycle::FunctionSummary],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match operation {
@@ -638,6 +899,13 @@ fn transfer_operation(
                     *span,
                     "argument reservation belongs to another call",
                 ));
+                return;
+            }
+            let parameter_class = summaries
+                .get(current.function.0 as usize)
+                .and_then(|summary| summary.parameters.get(parameter.0 as usize))
+                .copied();
+            if parameter_class != Some(StorageClass::SingleHome) {
                 return;
             }
             let effect = parameter_effect(flow, summaries, current.function, *parameter);
@@ -1163,6 +1431,18 @@ fn transfer_operation(
                     }
                 }
             }
+            check_call_entity_effects(
+                flow,
+                function,
+                facts,
+                state,
+                *callee,
+                arguments,
+                summaries,
+                lifecycle_summaries,
+                *span,
+                diagnostics,
+            );
             if let Some(dst) = dst {
                 state.origins[dst.0 as usize] = if flow
                     .types
@@ -1333,6 +1613,22 @@ fn transfer_operation(
             value,
             span,
         } => {
+            if let Some(access) = AccessPath::for_entity_value(
+                flow,
+                function,
+                facts,
+                *entity,
+                vec![PlaceProjection::Field(*field)],
+            ) {
+                check_entity_effect_against_pending(
+                    facts,
+                    state,
+                    &access,
+                    LoanEffect::Structural,
+                    *span,
+                    diagnostics,
+                );
+            }
             let entity_type = function.value_types[entity.0 as usize];
             if let TypeKind::EntityRef(definition) = flow.types.kind(entity_type)
                 && let Some(field_type) = flow
@@ -1359,7 +1655,21 @@ fn transfer_operation(
                 );
             }
         }
-        FlowOp::BeginLifecycle { .. } | FlowOp::Keep { .. } | FlowOp::Retire { .. } => {}
+        FlowOp::Retire { entity, span } => {
+            if let Some(access) =
+                AccessPath::for_entity_value(flow, function, facts, *entity, Vec::new())
+            {
+                check_entity_effect_against_pending(
+                    facts,
+                    state,
+                    &access,
+                    LoanEffect::Take,
+                    *span,
+                    diagnostics,
+                );
+            }
+        }
+        FlowOp::BeginLifecycle { .. } | FlowOp::Keep { .. } => {}
     }
 }
 
@@ -1981,6 +2291,111 @@ fn reservation_conflicts(
         return false;
     }
     effects_conflict(reservation.effect, effect)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_call_entity_effects(
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
+    state: &HomeState,
+    callee: FunctionId,
+    arguments: &[(keld_semantics::ParameterIndex, ValueId)],
+    summaries: &[FunctionStorageSummary],
+    lifecycle_summaries: &[keld_lifecycle::FunctionSummary],
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(summary) = summaries.get(callee.0 as usize) {
+        for effect in &summary.entity_effects {
+            let access = match effect.target {
+                EntityEffectTarget::Any(definition) => Some(AccessPath::any_entity(
+                    definition,
+                    effect.projections.clone(),
+                )),
+                EntityEffectTarget::Parameter(parameter) => argument_value(arguments, parameter)
+                    .and_then(|value| {
+                        AccessPath::for_entity_value(
+                            flow,
+                            function,
+                            facts,
+                            value,
+                            effect.projections.clone(),
+                        )
+                    }),
+            };
+            if let Some(access) = access {
+                check_entity_effect_against_pending(
+                    facts,
+                    state,
+                    &access,
+                    effect.effect,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+    }
+    if let Some(summary) = lifecycle_summaries.get(callee.0 as usize) {
+        for parameter in &summary.retires_parameters {
+            let access = argument_value(arguments, *parameter).and_then(|value| {
+                AccessPath::for_entity_value(flow, function, facts, value, Vec::new())
+            });
+            if let Some(access) = access {
+                check_entity_effect_against_pending(
+                    facts,
+                    state,
+                    &access,
+                    LoanEffect::Take,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+        for definition in &summary.retires_any {
+            let access = AccessPath::any_entity(*definition, Vec::new());
+            check_entity_effect_against_pending(
+                facts,
+                state,
+                &access,
+                LoanEffect::Take,
+                span,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn argument_value(
+    arguments: &[(keld_semantics::ParameterIndex, ValueId)],
+    parameter: u32,
+) -> Option<ValueId> {
+    arguments
+        .iter()
+        .find(|(candidate, _)| candidate.0 == parameter)
+        .map(|(_, value)| *value)
+}
+
+fn check_entity_effect_against_pending(
+    facts: &EntityOperationFacts,
+    state: &HomeState,
+    access: &AccessPath,
+    effect: LoanEffect,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let conflicts = state
+        .pending
+        .iter()
+        .flat_map(|pending| &pending.reservations)
+        .any(|reservation| reservation_conflicts(facts, reservation, access, effect));
+    if conflicts {
+        diagnostics.push(error(
+            CONFLICTING_LOANS,
+            span,
+            "entity access conflicts with a pending storage reservation",
+        ));
+    }
 }
 
 fn require_live(home: &Home, span: Span, diagnostics: &mut Vec<Diagnostic>) -> bool {

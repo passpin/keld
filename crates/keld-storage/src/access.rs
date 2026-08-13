@@ -48,6 +48,38 @@ impl AccessPath {
     pub fn push(&mut self, projection: PlaceProjection) {
         self.projections.push(projection);
     }
+
+    pub fn exact_entity(reference: EntityReferenceFact, projections: Vec<PlaceProjection>) -> Self {
+        Self {
+            root: AccessRoot::Entity(EntityAccessRoot::Exact(reference)),
+            projections,
+        }
+    }
+
+    pub fn any_entity(definition: DefId, projections: Vec<PlaceProjection>) -> Self {
+        Self {
+            root: AccessRoot::Entity(EntityAccessRoot::Any(definition)),
+            projections,
+        }
+    }
+
+    pub fn for_entity_value(
+        flow: &FlowModule,
+        function: &FlowFunction,
+        facts: &EntityOperationFacts,
+        value: ValueId,
+        projections: Vec<PlaceProjection>,
+    ) -> Option<Self> {
+        let definition = entity_definition(flow, function.value_types[value.0 as usize])?;
+        if let Some(reference) = facts
+            .value_reference(value)
+            .filter(|reference| reference.definition == definition)
+        {
+            Some(Self::exact_entity(reference, projections))
+        } else {
+            Some(Self::any_entity(definition, projections))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,7 +230,7 @@ fn projections_overlap(left: &PlaceProjection, right: &PlaceProjection) -> bool 
     }
 }
 
-fn entity_definition(flow: &FlowModule, ty: TypeId) -> Option<DefId> {
+pub(crate) fn entity_definition(flow: &FlowModule, ty: TypeId) -> Option<DefId> {
     match flow.types.kind(ty) {
         TypeKind::EntityRef(definition) => Some(*definition),
         TypeKind::Optional(inner) => entity_definition(flow, *inner),

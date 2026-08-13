@@ -51,3 +51,38 @@ fn different_fields_on_one_entity_remain_non_overlapping() {
         "entity Holder {\nleft: List[Int]\nright: List[Int]\n}\nfn change(left: List[Int], right: List[Int]) { left.push(1); return; }\nfn main() -> Int { lifecycle level { let holder = Holder(left: List(), right: List()); change(holder.left, holder.right); return 0; }; }\n",
     );
 }
+
+#[test]
+fn nested_entity_field_replacement_conflicts_with_an_outer_reservation() {
+    assert_conflict(
+        "entity Holder {\nitems: List[Int]\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn replace(holder: Holder) -> Int { holder.items = List(); return 0; }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); inspect(holder.items, replace(holder)); return 0; }; }\n",
+    );
+}
+
+#[test]
+fn nested_entity_retirement_conflicts_with_an_outer_reservation() {
+    assert_conflict(
+        "entity Holder {\nitems: List[Int]\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn retire_holder(holder: Holder) -> Int retires holder { retire holder; return 0; }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); inspect(holder.items, retire_holder(holder)); return 0; }; }\n",
+    );
+}
+
+#[test]
+fn nested_mutation_of_a_proven_distinct_entity_is_valid() {
+    assert_valid(
+        "entity Holder {\nitems: List[Int]\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn replace(holder: Holder) -> Int { holder.items = List(); return 0; }\nfn main() -> Int { lifecycle level { let left = Holder(items: List()); let right = Holder(items: List()); inspect(left.items, replace(right)); return 0; }; }\n",
+    );
+}
+
+#[test]
+fn broad_retirement_conflicts_with_every_same_type_entity_field() {
+    assert_conflict(
+        "entity Holder {\nitems: List[Int]\n}\nentity Registry {\ntarget: link Holder?\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn sweep(registry: Registry) -> Int retires any Holder { when registry.target as holder { retire holder; }; return 0; }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); let registry = Registry(target: holder); inspect(holder.items, sweep(registry)); return 0; }; }\n",
+    );
+}
+
+#[test]
+fn nested_read_of_the_same_entity_field_is_compatible() {
+    assert_valid(
+        "entity Holder {\nitems: List[Int]\n}\nfn inspect(items: List[Int], marker: Int) { return; }\nfn read(holder: Holder) -> Int { return holder.items.length; }\nfn main() -> Int { lifecycle level { let holder = Holder(items: List()); inspect(holder.items, read(holder)); return 0; }; }\n",
+    );
+}

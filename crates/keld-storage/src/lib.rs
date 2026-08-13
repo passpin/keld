@@ -10,8 +10,8 @@ pub use plan::{
 };
 pub use state::{EmptyReason, EmptyReasonKind, Home};
 pub use verify::{
-    FunctionStorageSummary, LoanEffect, StorageAnnotations, Verification, VerifiedStorageModule,
-    verify, verify_text_for_test,
+    EntityEffectTarget, EntityStorageEffect, FunctionStorageSummary, LoanEffect,
+    StorageAnnotations, Verification, VerifiedStorageModule, verify, verify_text_for_test,
 };
 
 #[cfg(test)]
