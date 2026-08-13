@@ -1,4 +1,6 @@
-use crate::cleanup::{CleanupPath, CleanupTrace, ExecutionTrace, cleanup_payload, cleanup_value};
+use crate::cleanup::{
+    CleanupPath, CleanupScratch, CleanupTrace, ExecutionTrace, cleanup_payload, cleanup_value,
+};
 use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFaultKind};
 use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
@@ -50,6 +52,7 @@ pub struct Interpreter<'module> {
     started: bool,
     controls: TestControls,
     cleanup_trace: Option<CleanupTrace>,
+    cleanup_scratch: CleanupScratch,
 }
 
 impl<'module> Interpreter<'module> {
@@ -87,6 +90,7 @@ impl<'module> Interpreter<'module> {
         }
         let span = main_span(module);
         let store = Store::new().map_err(|error| store_failure(error, span))?;
+        let cleanup_scratch = CleanupScratch::new().map_err(|()| allocation_failure(span))?;
         let mut frames = Vec::new();
         frames
             .try_reserve(module.functions.len().max(1))
@@ -98,6 +102,7 @@ impl<'module> Interpreter<'module> {
             started: false,
             controls,
             cleanup_trace: trace_cleanup.then(CleanupTrace::default),
+            cleanup_scratch,
         })
     }
 
@@ -132,9 +137,10 @@ impl<'module> Interpreter<'module> {
             if let Some(value) = self.step()? {
                 let module = self.module;
                 let cleanup_trace = &mut self.cleanup_trace;
+                let cleanup_scratch = &mut self.cleanup_scratch;
                 self.store
                     .finish_with(|payload| {
-                        cleanup_payload(module, payload, cleanup_trace.as_mut());
+                        cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
                     })
                     .map_err(|error| store_failure(error, main.span))?;
                 return Ok(ExecutionResult { value });
@@ -171,6 +177,7 @@ impl<'module> Interpreter<'module> {
                 instruction,
                 &mut self.controls,
                 &mut self.cleanup_trace,
+                &mut self.cleanup_scratch,
             )?;
             Ok(None)
         } else {
@@ -284,6 +291,7 @@ fn execute_instruction(
     instruction: &Instruction,
     controls: &mut TestControls,
     cleanup_trace: &mut Option<CleanupTrace>,
+    cleanup_scratch: &mut CleanupScratch,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -500,22 +508,22 @@ fn execute_instruction(
                 };
                 Ok(elements.length())
             })?;
-            let mut removed = Vec::new();
-            removed
-                .try_reserve_exact(length)
-                .map_err(|_| allocation_failure(span))?;
-            with_place_mut(module, store, frames, &place, span, |list| {
-                let Value::List(elements) = list else {
-                    return Err(internal("validated clear received a non-list"));
-                };
-                elements.clear_into(&mut removed);
-                Ok(())
-            })?;
-            for (index, value) in (0..length).rev().zip(removed) {
+            let mut index = length;
+            while index > 0 {
+                index -= 1;
+                let value = with_place_mut(module, store, frames, &place, span, |list| {
+                    let Value::List(elements) = list else {
+                        return Err(internal("validated clear received a non-list"));
+                    };
+                    elements
+                        .pop()
+                        .ok_or_else(|| internal("validated clear length changed during access"))
+                })?;
                 cleanup_value(
                     module,
                     value,
                     CleanupPath::ListElement { index },
+                    cleanup_scratch,
                     cleanup_trace.as_mut(),
                 );
             }
@@ -578,14 +586,20 @@ fn execute_instruction(
             set_register(frames, *dst, Value::Bool(is_empty))?;
         }
         Instruction::TextConcat { dst, lhs, rhs, .. } => {
-            let Value::Text(left) = frame_value(frames, *lhs)? else {
-                return Err(internal("validated text concat received a non-text lhs"));
-            };
-            let Value::Text(right) = frame_value(frames, *rhs)? else {
-                return Err(internal("validated text concat received a non-text rhs"));
-            };
-            let value = RuntimeText::concat(left, right).ok_or_else(|| allocation_failure(span))?;
-            set_register(frames, *dst, Value::Text(value))?;
+            let value = with_register_value(module, store, frames, *lhs, span, |left| {
+                let Value::Text(left) = left else {
+                    return Err(internal("validated text concat received a non-text lhs"));
+                };
+                with_register_value(module, store, frames, *rhs, span, |right| {
+                    let Value::Text(right) = right else {
+                        return Err(internal("validated text concat received a non-text rhs"));
+                    };
+                    RuntimeText::concat(left, right)
+                        .ok_or_else(|| allocation_failure(span))
+                        .map(Value::Text)
+                })
+            })?;
+            set_register(frames, *dst, value)?;
         }
         Instruction::CheckedUnaryInt { dst, op, src, .. } => {
             let value = expect_int(frame_value(frames, *src)?)?;
@@ -608,8 +622,11 @@ fn execute_instruction(
         Instruction::Compare {
             dst, op, lhs, rhs, ..
         } => {
-            let result =
-                compare_values(*op, frame_value(frames, *lhs)?, frame_value(frames, *rhs)?)?;
+            let result = with_register_value(module, store, frames, *lhs, span, |left| {
+                with_register_value(module, store, frames, *rhs, span, |right| {
+                    compare_values(*op, left, right)
+                })
+            })?;
             set_register(frames, *dst, Value::Bool(result))?;
         }
         Instruction::Phi { .. } => {
@@ -684,6 +701,7 @@ fn execute_instruction(
                 module,
                 value,
                 CleanupPath::Home(*home),
+                cleanup_scratch,
                 cleanup_trace.as_mut(),
             );
         }
@@ -693,6 +711,7 @@ fn execute_instruction(
                     module,
                     value,
                     CleanupPath::Home(*home),
+                    cleanup_scratch,
                     cleanup_trace.as_mut(),
                 );
             }
@@ -703,6 +722,7 @@ fn execute_instruction(
                     module,
                     value,
                     CleanupPath::Home(*slot),
+                    cleanup_scratch,
                     cleanup_trace.as_mut(),
                 );
             }
@@ -717,6 +737,7 @@ fn execute_instruction(
                         module,
                         value,
                         CleanupPath::Home(home),
+                        cleanup_scratch,
                         cleanup_trace.as_mut(),
                     );
                 }
@@ -767,6 +788,7 @@ fn execute_instruction(
                 instruction,
                 controls,
                 cleanup_trace,
+                cleanup_scratch,
             );
         }
     }
@@ -781,6 +803,7 @@ fn execute_effect_instruction(
     instruction: &Instruction,
     controls: &mut TestControls,
     cleanup_trace: &mut Option<CleanupTrace>,
+    cleanup_scratch: &mut CleanupScratch,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -795,7 +818,7 @@ fn execute_effect_instruction(
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
             store
                 .end_lifecycle_with(lifecycle, |payload| {
-                    cleanup_payload(module, payload, cleanup_trace.as_mut());
+                    cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
                 })
                 .map_err(|error| store_failure(error, span))?;
         }
@@ -836,6 +859,7 @@ fn execute_effect_instruction(
                 instruction,
                 controls,
                 cleanup_trace,
+                cleanup_scratch,
             );
         }
     }
@@ -850,6 +874,7 @@ fn execute_view_instruction(
     instruction: &Instruction,
     controls: &mut TestControls,
     cleanup_trace: &mut Option<CleanupTrace>,
+    cleanup_scratch: &mut CleanupScratch,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -942,6 +967,7 @@ fn execute_view_instruction(
                 instruction,
                 controls,
                 cleanup_trace,
+                cleanup_scratch,
             );
         }
     }
@@ -956,6 +982,7 @@ fn execute_call_or_retirement(
     instruction: &Instruction,
     controls: &mut TestControls,
     cleanup_trace: &mut Option<CleanupTrace>,
+    cleanup_scratch: &mut CleanupScratch,
 ) -> Result<(), InterpreterFailure> {
     let span = instruction_span(instruction);
     match instruction {
@@ -972,7 +999,7 @@ fn execute_call_or_retirement(
             let entity = expect_entity(frame_value(frames, *entity)?)?;
             store
                 .retire_with(entity, |payload| {
-                    cleanup_payload(module, payload, cleanup_trace.as_mut());
+                    cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
                 })
                 .map_err(|error| store_failure(error, span))?;
         }

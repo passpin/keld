@@ -117,6 +117,16 @@ fn text_concat_is_owned_and_utf8_byte_exact() {
 }
 
 #[test]
+fn loaned_text_projection_can_be_concatenated() {
+    let result = run_text_for_test(
+        "fn main() -> Int {\nlet items: List[Text] = List()\nitems.push(\"a\")\nlet joined: Text = items[0] + \"b\"\nreturn joined.byte_length\n}\n",
+    )
+    .expect("loaned Text concat executes");
+
+    assert_eq!(result.value, Value::Int(2));
+}
+
+#[test]
 fn text_equality_is_exact_and_non_normalizing() {
     let result = run_text_for_test(
         "fn main() -> Int { if \"e\u{301}\" == \"é\" { return 1 } else { return 0 } }\n",
@@ -124,6 +134,16 @@ fn text_equality_is_exact_and_non_normalizing() {
     .expect("valid Text equality program must execute");
 
     assert_eq!(result.value, Value::Int(0));
+}
+
+#[test]
+fn loaned_text_projection_can_be_compared() {
+    let result = run_text_for_test(
+        "fn main() -> Int {\nlet items: List[Text] = List()\nitems.push(\"a\")\nif items[0] == \"a\" { return 1 } else { return 0 }\n}\n",
+    )
+    .expect("loaned Text equality executes");
+
+    assert_eq!(result.value, Value::Int(1));
 }
 
 #[test]
@@ -154,6 +174,28 @@ fn nested_text_lists_copy_independently_and_loan_projected_elements() {
     .expect("nested Text transfer, copy, projected loan, and removal execute");
 
     assert_eq!(result.value, Value::Int(10));
+}
+
+#[test]
+fn owned_temporary_managed_field_read_is_a_loan() {
+    let result = run_text_with_controls_for_test(
+        "struct Holder { items: List[Int] }\nfn main() -> Int { return Holder(items: List()).items.length }\n",
+        TestControls::fail_structural_copy(1),
+    )
+    .expect("owned temporary field read does not copy");
+
+    assert_eq!(result.value, Value::Int(0));
+}
+
+#[test]
+fn nested_owned_temporary_managed_field_reads_stay_loans() {
+    let result = run_text_with_controls_for_test(
+        "struct Holder { items: List[List[Int]] }\nfn main() -> Int { let inner: List[Int] = List(); let outer: List[List[Int]] = List(); outer.push(take inner); return Holder(items: take outer).items[0].length }\n",
+        TestControls::fail_structural_copy(1),
+    )
+    .expect("nested owned temporary field read does not copy");
+
+    assert_eq!(result.value, Value::Int(0));
 }
 
 #[test]

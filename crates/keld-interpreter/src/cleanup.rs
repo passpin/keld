@@ -111,37 +111,63 @@ pub(crate) enum CleanupPath {
 }
 
 enum CleanupTask {
-    Value { value: Value, path: CleanupPath },
+    Value {
+        value: Value,
+        path: CleanupPath,
+    },
+    StructFields {
+        definition: DefId,
+        fields: std::vec::IntoIter<Value>,
+    },
+    EntityFields {
+        definition: DefId,
+        fields: std::vec::IntoIter<Value>,
+    },
+    ListElements {
+        elements: std::vec::IntoIter<Value>,
+    },
+}
+
+const CLEANUP_SCRATCH_CAPACITY: usize = 512;
+
+pub(crate) struct CleanupScratch {
+    work: Vec<CleanupTask>,
+}
+
+impl CleanupScratch {
+    pub(crate) fn new() -> Result<Self, ()> {
+        let mut work = Vec::new();
+        work.try_reserve_exact(CLEANUP_SCRATCH_CAPACITY)
+            .map_err(|_| ())?;
+        Ok(Self { work })
+    }
 }
 
 pub(crate) fn cleanup_value(
     module: &Module,
     value: Value,
     path: CleanupPath,
+    scratch: &mut CleanupScratch,
     trace: Option<&mut CleanupTrace>,
 ) {
-    let mut work = Vec::with_capacity(1);
-    work.push(CleanupTask::Value { value, path });
-    cleanup_work(module, &mut work, trace);
+    scratch.work.clear();
+    scratch.work.push(CleanupTask::Value { value, path });
+    cleanup_work(module, &mut scratch.work, trace);
 }
 
 pub(crate) fn cleanup_payload(
     module: &Module,
     payload: EntityPayload,
+    scratch: &mut CleanupScratch,
     trace: Option<&mut CleanupTrace>,
 ) {
     let EntityPayload { definition, fields } = payload;
-    let mut work = Vec::with_capacity(fields.len());
-    for (index, value) in fields.into_iter().enumerate() {
-        work.push(CleanupTask::Value {
-            value,
-            path: CleanupPath::EntityField {
-                definition,
-                field: declared_field(module, definition, index),
-            },
-        });
-    }
-    cleanup_work(module, &mut work, trace);
+    scratch.work.clear();
+    scratch.work.push(CleanupTask::EntityFields {
+        definition,
+        fields: fields.into_iter(),
+    });
+    cleanup_work(module, &mut scratch.work, trace);
 }
 
 fn cleanup_work(
@@ -149,11 +175,54 @@ fn cleanup_work(
     work: &mut Vec<CleanupTask>,
     mut trace: Option<&mut CleanupTrace>,
 ) {
-    while let Some(CleanupTask::Value { value, path }) = work.pop() {
-        record_path(path, trace.as_deref_mut());
-        match value {
-            Value::Struct { definition, fields } => {
-                for (index, field) in fields.into_iter().enumerate() {
+    while let Some(task) = work.pop() {
+        match task {
+            CleanupTask::Value { value, path } => {
+                record_path(path, trace.as_deref_mut());
+                match value {
+                    Value::Struct { definition, fields } => {
+                        work.push(CleanupTask::StructFields {
+                            definition,
+                            fields: fields.into_iter(),
+                        });
+                    }
+                    Value::List(elements) => {
+                        work.push(CleanupTask::ListElements {
+                            elements: elements.into_elements(),
+                        });
+                    }
+                    Value::Optional(value) => {
+                        if let Some(value) = value {
+                            work.push(CleanupTask::Value {
+                                value: *value,
+                                path,
+                            });
+                        }
+                    }
+                    Value::Text(text) => record(
+                        trace.as_deref_mut(),
+                        CleanupEvent::Text {
+                            byte_length: text.byte_length(),
+                            first_byte: text.as_bytes().first().copied(),
+                        },
+                    ),
+                    Value::Unit
+                    | Value::Int(_)
+                    | Value::Bool(_)
+                    | Value::Entity(_)
+                    | Value::Link(_)
+                    | Value::Lifecycle(_) => {}
+                }
+            }
+            CleanupTask::StructFields {
+                definition,
+                mut fields,
+            } => {
+                if let Some(index) = fields.len().checked_sub(1) {
+                    let field = fields
+                        .next_back()
+                        .expect("cleanup field iterator length is exact");
+                    work.push(CleanupTask::StructFields { definition, fields });
                     work.push(CleanupTask::Value {
                         value: field,
                         path: CleanupPath::StructField {
@@ -163,35 +232,36 @@ fn cleanup_work(
                     });
                 }
             }
-            Value::List(elements) => {
-                for (index, element) in elements.into_elements().enumerate() {
+            CleanupTask::EntityFields {
+                definition,
+                mut fields,
+            } => {
+                if let Some(index) = fields.len().checked_sub(1) {
+                    let field = fields
+                        .next_back()
+                        .expect("cleanup entity field iterator length is exact");
+                    work.push(CleanupTask::EntityFields { definition, fields });
+                    work.push(CleanupTask::Value {
+                        value: field,
+                        path: CleanupPath::EntityField {
+                            definition,
+                            field: declared_field(module, definition, index),
+                        },
+                    });
+                }
+            }
+            CleanupTask::ListElements { mut elements } => {
+                if let Some(index) = elements.len().checked_sub(1) {
+                    let element = elements
+                        .next_back()
+                        .expect("cleanup list iterator length is exact");
+                    work.push(CleanupTask::ListElements { elements });
                     work.push(CleanupTask::Value {
                         value: element,
                         path: CleanupPath::ListElement { index },
                     });
                 }
             }
-            Value::Optional(value) => {
-                if let Some(value) = value {
-                    work.push(CleanupTask::Value {
-                        value: *value,
-                        path,
-                    });
-                }
-            }
-            Value::Text(text) => record(
-                trace.as_deref_mut(),
-                CleanupEvent::Text {
-                    byte_length: text.byte_length(),
-                    first_byte: text.as_bytes().first().copied(),
-                },
-            ),
-            Value::Unit
-            | Value::Int(_)
-            | Value::Bool(_)
-            | Value::Entity(_)
-            | Value::Link(_)
-            | Value::Lifecycle(_) => {}
         }
     }
 }
@@ -226,4 +296,33 @@ fn declared_field(module: &Module, definition: DefId, index: usize) -> FieldId {
             || panic!("validated definition layout is missing field {index}"),
             |(field, _)| *field,
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CleanupPath, CleanupScratch, CleanupTask, cleanup_work};
+    use crate::{RuntimeList, Value};
+    use keld_ir::{Module, Register};
+    use keld_semantics::FunctionId;
+
+    #[test]
+    fn cleanup_scratch_does_not_grow_for_a_wide_list() {
+        let module = Module {
+            definitions: Vec::new(),
+            functions: Vec::new(),
+            main: FunctionId(0),
+        };
+        let mut scratch = CleanupScratch {
+            work: Vec::with_capacity(2),
+        };
+        scratch.work.push(CleanupTask::Value {
+            value: Value::List(RuntimeList::from_values(vec![Value::Int(1), Value::Int(2)])),
+            path: CleanupPath::Home(Register(0)),
+        });
+        let capacity = scratch.work.capacity();
+
+        cleanup_work(&module, &mut scratch.work, None);
+
+        assert_eq!(scratch.work.capacity(), capacity);
+    }
 }

@@ -2,7 +2,9 @@ use crate::plan::{
     BlockStoragePlan, FunctionStoragePlan, LocalStorage, OperationStoragePlan, ValueStorage,
 };
 use crate::state::{CleanupOrder, ScopeCleanupState};
-use keld_flow::{FlowFunction, FlowModule, FlowOp, Place, StorageScopeId, ValueId};
+use keld_flow::{
+    FlowFunction, FlowModule, FlowOp, Place, PlaceProjection, StorageScopeId, ValueId,
+};
 use keld_semantics::{LocalId, ParameterMode, StorageClass, TypeKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +13,14 @@ pub(crate) enum ValueOrigin {
     Implicit,
     Local(LocalId),
     Borrowed(LocalId),
-    BorrowedPlace { place: Place, loaned: bool },
+    BorrowedPlace {
+        place: Place,
+        loaned: bool,
+    },
+    BorrowedValue {
+        root: ValueId,
+        projections: Vec<PlaceProjection>,
+    },
     BorrowedUnknown,
     Entity(LocalId),
     Owned,
@@ -224,6 +233,10 @@ fn classify_value(
             projections: Vec::new(),
         }),
         ValueOrigin::BorrowedPlace { place, .. } => ValueStorage::Loan(place.clone()),
+        ValueOrigin::BorrowedValue { root, projections } => ValueStorage::LoanValue {
+            root: *root,
+            projections: projections.clone(),
+        },
         ValueOrigin::Owned => {
             if flow.types.storage_class(value_type) == StorageClass::SingleHome {
                 ValueStorage::OwnedTemporary { scope }

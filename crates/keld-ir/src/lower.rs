@@ -1070,7 +1070,7 @@ fn value_register_storage(plan: &FunctionStoragePlan, value: ValueId) -> Registe
     {
         ValueStorage::Trivial => RegisterStorage::Trivial,
         ValueStorage::EntityFlow => RegisterStorage::EntityFlow,
-        ValueStorage::Loan(_) => RegisterStorage::Loan,
+        ValueStorage::Loan(_) | ValueStorage::LoanValue { .. } => RegisterStorage::Loan,
         ValueStorage::OwnedTemporary { scope } => RegisterStorage::Home {
             scope: *scope,
             conditional: plan.drop_flags.contains(&HomeId::Temporary(value)),

@@ -185,10 +185,8 @@ impl RuntimeList {
     }
 
     #[doc(hidden)]
-    pub fn clear_into(&mut self, cleanup: &mut Vec<Value>) {
-        while let Some(value) = self.elements.pop() {
-            cleanup.push(value);
-        }
+    pub fn pop(&mut self) -> Option<Value> {
+        self.elements.pop()
     }
 
     pub(crate) fn get(&self, index: usize) -> Option<&Value> {

@@ -1,5 +1,5 @@
 use keld_flow::StorageScopeId;
-use keld_ir::{Instruction, Module, lower, validate};
+use keld_ir::{ArgumentProjection, Instruction, IrType, Module, Terminator, lower, validate};
 use keld_storage::verify_text_for_test;
 
 fn lower_ok(source: &str) -> Module {
@@ -11,11 +11,15 @@ fn lower_ok(source: &str) -> Module {
 }
 
 fn assert_ir_error(module: &Module, message: &str) {
+    assert_ir_diagnostic(module, "KLD9006", message);
+}
+
+fn assert_ir_diagnostic(module: &Module, code: &str, message: &str) {
     let diagnostics = validate(module);
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code.0 == "KLD9006"
+            .any(|diagnostic| diagnostic.code.0 == code
                 && diagnostic.primary.message.contains(message)),
         "{diagnostics:#?}"
     );
@@ -86,6 +90,90 @@ fn replace_first_loan_read_with_move(module: &mut Module) {
         }
     }
     panic!("compiler-produced loan read exists");
+}
+
+fn replace_first_loan_read_with_take(module: &mut Module) {
+    for function in &mut module.functions {
+        for block in &mut function.blocks {
+            if let Some(index) = block
+                .instructions
+                .iter()
+                .position(|instruction| matches!(instruction, Instruction::Copy { .. }))
+            {
+                let Instruction::Copy { dst, src, span } = block.instructions[index] else {
+                    unreachable!()
+                };
+                block.instructions[index] = Instruction::Take { dst, src, span };
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced loan read exists");
+}
+
+fn replace_first_projected_call_index_with_lifecycle(module: &mut Module) {
+    for function in &mut module.functions {
+        let lifecycle = function.current_lifecycle;
+        for block in &mut function.blocks {
+            if let Some(Instruction::Call {
+                argument_sources, ..
+            }) = block
+                .instructions
+                .iter_mut()
+                .find(|instruction| matches!(instruction, Instruction::Call { .. }))
+            {
+                let source = argument_sources
+                    .iter_mut()
+                    .find_map(|(_, source)| source.as_mut())
+                    .expect("projected call source exists");
+                source.projections[0] = ArgumentProjection::Index(lifecycle);
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced projected call exists");
+}
+
+fn replace_first_projected_call_base_with_lifecycle(module: &mut Module) {
+    for function in &mut module.functions {
+        let lifecycle = function.current_lifecycle;
+        for block in &mut function.blocks {
+            if let Some(Instruction::Call {
+                argument_sources, ..
+            }) = block
+                .instructions
+                .iter_mut()
+                .find(|instruction| matches!(instruction, Instruction::Call { .. }))
+            {
+                let source = argument_sources
+                    .iter_mut()
+                    .find_map(|(_, source)| source.as_mut())
+                    .expect("projected call source exists");
+                source.base = lifecycle;
+                source.projections.clear();
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced projected call exists");
+}
+
+fn empty_first_managed_return(module: &mut Module) {
+    for function in &mut module.functions {
+        if function.return_type != IrType::Text {
+            continue;
+        }
+        for block in &mut function.blocks {
+            if let Terminator::Return(Some(value)) = block.terminator {
+                block.instructions.push(Instruction::DropHome {
+                    home: value,
+                    span: function.span,
+                });
+                return;
+            }
+        }
+    }
+    panic!("compiler-produced managed return exists");
 }
 
 fn rewrite_cleanup_scope(module: &mut Module, scope: StorageScopeId) {
@@ -161,6 +249,49 @@ fn a_loan_register_cannot_be_moved_or_dropped() {
     );
     replace_first_loan_read_with_move(&mut module);
     assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn a_loan_register_cannot_be_taken() {
+    let mut module = lower_ok(
+        "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { return inspect(\"Keld\") }\n",
+    );
+    replace_first_loan_read_with_take(&mut module);
+    assert_ir_error(&module, "loan register used as an owned source");
+}
+
+#[test]
+fn projected_call_source_index_must_be_an_int() {
+    let mut module = lower_ok(
+        "fn inspect(items: List[Int]) -> Int { return items.length }\nfn main() -> Int { let matrix: List[List[Int]] = List(); return inspect(matrix[0]) }\n",
+    );
+    replace_first_projected_call_index_with_lifecycle(&mut module);
+    assert_ir_diagnostic(
+        &module,
+        "KLD9002",
+        "register type does not match the operation",
+    );
+}
+
+#[test]
+fn projected_call_source_must_resolve_to_the_argument_type() {
+    let mut module = lower_ok(
+        "fn inspect(items: List[Int]) -> Int { return items.length }\nfn main() -> Int { let matrix: List[List[Int]] = List(); return inspect(matrix[0]) }\n",
+    );
+    replace_first_projected_call_base_with_lifecycle(&mut module);
+    assert_ir_diagnostic(
+        &module,
+        "KLD9006",
+        "call argument source does not resolve to the parameter type",
+    );
+}
+
+#[test]
+fn managed_return_register_must_be_live() {
+    let mut module =
+        lower_ok("fn make() -> Text { return \"ok\" }\nfn main() -> Int { return 0 }\n");
+    empty_first_managed_return(&mut module);
+    assert_ir_error(&module, "returned managed home must be live");
 }
 
 #[test]

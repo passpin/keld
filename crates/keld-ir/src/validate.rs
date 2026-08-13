@@ -538,6 +538,113 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         self.function.register_storage.get(register.0 as usize)
     }
 
+    fn require_take_source(
+        &mut self,
+        register: Register,
+        ty: &IrType,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+    ) {
+        match self.register_storage(register) {
+            Some(RegisterStorage::Home { .. }) => {
+                if state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Live {
+                    self.sink
+                        .error(STORAGE_ERROR, span, "take source is not a live Home");
+                }
+            }
+            Some(RegisterStorage::Trivial | RegisterStorage::EntityFlow)
+                if !is_managed_type(self.module, ty) => {}
+            Some(RegisterStorage::Loan) => {
+                self.sink
+                    .error(STORAGE_ERROR, span, "loan register used as an owned source");
+            }
+            _ => self.sink.error(
+                STORAGE_ERROR,
+                span,
+                "take source must be a live Home or value register",
+            ),
+        }
+    }
+
+    fn require_take_destination(
+        &mut self,
+        register: Register,
+        ty: &IrType,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+    ) {
+        match self.register_storage(register) {
+            Some(RegisterStorage::Home { .. }) if is_managed_type(self.module, ty) => {
+                if state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Empty {
+                    self.sink
+                        .error(STORAGE_ERROR, span, "take destination is already live");
+                }
+            }
+            Some(
+                RegisterStorage::Home { .. }
+                | RegisterStorage::Trivial
+                | RegisterStorage::EntityFlow,
+            ) => {}
+            _ => self.sink.error(
+                STORAGE_ERROR,
+                span,
+                "take destination must be a Home or value register",
+            ),
+        }
+    }
+
+    fn require_consuming_source(
+        &mut self,
+        register: Register,
+        ty: &IrType,
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+        message: &'static str,
+    ) {
+        match self.register_storage(register) {
+            Some(RegisterStorage::Home { .. }) => {
+                if state.get(&register).copied().unwrap_or(HomeState::Empty) != HomeState::Live {
+                    self.sink.error(STORAGE_ERROR, span, message);
+                }
+            }
+            Some(
+                RegisterStorage::Trivial | RegisterStorage::EntityFlow | RegisterStorage::Loan,
+            ) if !is_managed_type(self.module, ty) => {}
+            Some(RegisterStorage::Loan) => {
+                self.sink
+                    .error(STORAGE_ERROR, span, "loan register used as an owned source");
+            }
+            _ => self.sink.error(STORAGE_ERROR, span, message),
+        }
+    }
+
+    fn require_consuming_fields(
+        &mut self,
+        definition: DefId,
+        fields: &[(FieldId, Register)],
+        state: &BTreeMap<Register, HomeState>,
+        span: Span,
+        message: &'static str,
+    ) {
+        let Some(definition) = self
+            .module
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == definition)
+        else {
+            return;
+        };
+        for (field, register) in fields {
+            if let Some(ty) = definition
+                .fields
+                .iter()
+                .find_map(|(candidate, ty)| (*candidate == *field).then_some(ty))
+            {
+                self.require_consuming_source(*register, ty, state, span, message);
+            }
+        }
+    }
+
     fn validate_block(&mut self, block_id: IrBlockId) {
         let block = &self.function.blocks[block_id.0 as usize];
         let mut available = self.incoming_definitions[block_id.0 as usize].clone();
@@ -632,6 +739,42 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         };
 
         match instruction {
+            Instruction::Take { dst, src, .. } => {
+                if let Some(ty) = self.register_type(*src, span).cloned() {
+                    self.require_take_source(*src, &ty, state, span);
+                    self.require_take_destination(*dst, &ty, state, span);
+                } else {
+                    self.check_register(*dst, span);
+                }
+            }
+            Instruction::ListPush { list, value, .. }
+            | Instruction::ListPushPlace { list, value, .. } => {
+                if let Some(IrType::List(element)) = self.register_type(*list, span).cloned() {
+                    self.require_consuming_source(
+                        *value,
+                        &element,
+                        state,
+                        span,
+                        "list push source is empty or not owned",
+                    );
+                }
+            }
+            Instruction::ConstructStruct {
+                dst,
+                definition,
+                fields,
+                ..
+            } => {
+                let ty = IrType::Struct(*definition);
+                self.require_take_destination(*dst, &ty, state, span);
+                self.require_consuming_fields(
+                    *definition,
+                    fields,
+                    state,
+                    span,
+                    "constructor field source is empty or not owned",
+                );
+            }
             Instruction::InstallHome {
                 destination,
                 source,
@@ -758,6 +901,13 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 if let Some(destination_type) = destination_type {
                     self.expect_type(*source, &destination_type, span);
                     self.expect_type(*displaced, &destination_type, span);
+                    self.require_consuming_source(
+                        *source,
+                        &destination_type,
+                        state,
+                        span,
+                        "place replacement source is empty or not owned",
+                    );
                 } else {
                     self.check_register(*source, span);
                     self.check_register(*displaced, span);
@@ -818,8 +968,26 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 }
             }
             Instruction::ListReplace {
-                value, displaced, ..
+                receiver,
+                value,
+                displaced,
+                ..
             } => {
+                let element_type =
+                    self.register_type(receiver.list, span)
+                        .and_then(|ty| match ty {
+                            IrType::List(element) => Some((**element).clone()),
+                            _ => None,
+                        });
+                if let Some(element_type) = element_type {
+                    self.require_consuming_source(
+                        *value,
+                        &element_type,
+                        state,
+                        span,
+                        "indexed replacement source is empty or not owned",
+                    );
+                }
                 let source_role = role(*value);
                 let source_ok = !matches!(source_role, Some(RegisterStorage::Loan) | None);
                 if !source_ok {
@@ -842,6 +1010,50 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                     require_empty(self.sink, *displaced, "displaced slot is already live");
                 }
             }
+            Instruction::AllocateEntity {
+                definition, fields, ..
+            } => {
+                self.require_consuming_fields(
+                    *definition,
+                    fields,
+                    state,
+                    span,
+                    "entity field source is empty or not owned",
+                );
+            }
+            Instruction::WriteField {
+                view, field, value, ..
+            } => {
+                if let Some((_, definition)) = views.get(view)
+                    && let Some(ty) = self.field_type(*definition, *field, span).cloned()
+                {
+                    self.require_consuming_source(
+                        *value,
+                        &ty,
+                        state,
+                        span,
+                        "entity field source is empty or not owned",
+                    );
+                }
+            }
+            Instruction::Call {
+                function,
+                arguments,
+                ..
+            } => {
+                if let Some(callee) = self.module.functions.get(function.0 as usize).cloned() {
+                    for (parameter, argument) in arguments {
+                        if callee.parameter_modes.get(parameter.0 as usize)
+                            == Some(&keld_semantics::ParameterMode::Take)
+                            && let Some(callee_register) =
+                                callee.parameters.get(parameter.0 as usize)
+                            && let Some(ty) = callee.register_types.get(callee_register.0 as usize)
+                        {
+                            self.require_take_source(*argument, ty, state, span);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         *state = transfer_home_states(
@@ -861,6 +1073,16 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         let Terminator::Return(value) = terminator else {
             return;
         };
+        if let Some(value) = value
+            && is_managed_type(self.module, &self.function.return_type)
+            && (!matches!(
+                self.register_storage(*value),
+                Some(RegisterStorage::Home { .. })
+            ) || state.get(value).copied().unwrap_or(HomeState::Empty) != HomeState::Live)
+        {
+            self.sink
+                .error(STORAGE_ERROR, span, "returned managed home must be live");
+        }
         for (register, home_state) in state {
             if Some(*register) == *value {
                 continue;
@@ -1565,11 +1787,6 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         span: Span,
     ) {
         self.require_active_lifecycle(current_lifecycle, active_lifecycles, span);
-        for (_, source) in argument_sources {
-            if let Some(source) = source {
-                self.check_register(source.base, span);
-            }
-        }
         let Some(callee) = self.module.functions.get(function.0 as usize).cloned() else {
             self.sink
                 .error(REGISTER_ERROR, span, "call targets an unknown function");
@@ -1589,11 +1806,41 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 "call must supply every parameter exactly once",
             );
         }
+        let source_parameters = argument_sources
+            .iter()
+            .map(|(parameter, _)| parameter.0)
+            .collect::<BTreeSet<_>>();
+        if source_parameters.len() != argument_sources.len() || source_parameters != actual {
+            self.sink.error(
+                STORAGE_ERROR,
+                span,
+                "call argument sources must match call arguments exactly",
+            );
+        }
         for (parameter, argument) in arguments {
             if let Some(callee_register) = callee.parameters.get(parameter.0 as usize)
                 && let Some(expected_type) = callee.register_types.get(callee_register.0 as usize)
             {
                 self.expect_type(*argument, expected_type, span);
+            }
+        }
+        for (parameter, source) in argument_sources {
+            let Some(callee_register) = callee.parameters.get(parameter.0 as usize) else {
+                continue;
+            };
+            let Some(expected_type) = callee.register_types.get(callee_register.0 as usize) else {
+                continue;
+            };
+            let Some(source) = source else {
+                continue;
+            };
+            let source_type = self.validate_argument_source(source, span);
+            if source_type.as_ref() != Some(expected_type) {
+                self.sink.error(
+                    STORAGE_ERROR,
+                    span,
+                    "call argument source does not resolve to the parameter type",
+                );
             }
         }
         match (&callee.return_type, dst) {
@@ -1868,6 +2115,29 @@ fn is_implicit_copy_type(module: &Module, ty: &IrType) -> bool {
                     .all(|(_, field)| is_implicit_copy_type(module, field))
             }),
         IrType::Text | IrType::List(_) | IrType::Entity(_) | IrType::Lifecycle => false,
+    }
+}
+
+fn is_managed_type(module: &Module, ty: &IrType) -> bool {
+    match ty {
+        IrType::Text | IrType::List(_) => true,
+        IrType::Optional(inner) => is_managed_type(module, inner),
+        IrType::Struct(definition) => module
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == *definition)
+            .is_some_and(|definition| {
+                definition
+                    .fields
+                    .iter()
+                    .any(|(_, field)| is_managed_type(module, field))
+            }),
+        IrType::Unit
+        | IrType::Bool
+        | IrType::Int
+        | IrType::Entity(_)
+        | IrType::Link { .. }
+        | IrType::Lifecycle => false,
     }
 }
 

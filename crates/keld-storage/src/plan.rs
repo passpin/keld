@@ -1,4 +1,4 @@
-use keld_flow::{Place, StorageScopeId, ValueId};
+use keld_flow::{Place, PlaceProjection, StorageScopeId, ValueId};
 use keld_semantics::LocalId;
 use std::collections::BTreeSet;
 
@@ -20,7 +20,13 @@ pub enum ValueStorage {
     Trivial,
     EntityFlow,
     Loan(Place),
-    OwnedTemporary { scope: StorageScopeId },
+    LoanValue {
+        root: ValueId,
+        projections: Vec<PlaceProjection>,
+    },
+    OwnedTemporary {
+        scope: StorageScopeId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

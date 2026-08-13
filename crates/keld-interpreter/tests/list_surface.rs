@@ -93,14 +93,26 @@ fn clear_destroys_elements_in_reverse_index_order() {
 }
 
 #[test]
+fn clear_pops_elements_without_releasing_list_storage() {
+    let mut list = RuntimeList::with_capacity_for_test(8);
+    list.push_for_test(Value::Int(1));
+    list.push_for_test(Value::Int(2));
+    let capacity = list.capacity_for_test();
+
+    while list.pop().is_some() {}
+
+    assert_eq!(list.length(), 0);
+    assert_eq!(list.capacity_for_test(), capacity);
+}
+
+#[test]
 fn remove_and_clear_preserve_capacity() {
     let mut list = RuntimeList::with_capacity_for_test(8);
     list.push_for_test(Value::Int(1));
     list.push_for_test(Value::Int(2));
     let capacity = list.capacity_for_test();
     let _ = list.remove(0);
-    let mut removed = Vec::new();
-    list.clear_into(&mut removed);
+    while list.pop().is_some() {}
     assert_eq!(list.capacity_for_test(), capacity);
 }
 

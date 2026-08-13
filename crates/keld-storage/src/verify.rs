@@ -1052,7 +1052,9 @@ fn transfer_operation(
                         state.homes[local.0 as usize] = Home::Live;
                     }
                 }
-                ValueOrigin::BorrowedPlace { .. } | ValueOrigin::BorrowedUnknown => {
+                ValueOrigin::BorrowedPlace { .. }
+                | ValueOrigin::BorrowedValue { .. }
+                | ValueOrigin::BorrowedUnknown => {
                     diagnostics.push(error(
                         PARTIAL_MOVE,
                         *span,
@@ -1116,7 +1118,9 @@ fn transfer_operation(
                             *span,
                             "a consuming argument requires `take` or an owned temporary",
                         )),
-                        ValueOrigin::BorrowedPlace { .. } | ValueOrigin::BorrowedUnknown => {
+                        ValueOrigin::BorrowedPlace { .. }
+                        | ValueOrigin::BorrowedValue { .. }
+                        | ValueOrigin::BorrowedUnknown => {
                             diagnostics.push(error(
                                 PARTIAL_MOVE,
                                 *span,
@@ -1212,7 +1216,7 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[base.0 as usize];
             let base_origin = state.origins.get(base.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *field, base_origin);
+            let origin = read_field_origin(flow, base_type, *base, *field, base_origin);
             if !matches!(origin, ValueOrigin::Implicit)
                 && let Some(base_origin) = state.origins.get(base.0 as usize)
             {
@@ -1237,7 +1241,7 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[entity.0 as usize];
             let base_origin = state.origins.get(entity.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *field, base_origin);
+            let origin = read_field_origin(flow, base_type, *entity, *field, base_origin);
             state.origins[dst.0 as usize] = origin;
             if !matches!(
                 state.origins.get(dst.0 as usize),
@@ -1264,7 +1268,7 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[link.0 as usize];
             let base_origin = state.origins.get(link.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *field, base_origin);
+            let origin = read_field_origin(flow, base_type, *link, *field, base_origin);
             state.origins[dst.0 as usize] = origin;
             if !matches!(
                 state.origins.get(dst.0 as usize),
@@ -1350,7 +1354,9 @@ fn verify_terminator(
             function.span,
             "returning a named single-home value requires `take` or `.copy()`",
         )),
-        ValueOrigin::BorrowedPlace { .. } | ValueOrigin::BorrowedUnknown => {
+        ValueOrigin::BorrowedPlace { .. }
+        | ValueOrigin::BorrowedValue { .. }
+        | ValueOrigin::BorrowedUnknown => {
             diagnostics.push(error(
                 PARTIAL_MOVE,
                 function.span,
@@ -1386,7 +1392,8 @@ fn access_place(origin: &ValueOrigin) -> Option<(Place, bool)> {
             true,
         )),
         ValueOrigin::BorrowedPlace { place, loaned } => Some((place.clone(), *loaned)),
-        ValueOrigin::BorrowedUnknown
+        ValueOrigin::BorrowedValue { .. }
+        | ValueOrigin::BorrowedUnknown
         | ValueOrigin::Implicit
         | ValueOrigin::Owned
         | ValueOrigin::Unknown => None,
@@ -1595,6 +1602,7 @@ fn field_type(flow: &FlowModule, base_type: TypeId, field: FieldId) -> Option<Ty
 fn read_field_origin(
     flow: &FlowModule,
     base_type: TypeId,
+    base: ValueId,
     field: FieldId,
     base_origin: Option<ValueOrigin>,
 ) -> ValueOrigin {
@@ -1625,12 +1633,18 @@ fn read_field_origin(
             place.projections.push(PlaceProjection::Field(field));
             ValueOrigin::BorrowedPlace { place, loaned }
         }
-        Some(
-            ValueOrigin::BorrowedUnknown
-            | ValueOrigin::Implicit
-            | ValueOrigin::Owned
-            | ValueOrigin::Unknown,
-        )
+        Some(ValueOrigin::BorrowedValue {
+            root,
+            mut projections,
+        }) => {
+            projections.push(PlaceProjection::Field(field));
+            ValueOrigin::BorrowedValue { root, projections }
+        }
+        Some(ValueOrigin::Owned) => ValueOrigin::BorrowedValue {
+            root: base,
+            projections: vec![PlaceProjection::Field(field)],
+        },
+        Some(ValueOrigin::BorrowedUnknown | ValueOrigin::Implicit | ValueOrigin::Unknown)
         | None => ValueOrigin::BorrowedUnknown,
     }
 }
@@ -1663,29 +1677,29 @@ fn list_index_origin(
     if flow.types.storage_class(*element) != StorageClass::SingleHome {
         return ValueOrigin::Implicit;
     }
-    let (mut place, loaned) = receiver
-        .place
-        .clone()
-        .map(|place| {
-            let loaned = state.borrowed.contains(&place.base);
-            (place, loaned)
-        })
-        .or_else(|| {
-            state
-                .origins
-                .get(receiver.value.0 as usize)
-                .and_then(access_place)
-        })
-        .unwrap_or((
-            Place {
-                base: LocalId(u32::MAX),
-                projections: Vec::new(),
-            },
-            true,
-        ));
-    if place.base.0 == u32::MAX {
-        return ValueOrigin::BorrowedUnknown;
+    if let Some(place) = receiver.place.clone() {
+        let loaned = state.borrowed.contains(&place.base);
+        let mut place = place;
+        place
+            .projections
+            .push(PlaceProjection::Index(IndexIdentity::Value(index)));
+        return ValueOrigin::BorrowedPlace { place, loaned };
     }
+    if let Some(ValueOrigin::BorrowedValue {
+        root,
+        mut projections,
+    }) = state.origins.get(receiver.value.0 as usize).cloned()
+    {
+        projections.push(PlaceProjection::Index(IndexIdentity::Value(index)));
+        return ValueOrigin::BorrowedValue { root, projections };
+    }
+    let Some((mut place, loaned)) = state
+        .origins
+        .get(receiver.value.0 as usize)
+        .and_then(access_place)
+    else {
+        return ValueOrigin::BorrowedUnknown;
+    };
     place
         .projections
         .push(PlaceProjection::Index(IndexIdentity::Value(index)));
@@ -1736,7 +1750,9 @@ fn require_consumable_value(
             span,
             "a named single-home list element requires `take` or `.copy()`",
         )),
-        ValueOrigin::BorrowedPlace { .. } | ValueOrigin::BorrowedUnknown => {
+        ValueOrigin::BorrowedPlace { .. }
+        | ValueOrigin::BorrowedValue { .. }
+        | ValueOrigin::BorrowedUnknown => {
             diagnostics.push(error(
                 PARTIAL_MOVE,
                 span,
