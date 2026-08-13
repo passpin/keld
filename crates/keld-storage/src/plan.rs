@@ -27,6 +27,7 @@ pub enum ValueStorage {
     OwnedTemporary {
         scope: StorageScopeId,
     },
+    Unreachable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

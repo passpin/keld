@@ -1,5 +1,5 @@
 use crate::access::{self, AccessPath, ValueOrigin};
-use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, cleanup};
+use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, ValueStorage, cleanup};
 use crate::{EmptyReason, Home};
 use keld_flow::{
     BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, IndexIdentity, Place, PlaceProjection,
@@ -170,6 +170,7 @@ fn verify_function(
     let flow = &lifecycle.flow;
     let mut diagnostics = Vec::new();
     let mut plan = cleanup::new_function_plan(flow, function);
+    mark_unreachable_values(lifecycle, function, &mut plan);
     let initial = initial_state(flow, function);
     let mut incoming = vec![None::<HomeState>; function.blocks.len()];
     let mut exit_states = vec![None::<HomeState>; function.blocks.len()];
@@ -246,6 +247,26 @@ fn verify_function(
     }
     annotate_exit_plan(function, &exit_states, &mut plan);
     (diagnostics, plan)
+}
+
+fn mark_unreachable_values(
+    lifecycle: &VerifiedFlowModule,
+    function: &FlowFunction,
+    plan: &mut FunctionStoragePlan,
+) {
+    for block in &function.blocks {
+        if lifecycle.is_block_reachable(function.id, block.id) {
+            continue;
+        }
+        for operation in &block.operations {
+            let Some(value) = cleanup::defined_value(operation) else {
+                continue;
+            };
+            if let Some(storage) = plan.values.get_mut(value.0 as usize) {
+                *storage = ValueStorage::Unreachable;
+            }
+        }
+    }
 }
 
 fn update_cleanup_state(

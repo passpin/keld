@@ -4,7 +4,10 @@ use crate::{
     ViewMode,
 };
 use keld_flow::FlowModule;
-use keld_flow::{ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection, ValueId};
+use keld_flow::{
+    BlockId, ExitTarget, FlowFunction, FlowOp, LifecycleId, Place, PlaceProjection,
+    Terminator as FlowTerminator, ValueId,
+};
 use keld_lifecycle::VerifiedFlowModule;
 use keld_semantics::{
     CompareOp, Definition, DefinitionKind, LocalId, StorageClass, TypeId, TypeKind, TypeStore,
@@ -13,7 +16,7 @@ use keld_storage::{
     CleanupAction, FunctionStoragePlan, FunctionStorageSummary, HomeId, LocalStorage, StoreKind,
     ValueStorage, VerifiedStorageModule,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[must_use]
 pub trait VerifiedInput {
@@ -23,6 +26,9 @@ pub trait VerifiedInput {
         function: keld_semantics::FunctionId,
     ) -> Option<&FunctionStorageSummary>;
     fn storage_plan(&self, function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan>;
+    fn is_block_reachable(&self, _function: keld_semantics::FunctionId, _block: BlockId) -> bool {
+        true
+    }
 }
 
 impl VerifiedInput for VerifiedFlowModule {
@@ -40,6 +46,10 @@ impl VerifiedInput for VerifiedFlowModule {
     fn storage_plan(&self, _function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan> {
         None
     }
+
+    fn is_block_reachable(&self, function: keld_semantics::FunctionId, block: BlockId) -> bool {
+        VerifiedFlowModule::is_block_reachable(self, function, block)
+    }
 }
 
 impl VerifiedInput for VerifiedStorageModule {
@@ -56,6 +66,10 @@ impl VerifiedInput for VerifiedStorageModule {
 
     fn storage_plan(&self, function: keld_semantics::FunctionId) -> Option<&FunctionStoragePlan> {
         self.annotations.functions.get(function.0 as usize)
+    }
+
+    fn is_block_reachable(&self, function: keld_semantics::FunctionId, block: BlockId) -> bool {
+        self.lifecycle.is_block_reachable(function, block)
     }
 }
 
@@ -89,6 +103,15 @@ pub fn lower<V: VerifiedInput>(verified: &V) -> Module {
                     &flow.types,
                     verified.storage_summary(function.id),
                     verified.storage_plan(function.id),
+                    function
+                        .blocks
+                        .iter()
+                        .filter_map(|block| {
+                            verified
+                                .is_block_reachable(function.id, block.id)
+                                .then_some(block.id)
+                        })
+                        .collect(),
                 )
                 .lower()
             })
@@ -111,6 +134,7 @@ impl Registers {
         function: &FlowFunction,
         types: &TypeStore,
         storage_plan: Option<&FunctionStoragePlan>,
+        reachable_blocks: &BTreeSet<BlockId>,
     ) -> Self {
         let mut register_types = Vec::new();
         let mut register_storage = Vec::new();
@@ -127,13 +151,18 @@ impl Registers {
             .iter()
             .enumerate()
             .map(|(index, ty)| {
+                let value =
+                    ValueId(u32::try_from(index).expect("verified value count fits in u32"));
+                let storage_unreachable = storage_plan.is_some_and(|plan| {
+                    plan.values
+                        .get(value.0 as usize)
+                        .is_some_and(|storage| matches!(storage, ValueStorage::Unreachable))
+                });
+                if storage_unreachable {
+                    return push(IrType::Unit, RegisterStorage::Trivial);
+                }
                 let planned = storage_plan.map_or(RegisterStorage::Trivial, |plan| {
-                    value_register_storage(
-                        plan,
-                        keld_flow::ValueId(
-                            u32::try_from(index).expect("verified value count fits in u32"),
-                        ),
-                    )
+                    value_register_storage(plan, value)
                 });
                 push(
                     map_type(types, *ty),
@@ -167,10 +196,11 @@ impl Registers {
             .blocks
             .iter()
             .filter(|block| {
-                matches!(
-                    block.terminator,
-                    keld_flow::Terminator::BranchIdentity { .. }
-                )
+                reachable_blocks.contains(&block.id)
+                    && matches!(
+                        block.terminator,
+                        keld_flow::Terminator::BranchIdentity { .. }
+                    )
             })
             .map(|block| (block.id, push(IrType::Bool, RegisterStorage::Trivial)))
             .collect();
@@ -214,6 +244,7 @@ struct FunctionLowerer<'flow> {
     definitions: &'flow [Definition],
     types: &'flow TypeStore,
     registers: Registers,
+    reachable_blocks: BTreeSet<BlockId>,
     next_view: u32,
     storage_summary: Option<&'flow FunctionStorageSummary>,
     storage_plan: Option<&'flow FunctionStoragePlan>,
@@ -226,12 +257,14 @@ impl<'flow> FunctionLowerer<'flow> {
         types: &'flow TypeStore,
         storage_summary: Option<&'flow FunctionStorageSummary>,
         storage_plan: Option<&'flow FunctionStoragePlan>,
+        reachable_blocks: BTreeSet<BlockId>,
     ) -> Self {
         Self {
             function,
             definitions,
             types,
-            registers: Registers::new(function, types, storage_plan),
+            registers: Registers::new(function, types, storage_plan, &reachable_blocks),
+            reachable_blocks,
             next_view: 0,
             storage_summary,
             storage_plan,
@@ -244,6 +277,13 @@ impl<'flow> FunctionLowerer<'flow> {
             .blocks
             .iter()
             .map(|block| {
+                if !self.reachable_blocks.contains(&block.id) {
+                    return IrBlock {
+                        id: IrBlockId(block.id.0),
+                        instructions: Vec::new(),
+                        terminator: Terminator::Unreachable,
+                    };
+                }
                 let mut instructions = Vec::new();
                 let block_plan = self
                     .storage_plan
@@ -539,6 +579,7 @@ impl<'flow> FunctionLowerer<'flow> {
                 dst: self.registers.value(*dst),
                 inputs: inputs
                     .iter()
+                    .filter(|(block, _)| self.reachable_blocks.contains(block))
                     .map(|(block, value)| (IrBlockId(block.0), self.registers.value(*value)))
                     .collect(),
                 span: *span,
@@ -1019,22 +1060,29 @@ impl<'flow> FunctionLowerer<'flow> {
         output: &mut Vec<Instruction>,
     ) -> Terminator {
         match terminator {
-            keld_flow::Terminator::Goto(target) => Terminator::Goto(IrBlockId(target.0)),
-            keld_flow::Terminator::Branch {
+            FlowTerminator::Goto(target) => self
+                .reachable_target(*target)
+                .map_or(Terminator::Unreachable, Terminator::Goto),
+            FlowTerminator::Branch {
                 condition,
                 then_block,
                 else_block,
-            } => Terminator::Branch {
-                condition: self.registers.value(*condition),
-                then_block: IrBlockId(then_block.0),
-                else_block: IrBlockId(else_block.0),
-            },
-            keld_flow::Terminator::BranchIdentity {
+            } => self.branch_terminator(self.registers.value(*condition), *then_block, *else_block),
+            FlowTerminator::BranchIdentity {
                 lhs,
                 rhs,
                 equal,
                 not_equal,
             } => {
+                let equal_reachable = self.reachable_target(*equal);
+                let not_equal_reachable = self.reachable_target(*not_equal);
+                if equal_reachable.is_none() || not_equal_reachable.is_none() {
+                    return match (equal_reachable, not_equal_reachable) {
+                        (Some(target), None) | (None, Some(target)) => Terminator::Goto(target),
+                        (None, None) => Terminator::Unreachable,
+                        (Some(_), Some(_)) => unreachable!(),
+                    };
+                }
                 let condition = self.registers.identity_conditions[&block];
                 output.push(Instruction::Compare {
                     dst: condition,
@@ -1049,7 +1097,7 @@ impl<'flow> FunctionLowerer<'flow> {
                     else_block: IrBlockId(not_equal.0),
                 }
             }
-            keld_flow::Terminator::ResolveLink {
+            FlowTerminator::ResolveLink {
                 link,
                 bind_local,
                 live,
@@ -1062,7 +1110,7 @@ impl<'flow> FunctionLowerer<'flow> {
                 absent: IrBlockId(absent.0),
                 span: *span,
             },
-            keld_flow::Terminator::ExitScopes {
+            FlowTerminator::ExitScopes {
                 lifecycles, next, ..
             } => {
                 if let Some(block_plan) = block_plan {
@@ -1075,16 +1123,44 @@ impl<'flow> FunctionLowerer<'flow> {
                     });
                 }
                 match next {
-                    ExitTarget::Goto(target) => Terminator::Goto(IrBlockId(target.0)),
+                    ExitTarget::Goto(target) => self
+                        .reachable_target(*target)
+                        .map_or(Terminator::Unreachable, Terminator::Goto),
                     ExitTarget::Return(value) => {
                         Terminator::Return(value.map(|value| self.registers.value(value)))
                     }
                 }
             }
-            keld_flow::Terminator::Return(value) => {
+            FlowTerminator::Return(value) => {
                 Terminator::Return(value.map(|value| self.registers.value(value)))
             }
-            keld_flow::Terminator::Unreachable => Terminator::Unreachable,
+            FlowTerminator::Unreachable => Terminator::Unreachable,
+        }
+    }
+
+    fn reachable_target(&self, block: BlockId) -> Option<IrBlockId> {
+        self.reachable_blocks
+            .contains(&block)
+            .then_some(IrBlockId(block.0))
+    }
+
+    fn branch_terminator(
+        &self,
+        condition: Register,
+        then_block: BlockId,
+        else_block: BlockId,
+    ) -> Terminator {
+        match (
+            self.reachable_target(then_block),
+            self.reachable_target(else_block),
+        ) {
+            (Some(then_block), Some(else_block)) => Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            },
+            (Some(target), None) | (None, Some(target)) => Terminator::Goto(target),
+            (None, None) => Terminator::Unreachable,
         }
     }
 }
@@ -1127,7 +1203,7 @@ fn value_register_storage(plan: &FunctionStoragePlan, value: ValueId) -> Registe
         .get(value.0 as usize)
         .unwrap_or(&ValueStorage::Trivial)
     {
-        ValueStorage::Trivial => RegisterStorage::Trivial,
+        ValueStorage::Trivial | ValueStorage::Unreachable => RegisterStorage::Trivial,
         ValueStorage::EntityFlow => RegisterStorage::EntityFlow,
         ValueStorage::Loan(_) | ValueStorage::LoanValue { .. } => RegisterStorage::Loan,
         ValueStorage::OwnedTemporary { scope } => RegisterStorage::Home {
