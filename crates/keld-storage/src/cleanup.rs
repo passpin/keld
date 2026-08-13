@@ -1,31 +1,11 @@
+use crate::access::ValueOrigin;
 use crate::plan::{
     BlockStoragePlan, FunctionStoragePlan, LocalStorage, OperationStoragePlan, ValueStorage,
 };
 use crate::state::{CleanupOrder, ScopeCleanupState};
-use keld_flow::{
-    FlowFunction, FlowModule, FlowOp, Place, PlaceProjection, StorageScopeId, ValueId,
-};
+use keld_flow::{FlowFunction, FlowModule, FlowOp, Place, StorageScopeId, ValueId};
 use keld_semantics::{LocalId, ParameterMode, StorageClass, TypeKind};
 use std::collections::{BTreeMap, BTreeSet};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ValueOrigin {
-    Implicit,
-    Local(LocalId),
-    Borrowed(LocalId),
-    BorrowedPlace {
-        place: Place,
-        loaned: bool,
-    },
-    BorrowedValue {
-        root: ValueId,
-        projections: Vec<PlaceProjection>,
-    },
-    BorrowedUnknown,
-    Entity(LocalId),
-    Owned,
-    Unknown,
-}
 
 pub(crate) fn initial_cleanup_orders(function: &FlowFunction) -> Vec<ScopeCleanupState> {
     function

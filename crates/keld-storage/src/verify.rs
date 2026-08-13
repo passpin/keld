@@ -1,10 +1,11 @@
-use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, cleanup, cleanup::ValueOrigin};
+use crate::access::{self, AccessPath, ValueOrigin};
+use crate::{CleanupAction, FunctionStoragePlan, HomeId, StoreKind, cleanup};
 use crate::{EmptyReason, Home};
 use keld_flow::{
     BlockId, ExitTarget, FlowFunction, FlowModule, FlowOp, IndexIdentity, Place, PlaceProjection,
     StorageReceiver, Terminator, ValueId,
 };
-use keld_lifecycle::VerifiedFlowModule;
+use keld_lifecycle::{EntityOperationFacts, VerifiedFlowModule};
 use keld_semantics::{
     FieldId, FunctionId, LocalId, ParameterMode, StorageClass, TypeId, TypeKind, TypeStore,
 };
@@ -73,7 +74,7 @@ pub fn verify(lifecycle: VerifiedFlowModule) -> Verification {
     }
     let mut annotations = StorageAnnotations::default();
     for function in &flow.functions {
-        let (mut function_diagnostics, plan) = verify_function(flow, function, &summaries);
+        let (mut function_diagnostics, plan) = verify_function(&lifecycle, function, &summaries);
         diagnostics.append(&mut function_diagnostics);
         annotations.functions.push(plan);
     }
@@ -137,21 +138,22 @@ struct PendingCall {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Reservation {
     parameter: keld_semantics::ParameterIndex,
-    place: Place,
+    access: AccessPath,
     effect: LoanEffect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IndexedReservation {
     reservation: u32,
-    list: Place,
+    list: AccessPath,
 }
 
 fn verify_function(
-    flow: &FlowModule,
+    lifecycle: &VerifiedFlowModule,
     function: &FlowFunction,
     summaries: &[FunctionStorageSummary],
 ) -> (Vec<Diagnostic>, FunctionStoragePlan) {
+    let flow = &lifecycle.flow;
     let mut diagnostics = Vec::new();
     let mut plan = cleanup::new_function_plan(flow, function);
     let initial = initial_state(flow, function);
@@ -166,10 +168,17 @@ fn verify_function(
         let block = &function.blocks[block_id.0 as usize];
         let mut state = state;
         for (operation_index, operation) in block.operations.iter().enumerate() {
+            let facts = access::operation_facts(
+                lifecycle,
+                function,
+                block_id,
+                u32::try_from(operation_index).expect("flow operation index fits in u32"),
+            );
             let before = state.clone();
             transfer_operation(
                 flow,
                 function,
+                facts,
                 operation,
                 &mut state,
                 summaries,
@@ -594,6 +603,7 @@ fn join_effect(left: LoanEffect, right: LoanEffect) -> LoanEffect {
 fn transfer_operation(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     operation: &FlowOp,
     state: &mut HomeState,
     summaries: &[FunctionStorageSummary],
@@ -631,10 +641,11 @@ fn transfer_operation(
                 return;
             }
             let effect = parameter_effect(flow, summaries, current.function, *parameter);
+            let access = AccessPath::for_place(flow, function, facts, place);
             if current
                 .reservations
                 .iter()
-                .any(|existing| reservation_conflicts(existing, place, effect))
+                .any(|existing| reservation_conflicts(facts, existing, &access, effect))
             {
                 diagnostics.push(error(
                     CONFLICTING_LOANS,
@@ -643,10 +654,9 @@ fn transfer_operation(
                 ));
             }
             if matches!(effect, LoanEffect::Structural | LoanEffect::Take)
-                && state
-                    .indexed
-                    .iter()
-                    .any(|reservation| indexed_destination_conflict(&reservation.list, place))
+                && state.indexed.iter().any(|reservation| {
+                    access::indexed_destination_conflict(facts, &reservation.list, &access)
+                })
             {
                 diagnostics.push(error(
                     INDEXED_REPLACEMENT,
@@ -658,7 +668,7 @@ fn transfer_operation(
                 && state.pending[..state.pending.len() - 1]
                     .iter()
                     .flat_map(|parent| parent.reservations.iter())
-                    .any(|existing| reservation_conflicts(existing, place, effect))
+                    .any(|existing| reservation_conflicts(facts, existing, &access, effect))
             {
                 diagnostics.push(error(
                     CONFLICTING_LOANS,
@@ -673,7 +683,7 @@ fn transfer_operation(
                 .reservations
                 .push(Reservation {
                     parameter: *parameter,
-                    place: place.clone(),
+                    access,
                     effect,
                 });
             let _ = value;
@@ -708,6 +718,8 @@ fn transfer_operation(
                         diagnostics,
                         summaries,
                         flow,
+                        function,
+                        facts,
                     );
                     state.origins[dst.0 as usize] = ValueOrigin::Local(*local);
                 }
@@ -744,6 +756,8 @@ fn transfer_operation(
                     diagnostics,
                     summaries,
                     flow,
+                    function,
+                    facts,
                 );
                 state.origins[dst.0 as usize] = ValueOrigin::Owned;
             }
@@ -757,6 +771,7 @@ fn transfer_operation(
             check_origin_access(
                 flow,
                 function,
+                facts,
                 state,
                 &origin,
                 LoanEffect::Read,
@@ -787,6 +802,7 @@ fn transfer_operation(
             check_receiver_access(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Read,
@@ -802,10 +818,11 @@ fn transfer_operation(
             span,
         } => {
             state.origins[dst.0 as usize] =
-                list_index_origin(flow, function, state, receiver, *index);
+                list_index_origin(flow, function, facts, state, receiver, *index);
             check_receiver_access(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Read,
@@ -833,6 +850,7 @@ fn transfer_operation(
             check_receiver_access(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Structural,
@@ -858,6 +876,7 @@ fn transfer_operation(
             check_receiver_access(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Structural,
@@ -875,6 +894,7 @@ fn transfer_operation(
             check_receiver_access(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Structural,
@@ -892,6 +912,7 @@ fn transfer_operation(
             check_place_access(
                 flow,
                 function,
+                facts,
                 state,
                 list,
                 LoanEffect::Structural,
@@ -901,7 +922,7 @@ fn transfer_operation(
             );
             state.indexed.push(IndexedReservation {
                 reservation: *reservation,
-                list: list.clone(),
+                list: AccessPath::for_place(flow, function, facts, list),
             });
         }
         FlowOp::EndIndexedReplacement { reservation, span } => {
@@ -939,6 +960,7 @@ fn transfer_operation(
             check_receiver_access_without_indexed(
                 flow,
                 function,
+                facts,
                 state,
                 receiver,
                 LoanEffect::Structural,
@@ -964,6 +986,7 @@ fn transfer_operation(
             check_place_access(
                 flow,
                 function,
+                facts,
                 state,
                 place,
                 LoanEffect::Structural,
@@ -982,6 +1005,7 @@ fn transfer_operation(
             check_origin_access(
                 flow,
                 function,
+                facts,
                 state,
                 &origin,
                 LoanEffect::Read,
@@ -1006,6 +1030,7 @@ fn transfer_operation(
                 check_origin_access(
                     flow,
                     function,
+                    facts,
                     state,
                     &origin,
                     LoanEffect::Read,
@@ -1031,6 +1056,8 @@ fn transfer_operation(
                 diagnostics,
                 summaries,
                 flow,
+                function,
+                facts,
             );
             match state
                 .origins
@@ -1216,13 +1243,15 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[base.0 as usize];
             let base_origin = state.origins.get(base.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *base, *field, base_origin);
+            let origin =
+                read_field_origin(flow, function, facts, base_type, *base, *field, base_origin);
             if !matches!(origin, ValueOrigin::Implicit)
                 && let Some(base_origin) = state.origins.get(base.0 as usize)
             {
                 check_origin_access(
                     flow,
                     function,
+                    facts,
                     state,
                     base_origin,
                     LoanEffect::Read,
@@ -1241,7 +1270,15 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[entity.0 as usize];
             let base_origin = state.origins.get(entity.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *entity, *field, base_origin);
+            let origin = read_field_origin(
+                flow,
+                function,
+                facts,
+                base_type,
+                *entity,
+                *field,
+                base_origin,
+            );
             state.origins[dst.0 as usize] = origin;
             if !matches!(
                 state.origins.get(dst.0 as usize),
@@ -1251,6 +1288,7 @@ fn transfer_operation(
                 check_origin_access(
                     flow,
                     function,
+                    facts,
                     state,
                     base_origin,
                     LoanEffect::Read,
@@ -1268,7 +1306,8 @@ fn transfer_operation(
         } => {
             let base_type = function.value_types[link.0 as usize];
             let base_origin = state.origins.get(link.0 as usize).cloned();
-            let origin = read_field_origin(flow, base_type, *link, *field, base_origin);
+            let origin =
+                read_field_origin(flow, function, facts, base_type, *link, *field, base_origin);
             state.origins[dst.0 as usize] = origin;
             if !matches!(
                 state.origins.get(dst.0 as usize),
@@ -1278,6 +1317,7 @@ fn transfer_operation(
                 check_origin_access(
                     flow,
                     function,
+                    facts,
                     state,
                     base_origin,
                     LoanEffect::Read,
@@ -1375,35 +1415,11 @@ fn verify_terminator(
     }
 }
 
-fn access_place(origin: &ValueOrigin) -> Option<(Place, bool)> {
-    match origin {
-        ValueOrigin::Local(local) => Some((
-            Place {
-                base: *local,
-                projections: Vec::new(),
-            },
-            false,
-        )),
-        ValueOrigin::Borrowed(local) | ValueOrigin::Entity(local) => Some((
-            Place {
-                base: *local,
-                projections: Vec::new(),
-            },
-            true,
-        )),
-        ValueOrigin::BorrowedPlace { place, loaned } => Some((place.clone(), *loaned)),
-        ValueOrigin::BorrowedValue { .. }
-        | ValueOrigin::BorrowedUnknown
-        | ValueOrigin::Implicit
-        | ValueOrigin::Owned
-        | ValueOrigin::Unknown => None,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn check_origin_access(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     origin: &ValueOrigin,
     effect: LoanEffect,
@@ -1411,24 +1427,30 @@ fn check_origin_access(
     diagnostics: &mut Vec<Diagnostic>,
     summaries: &[FunctionStorageSummary],
 ) {
-    let Some((place, loaned)) = access_place(origin) else {
+    let Some(access) = access::origin_access(flow, function, facts, origin) else {
         return;
     };
-    if !loaned
+    if !access.loaned
         && flow
             .types
-            .storage_class(function.local_types[place.base.0 as usize])
+            .storage_class(function.local_types[access.place.base.0 as usize])
             == StorageClass::SingleHome
     {
-        let _ = require_live(&state.homes[place.base.0 as usize], span, diagnostics);
+        let _ = require_live(
+            &state.homes[access.place.base.0 as usize],
+            span,
+            diagnostics,
+        );
     }
-    check_pending_access(state, place, effect, span, diagnostics, summaries, flow);
+    let _ = summaries;
+    check_pending_access_inner(facts, state, &access.path, effect, span, diagnostics, true);
 }
 
 #[allow(clippy::too_many_arguments)]
 fn check_place_access(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     place: &Place,
     effect: LoanEffect,
@@ -1439,6 +1461,7 @@ fn check_place_access(
     check_place_access_inner(
         flow,
         function,
+        facts,
         state,
         place,
         effect,
@@ -1453,6 +1476,7 @@ fn check_place_access(
 fn check_place_access_inner(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     place: &Place,
     effect: LoanEffect,
@@ -1467,13 +1491,23 @@ fn check_place_access_inner(
     {
         let _ = require_live(&state.homes[place.base.0 as usize], span, diagnostics);
     }
-    check_pending_access_inner(state, place, effect, span, diagnostics, check_indexed);
+    let access = AccessPath::for_place(flow, function, facts, place);
+    check_pending_access_inner(
+        facts,
+        state,
+        &access,
+        effect,
+        span,
+        diagnostics,
+        check_indexed,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
 fn check_place_access_without_indexed(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     place: &Place,
     effect: LoanEffect,
@@ -1484,6 +1518,7 @@ fn check_place_access_without_indexed(
     check_place_access_inner(
         flow,
         function,
+        facts,
         state,
         place,
         effect,
@@ -1498,6 +1533,7 @@ fn check_place_access_without_indexed(
 fn check_receiver_access(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     receiver: &StorageReceiver,
     effect: LoanEffect,
@@ -1509,6 +1545,7 @@ fn check_receiver_access(
         check_place_access(
             flow,
             function,
+            facts,
             state,
             place,
             effect,
@@ -1525,6 +1562,7 @@ fn check_receiver_access(
         check_origin_access(
             flow,
             function,
+            facts,
             state,
             &origin,
             effect,
@@ -1539,6 +1577,7 @@ fn check_receiver_access(
 fn check_receiver_access_without_indexed(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     receiver: &StorageReceiver,
     effect: LoanEffect,
@@ -1550,6 +1589,7 @@ fn check_receiver_access_without_indexed(
         check_place_access_without_indexed(
             flow,
             function,
+            facts,
             state,
             place,
             effect,
@@ -1566,6 +1606,7 @@ fn check_receiver_access_without_indexed(
         check_origin_access(
             flow,
             function,
+            facts,
             state,
             &origin,
             effect,
@@ -1601,6 +1642,8 @@ fn field_type(flow: &FlowModule, base_type: TypeId, field: FieldId) -> Option<Ty
 
 fn read_field_origin(
     flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
     base_type: TypeId,
     base: ValueId,
     field: FieldId,
@@ -1613,25 +1656,42 @@ fn read_field_origin(
         return ValueOrigin::Implicit;
     }
     match base_origin {
-        Some(ValueOrigin::Local(local)) => ValueOrigin::BorrowedPlace {
-            place: Place {
+        Some(ValueOrigin::Local(local)) => {
+            let place = Place {
                 base: local,
                 projections: vec![PlaceProjection::Field(field)],
-            },
-            loaned: false,
-        },
-        Some(ValueOrigin::Borrowed(local) | ValueOrigin::Entity(local)) => {
+            };
+            let access = AccessPath::for_place(flow, function, facts, &place);
             ValueOrigin::BorrowedPlace {
-                place: Place {
-                    base: local,
-                    projections: vec![PlaceProjection::Field(field)],
-                },
+                place,
+                access,
+                loaned: false,
+            }
+        }
+        Some(ValueOrigin::Borrowed(local) | ValueOrigin::Entity(local)) => {
+            let place = Place {
+                base: local,
+                projections: vec![PlaceProjection::Field(field)],
+            };
+            let access = AccessPath::for_place(flow, function, facts, &place);
+            ValueOrigin::BorrowedPlace {
+                place,
+                access,
                 loaned: true,
             }
         }
-        Some(ValueOrigin::BorrowedPlace { mut place, loaned }) => {
+        Some(ValueOrigin::BorrowedPlace {
+            mut place,
+            mut access,
+            loaned,
+        }) => {
             place.projections.push(PlaceProjection::Field(field));
-            ValueOrigin::BorrowedPlace { place, loaned }
+            access.push(PlaceProjection::Field(field));
+            ValueOrigin::BorrowedPlace {
+                place,
+                access,
+                loaned,
+            }
         }
         Some(ValueOrigin::BorrowedValue {
             root,
@@ -1663,6 +1723,7 @@ fn list_remove_origin(flow: &FlowModule, list: TypeId) -> ValueOrigin {
 fn list_index_origin(
     flow: &FlowModule,
     function: &FlowFunction,
+    facts: &EntityOperationFacts,
     state: &HomeState,
     receiver: &StorageReceiver,
     index: ValueId,
@@ -1683,7 +1744,12 @@ fn list_index_origin(
         place
             .projections
             .push(PlaceProjection::Index(IndexIdentity::Value(index)));
-        return ValueOrigin::BorrowedPlace { place, loaned };
+        let access = AccessPath::for_place(flow, function, facts, &place);
+        return ValueOrigin::BorrowedPlace {
+            place,
+            access,
+            loaned,
+        };
     }
     if let Some(ValueOrigin::BorrowedValue {
         root,
@@ -1693,17 +1759,24 @@ fn list_index_origin(
         projections.push(PlaceProjection::Index(IndexIdentity::Value(index)));
         return ValueOrigin::BorrowedValue { root, projections };
     }
-    let Some((mut place, loaned)) = state
+    let Some(origin_access) = state
         .origins
         .get(receiver.value.0 as usize)
-        .and_then(access_place)
+        .and_then(|origin| access::origin_access(flow, function, facts, origin))
     else {
         return ValueOrigin::BorrowedUnknown;
     };
+    let mut place = origin_access.place;
+    let mut access = origin_access.path;
     place
         .projections
         .push(PlaceProjection::Index(IndexIdentity::Value(index)));
-    ValueOrigin::BorrowedPlace { place, loaned }
+    access.push(PlaceProjection::Index(IndexIdentity::Value(index)));
+    ValueOrigin::BorrowedPlace {
+        place,
+        access,
+        loaned: origin_access.loaned,
+    }
 }
 
 fn place_type(flow: &FlowModule, function: &FlowFunction, place: &Place) -> Option<TypeId> {
@@ -1838,31 +1911,8 @@ fn effects_conflict(left: LoanEffect, right: LoanEffect) -> bool {
     !matches!((left, right), (LoanEffect::Read, LoanEffect::Read))
 }
 
-fn places_overlap(left: &Place, right: &Place) -> bool {
-    if left.base != right.base {
-        return false;
-    }
-    let shared = left
-        .projections
-        .iter()
-        .zip(&right.projections)
-        .take_while(|(left, right)| projections_overlap(left, right))
-        .count();
-    shared == left.projections.len().min(right.projections.len())
-}
-
-fn projections_overlap(left: &PlaceProjection, right: &PlaceProjection) -> bool {
-    match (left, right) {
-        (PlaceProjection::Field(left), PlaceProjection::Field(right)) => left == right,
-        (PlaceProjection::Index(left), PlaceProjection::Index(right)) => match (left, right) {
-            (IndexIdentity::Constant(left), IndexIdentity::Constant(right)) => left == right,
-            _ => true,
-        },
-        _ => false,
-    }
-}
-
 #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
 fn check_pending_access(
     state: &HomeState,
     place: Place,
@@ -1870,14 +1920,18 @@ fn check_pending_access(
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
     _summaries: &[FunctionStorageSummary],
-    _flow: &FlowModule,
+    flow: &FlowModule,
+    function: &FlowFunction,
+    facts: &EntityOperationFacts,
 ) {
-    check_pending_access_inner(state, &place, effect, span, diagnostics, true);
+    let access = AccessPath::for_place(flow, function, facts, &place);
+    check_pending_access_inner(facts, state, &access, effect, span, diagnostics, true);
 }
 
 fn check_pending_access_inner(
+    facts: &EntityOperationFacts,
     state: &HomeState,
-    place: &Place,
+    access_path: &AccessPath,
     effect: LoanEffect,
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1887,14 +1941,13 @@ fn check_pending_access_inner(
         pending
             .reservations
             .iter()
-            .any(|reservation| reservation_conflicts(reservation, place, effect))
+            .any(|reservation| reservation_conflicts(facts, reservation, access_path, effect))
     });
     let indexed_conflict = check_indexed
         && matches!(effect, LoanEffect::Structural | LoanEffect::Take)
-        && state
-            .indexed
-            .iter()
-            .any(|reservation| indexed_destination_conflict(&reservation.list, place));
+        && state.indexed.iter().any(|reservation| {
+            access::indexed_destination_conflict(facts, &reservation.list, access_path)
+        });
     if call_conflict || indexed_conflict {
         diagnostics.push(error(
             if indexed_conflict {
@@ -1912,36 +1965,22 @@ fn check_pending_access_inner(
     }
 }
 
-fn indexed_destination_conflict(list: &Place, access: &Place) -> bool {
-    list.base == access.base
-        && access.projections.len() <= list.projections.len()
-        && list
-            .projections
-            .iter()
-            .zip(&access.projections)
-            .all(|(list, access)| projections_overlap(list, access))
-}
-
-fn reservation_conflicts(reservation: &Reservation, access: &Place, effect: LoanEffect) -> bool {
-    if !places_overlap(&reservation.place, access) {
+fn reservation_conflicts(
+    facts: &EntityOperationFacts,
+    reservation: &Reservation,
+    access_path: &AccessPath,
+    effect: LoanEffect,
+) -> bool {
+    if !access::paths_overlap(facts, &reservation.access, access_path) {
         return false;
     }
     if effect == LoanEffect::Read
         && reservation.effect == LoanEffect::Structural
-        && is_strict_prefix(access, &reservation.place)
+        && access::is_strict_prefix(facts, access_path, &reservation.access)
     {
         return false;
     }
     effects_conflict(reservation.effect, effect)
-}
-
-fn is_strict_prefix(prefix: &Place, descendant: &Place) -> bool {
-    prefix.projections.len() < descendant.projections.len()
-        && prefix
-            .projections
-            .iter()
-            .zip(&descendant.projections)
-            .all(|(prefix, descendant)| projections_overlap(prefix, descendant))
 }
 
 fn require_live(home: &Home, span: Span, diagnostics: &mut Vec<Diagnostic>) -> bool {
