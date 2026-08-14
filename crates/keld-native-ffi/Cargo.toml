@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 keld-native-abi = { path = "../keld-native-abi" }
+keld-native-runtime = { path = "../keld-native-runtime" }
 
 [lints.rust]
 unsafe_code = "allow"
