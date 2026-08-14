@@ -136,7 +136,7 @@ toolchain. The current evidence is split by gate:
 | Scalar CFG, calls, Phi, Text, direct List, structs, and entity smoke parity | `crates/keld-native-backend/tests/native_int.rs` at O0 and O2 | complete for the covered fixtures |
 | CLI build/native run staging | `crates/keld-cli/tests/cli.rs` plus the GNU smoke commands in README | complete |
 | Projected places and PE import audit | `crates/keld-native-backend/tests/native_int.rs::projected_list_receiver_runs_natively_at_both_optimization_levels` and the import assertions in `builds_and_runs_a_const_int_program` | complete for covered fixtures |
-| Test-only allocation-control DLL and version-1 observation schema | `keld-native-ffi-test`, the `KELD_TEST_CONTROL`/`KELD_TEST_OBSERVATION` contract, and `native_int.rs::test_runtime_reports_context_allocation_at_main_span` | context setup and runtime foundation covered; full cross-engine failure matrix pending |
+| Test-only allocation-control DLL and version-1 observation schema | `keld-native-ffi-test`, the `KELD_TEST_CONTROL`/`KELD_TEST_OBSERVATION` contract, and the allocation-control cases in `native_int.rs` | context, Text, copy/concat, struct/entity, and List-growth controls covered; full cross-engine failure matrix pending |
 | Exhaustive instruction/terminator surface audit | `crates/keld-native-backend/tests/surface_audit.rs` (48 instructions, 6 terminators in the current IR) | complete |
 
 The table deliberately does not claim final Native-1 acceptance until the

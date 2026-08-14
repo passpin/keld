@@ -11,6 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEST_TEMP: AtomicU64 = AtomicU64::new(1);
+type AllocationCase = (&'static str, &'static str, fn() -> Module);
 
 fn span() -> Span {
     Span::new(SourceId(0), 0, 0).expect("empty source span")
@@ -183,6 +184,32 @@ fn test_runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
         ffi_dll.display()
     );
     runtime_artifacts_with_dll(tag, &ffi_dll)
+}
+
+fn run_test_runtime(
+    tag: &str,
+    module: &Module,
+    metadata: &SourceMetadata,
+    controls: &str,
+    optimization: OptimizationLevel,
+) -> std::process::Output {
+    let (runtime_dll, import_library) = test_runtime_artifacts(tag);
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let control = directory.join("control.txt");
+    let observation = directory.join("observation.txt");
+    std::fs::write(&control, controls).expect("control file");
+    let output = directory.join("program.exe");
+    let artifact = build_executable(
+        module,
+        metadata,
+        &request(&output, &runtime_dll, &import_library, optimization),
+    )
+    .expect("native test-runtime build");
+    Command::new(&artifact.executable)
+        .env("KELD_TEST_CONTROL", control)
+        .env("KELD_TEST_OBSERVATION", observation)
+        .output()
+        .expect("native test-runtime executable")
 }
 
 fn binary_module(lhs: i64, op: IntBinaryOp, rhs: i64) -> Module {
@@ -1039,6 +1066,72 @@ fn test_runtime_reports_context_allocation_at_main_span() {
             String::from_utf8_lossy(&child.stderr),
             "setup.keld:1:1: runtime[AllocationFault]: runtime allocation failed\n"
         );
+    }
+}
+
+#[test]
+fn test_runtime_allocation_controls_report_faults_at_the_current_instruction() {
+    let metadata = SourceMetadata {
+        path: PathBuf::from("allocation.keld"),
+        source: SourceText::from_str(SourceId(0), "allocation\n").expect("source"),
+    };
+    let cases: &[AllocationCase] = &[
+        ("text", "site_id=1 phase=text attempt=1\n", text_module),
+        ("copy", "site_id=1 phase=copy attempt=1\n", text_module),
+        ("concat", "site_id=1 phase=concat attempt=1\n", text_module),
+        (
+            "struct",
+            "site_id=1 phase=struct attempt=1\n",
+            struct_module,
+        ),
+        (
+            "entity",
+            "site_id=1 phase=entity attempt=1\n",
+            entity_module,
+        ),
+        (
+            "list-growth",
+            "site_id=1 phase=list_growth_preferred attempt=1\nsite_id=1 phase=list_growth_exact attempt=1\n",
+            list_module,
+        ),
+    ];
+    for optimization in [OptimizationLevel::O0, OptimizationLevel::O2] {
+        for (tag, controls, builder) in cases {
+            let output = run_test_runtime(
+                &format!("allocation-{tag}-{optimization:?}"),
+                &builder(),
+                &metadata,
+                controls,
+                optimization,
+            );
+            assert_eq!(output.status.code(), Some(2), "{tag} {optimization:?}");
+            assert!(output.stdout.is_empty(), "{tag} {optimization:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                "allocation.keld:1:1: runtime[AllocationFault]: runtime allocation failed\n",
+                "{tag} {optimization:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_runtime_list_preferred_growth_failure_retries_exact_capacity() {
+    let metadata = SourceMetadata {
+        path: PathBuf::from("list-growth.keld"),
+        source: SourceText::from_str(SourceId(0), "list growth\n").expect("source"),
+    };
+    for optimization in [OptimizationLevel::O0, OptimizationLevel::O2] {
+        let output = run_test_runtime(
+            &format!("list-growth-fallback-{optimization:?}"),
+            &list_module(),
+            &metadata,
+            "site_id=1 phase=list_growth_preferred attempt=1\n",
+            optimization,
+        );
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stdout, b"7\n");
+        assert!(output.stderr.is_empty());
     }
 }
 
