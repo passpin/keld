@@ -94,6 +94,7 @@ dependencies = [
  "keld-ir",
  "keld-native-abi",
  "keld-native-llvm",
+ "keld-semantics",
  "keld-source",
 ]
 

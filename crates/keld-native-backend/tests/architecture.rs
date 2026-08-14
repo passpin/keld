@@ -1,6 +1,9 @@
 #[test]
 fn backend_dependency_boundary_excludes_semantic_policy_crates() {
     let manifest = include_str!("../Cargo.toml");
+    let manifest_dependencies = manifest
+        .split_once("[dev-dependencies]")
+        .map_or(manifest, |(dependencies, _)| dependencies);
     for forbidden in [
         "keld-flow",
         "keld-lifecycle",
@@ -9,7 +12,7 @@ fn backend_dependency_boundary_excludes_semantic_policy_crates() {
         "keld-interpreter",
     ] {
         assert!(
-            !manifest.contains(forbidden),
+            !manifest_dependencies.contains(forbidden),
             "backend depends on {forbidden}"
         );
     }

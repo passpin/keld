@@ -8,8 +8,11 @@ license.workspace = true
 [dependencies]
 keld-ir = { path = "../keld-ir" }
 keld-native-abi = { path = "../keld-native-abi" }
-keld-native-llvm = { path = "../keld-native-llvm" }
+keld-native-llvm = { path = "../keld-native-llvm", features = ["llvm"] }
 keld-source = { path = "../keld-source" }
+
+[dev-dependencies]
+keld-semantics = { path = "../keld-semantics" }
 
 [lints]
 workspace = true
