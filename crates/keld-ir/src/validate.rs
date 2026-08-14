@@ -148,11 +148,14 @@ struct FunctionValidator<'module, 'sink> {
     function: &'module Function,
     sink: &'sink mut DiagnosticSink,
     predecessors: Vec<Vec<IrBlockId>>,
+    reachable_blocks: BTreeSet<IrBlockId>,
     incoming_definitions: Vec<BTreeSet<Register>>,
     outgoing_definitions: Vec<BTreeSet<Register>>,
     incoming_lifecycles: Vec<BTreeSet<Register>>,
     incoming_homes: Vec<BTreeMap<Register, HomeState>>,
     outgoing_homes: Vec<BTreeMap<Register, HomeState>>,
+    incoming_entity_identities: Vec<EntityIdentityState>,
+    outgoing_entity_identities: Vec<EntityIdentityState>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -160,6 +163,12 @@ enum HomeState {
     Empty,
     Live,
     MaybeLive,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EntityIdentityState {
+    origins: BTreeMap<Register, BTreeSet<Register>>,
+    retired: BTreeSet<Register>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,11 +206,14 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             function,
             sink,
             predecessors: vec![Vec::new(); block_count],
+            reachable_blocks: BTreeSet::new(),
             incoming_definitions: vec![BTreeSet::new(); block_count],
             outgoing_definitions: vec![BTreeSet::new(); block_count],
             incoming_lifecycles: vec![BTreeSet::new(); block_count],
             incoming_homes: vec![BTreeMap::new(); block_count],
             outgoing_homes: vec![BTreeMap::new(); block_count],
+            incoming_entity_identities: vec![EntityIdentityState::default(); block_count],
+            outgoing_entity_identities: vec![EntityIdentityState::default(); block_count],
         }
     }
 
@@ -213,9 +225,11 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             return;
         }
         self.build_predecessors();
+        self.compute_reachable_blocks();
         self.compute_definition_dataflow();
         self.compute_lifecycle_dataflow();
         self.compute_home_dataflow();
+        self.compute_entity_identity_dataflow();
         for block in &self.function.blocks {
             self.validate_block(block.id);
         }
@@ -518,6 +532,23 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
     }
 
+    fn compute_reachable_blocks(&mut self) {
+        let mut pending = vec![self.function.entry];
+        while let Some(block) = pending.pop() {
+            if !self.reachable_blocks.insert(block) {
+                continue;
+            }
+            let Some(block) = self.function.blocks.get(block.0 as usize) else {
+                continue;
+            };
+            pending.extend(
+                terminator_targets(&block.terminator)
+                    .into_iter()
+                    .filter(|target| (target.0 as usize) < self.function.blocks.len()),
+            );
+        }
+    }
+
     fn compute_definition_dataflow(&mut self) {
         let predefined = self
             .function
@@ -749,6 +780,118 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             }
         }
         joined
+    }
+
+    fn compute_entity_identity_dataflow(&mut self) {
+        let initial = self.initial_entity_identity_state();
+        let register_count = self.function.register_types.len();
+        let fact_count = register_count
+            .saturating_mul(register_count)
+            .saturating_add(register_count)
+            .saturating_add(1);
+        let iteration_limit = self.function.blocks.len().saturating_mul(fact_count);
+
+        for _ in 0..=iteration_limit {
+            let mut changed = false;
+            for block in &self.function.blocks {
+                let index = block.id.0 as usize;
+                let mut incoming = self.join_predecessor_entity_identities(block.id);
+                if block.id == self.function.entry {
+                    merge_entity_identity_state(&mut incoming, &initial);
+                }
+                let outgoing = transfer_entity_identities(
+                    &incoming,
+                    &block.instructions,
+                    &self.function.register_types,
+                );
+                changed |= incoming != self.incoming_entity_identities[index]
+                    || outgoing != self.outgoing_entity_identities[index];
+                self.incoming_entity_identities[index] = incoming;
+                self.outgoing_entity_identities[index] = outgoing;
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    fn initial_entity_identity_state(&self) -> EntityIdentityState {
+        let mut state = EntityIdentityState::default();
+        for parameter in &self.function.parameters {
+            if is_entity_register(self.function, *parameter) {
+                state
+                    .origins
+                    .insert(*parameter, BTreeSet::from([*parameter]));
+            }
+        }
+        state
+    }
+
+    fn join_predecessor_entity_identities(&self, block: IrBlockId) -> EntityIdentityState {
+        let mut joined = EntityIdentityState::default();
+        for predecessor in &self.predecessors[block.0 as usize] {
+            if !self.reachable_blocks.contains(predecessor) {
+                continue;
+            }
+            let edge = self.entity_identity_state_on_edge(*predecessor, block);
+            merge_entity_identity_state(&mut joined, &edge);
+        }
+        joined
+    }
+
+    fn entity_identity_state_on_edge(
+        &self,
+        predecessor: IrBlockId,
+        successor: IrBlockId,
+    ) -> EntityIdentityState {
+        let mut state = self.outgoing_entity_identities[predecessor.0 as usize].clone();
+        if let Terminator::ResolveLink {
+            live_value, live, ..
+        } = self.function.blocks[predecessor.0 as usize].terminator
+            && live == successor
+            && is_entity_register(self.function, live_value)
+        {
+            state
+                .origins
+                .insert(live_value, BTreeSet::from([live_value]));
+        }
+        state
+    }
+
+    fn require_live_entity_use(
+        &mut self,
+        register: Register,
+        state: &EntityIdentityState,
+        span: Span,
+    ) {
+        if !is_entity_register(self.function, register) {
+            return;
+        }
+        let Some(origins) = state.origins.get(&register) else {
+            return;
+        };
+        if !origins.is_disjoint(&state.retired) {
+            self.sink.error(
+                REGISTER_ERROR,
+                span,
+                "entity identity is retired on at least one executable path",
+            );
+        }
+    }
+
+    fn validate_live_entity_phi_inputs(&mut self, block: IrBlockId, instruction: &Instruction) {
+        let Instruction::Phi { inputs, span, .. } = instruction else {
+            return;
+        };
+        for (predecessor, register) in inputs {
+            if !self.reachable_blocks.contains(predecessor)
+                || predecessor.0 as usize >= self.function.blocks.len()
+            {
+                continue;
+            }
+            let edge_state = self.entity_identity_state_on_edge(*predecessor, block);
+            self.require_live_entity_use(*register, &edge_state, use_contract_span(*span));
+        }
     }
 
     fn register_storage(&self, register: Register) -> Option<&RegisterStorage> {
@@ -983,6 +1126,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         let mut available = self.incoming_definitions[block_id.0 as usize].clone();
         let mut active_lifecycles = self.incoming_lifecycles[block_id.0 as usize].clone();
         let mut home_states = self.incoming_homes[block_id.0 as usize].clone();
+        let mut entity_identities = self.incoming_entity_identities[block_id.0 as usize].clone();
         let mut views = BTreeMap::<ViewId, (ViewMode, DefId)>::new();
         let mut passed_phi_group = false;
 
@@ -998,10 +1142,16 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                     );
                 }
                 self.validate_phi(block_id, instruction);
+                self.validate_live_entity_phi_inputs(block_id, instruction);
             } else {
                 passed_phi_group = true;
                 for register in instruction_uses(instruction) {
                     self.require_available(register, &available, span);
+                    self.require_live_entity_use(
+                        register,
+                        &entity_identities,
+                        use_contract_span(span),
+                    );
                 }
             }
 
@@ -1016,6 +1166,11 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             self.validate_live_instruction_uses(instruction, &home_states);
             add_instruction_definitions(instruction, &mut available);
             self.validate_home_instruction(instruction, &mut home_states, &views);
+            transfer_entity_identity_instruction(
+                &mut entity_identities,
+                instruction,
+                &self.function.register_types,
+            );
         }
         let terminator_span = terminator_span(&block.terminator, self.function.span);
         if !views.is_empty() {
@@ -1027,6 +1182,11 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         }
         for register in terminator_uses(&block.terminator) {
             self.require_available(register, &available, terminator_span);
+            self.require_live_entity_use(
+                register,
+                &entity_identities,
+                use_contract_span(terminator_span),
+            );
         }
         self.validate_live_terminator_uses(&block.terminator, &home_states, terminator_span);
         self.validate_home_terminator(&block.terminator, &home_states, terminator_span);
@@ -2604,6 +2764,83 @@ fn contract_span(span: Span) -> Span {
 fn use_contract_span(span: Span) -> Span {
     Span::new(span.source(), span.end().0, span.end().0)
         .expect("instruction end is a valid diagnostic span")
+}
+
+fn is_entity_register(function: &Function, register: Register) -> bool {
+    matches!(
+        function.register_types.get(register.0 as usize),
+        Some(IrType::Entity(_))
+    )
+}
+
+fn merge_entity_identity_state(
+    destination: &mut EntityIdentityState,
+    source: &EntityIdentityState,
+) {
+    for (register, origins) in &source.origins {
+        destination
+            .origins
+            .entry(*register)
+            .or_default()
+            .extend(origins);
+    }
+    destination.retired.extend(&source.retired);
+}
+
+fn transfer_entity_identities(
+    incoming: &EntityIdentityState,
+    instructions: &[Instruction],
+    register_types: &[IrType],
+) -> EntityIdentityState {
+    let mut state = incoming.clone();
+    for instruction in instructions {
+        transfer_entity_identity_instruction(&mut state, instruction, register_types);
+    }
+    state
+}
+
+fn transfer_entity_identity_instruction(
+    state: &mut EntityIdentityState,
+    instruction: &Instruction,
+    register_types: &[IrType],
+) {
+    let is_entity = |register: Register| {
+        matches!(
+            register_types.get(register.0 as usize),
+            Some(IrType::Entity(_))
+        )
+    };
+    match instruction {
+        Instruction::Copy { dst, src, .. } | Instruction::Take { dst, src, .. }
+            if is_entity(*dst) =>
+        {
+            let origins = state.origins.get(src).cloned().unwrap_or_default();
+            state.origins.insert(*dst, origins);
+        }
+        Instruction::Phi { dst, inputs, .. } if is_entity(*dst) => {
+            let origins = inputs
+                .iter()
+                .filter_map(|(_, input)| state.origins.get(input))
+                .flat_map(BTreeSet::iter)
+                .copied()
+                .collect();
+            state.origins.insert(*dst, origins);
+        }
+        Instruction::RetireEntity { entity, .. } => {
+            if let Some(origins) = state.origins.get(entity) {
+                state.retired.extend(origins);
+            }
+        }
+        _ => {
+            if let Some(destination) = instruction_destination(instruction)
+                && is_entity(destination)
+            {
+                state
+                    .origins
+                    .insert(destination, BTreeSet::from([destination]));
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
