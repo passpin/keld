@@ -1,0 +1,17 @@
+[package]
+name = "keld-native-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keld-native-abi = { path = "../keld-native-abi" }
+
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

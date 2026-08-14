@@ -1,0 +1,13 @@
+[package]
+name = "keld-native-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keld-native-abi = { path = "../keld-native-abi" }
+keld-runtime = { path = "../keld-runtime", features = ["native-abi"] }
+
+[lints]
+workspace = true
