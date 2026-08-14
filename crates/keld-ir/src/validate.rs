@@ -3177,34 +3177,56 @@ fn terminator_uses(terminator: &Terminator) -> Vec<Register> {
 }
 
 fn is_structural(instruction: &Instruction) -> bool {
-    matches!(
-        instruction,
+    match instruction {
         Instruction::BeginLifecycle { .. }
-            | Instruction::EndLifecycle { .. }
-            | Instruction::AllocateEntity { .. }
-            | Instruction::KeepEntity { .. }
-            | Instruction::RetireEntity { .. }
-            | Instruction::ListPush { .. }
-            | Instruction::ListRemove { .. }
-            | Instruction::ListIndex { .. }
-            | Instruction::ListGet { .. }
-            | Instruction::ListReplace { .. }
-            | Instruction::ListTryRemove { .. }
-            | Instruction::ListClear { .. }
-            | Instruction::ListReserve { .. }
-            | Instruction::ListTryReserve { .. }
-            | Instruction::TextByteLength { .. }
-            | Instruction::TextIsEmpty { .. }
-            | Instruction::TextConcat { .. }
-            | Instruction::Call { .. }
-            | Instruction::InstallHome { .. }
-            | Instruction::MoveHome { .. }
-            | Instruction::DropHome { .. }
-            | Instruction::DropIfLive { .. }
-            | Instruction::DropSlot { .. }
-            | Instruction::CleanupTrackedScope { .. }
-            | Instruction::ReplacePlace { .. }
-    )
+        | Instruction::EndLifecycle { .. }
+        | Instruction::AllocateEntity { .. }
+        | Instruction::KeepEntity { .. }
+        | Instruction::RetireEntity { .. }
+        | Instruction::ListPush { .. }
+        | Instruction::ListPushPlace { .. }
+        | Instruction::ListRemove { .. }
+        | Instruction::ListRemovePlace { .. }
+        | Instruction::ListIndex { .. }
+        | Instruction::ListGet { .. }
+        | Instruction::ListReplace { .. }
+        | Instruction::ListTryRemove { .. }
+        | Instruction::ListClear { .. }
+        | Instruction::ListReserve { .. }
+        | Instruction::ListTryReserve { .. }
+        | Instruction::TextByteLength { .. }
+        | Instruction::TextIsEmpty { .. }
+        | Instruction::TextConcat { .. }
+        | Instruction::Call { .. }
+        | Instruction::InstallHome { .. }
+        | Instruction::MoveHome { .. }
+        | Instruction::DropHome { .. }
+        | Instruction::DropIfLive { .. }
+        | Instruction::DropSlot { .. }
+        | Instruction::CleanupTrackedScope { .. }
+        | Instruction::ReplacePlace { .. } => true,
+        Instruction::ConstInt { .. }
+        | Instruction::ConstBool { .. }
+        | Instruction::ConstText { .. }
+        | Instruction::ConstNoneLink { .. }
+        | Instruction::Copy { .. }
+        | Instruction::Take { .. }
+        | Instruction::ReplaceField { .. }
+        | Instruction::ListNew { .. }
+        | Instruction::ListLength { .. }
+        | Instruction::CheckedUnaryInt { .. }
+        | Instruction::CheckedBinaryInt { .. }
+        | Instruction::Not { .. }
+        | Instruction::Compare { .. }
+        | Instruction::Phi { .. }
+        | Instruction::ConstructStruct { .. }
+        | Instruction::ReadStructField { .. }
+        | Instruction::EntityToLink { .. }
+        | Instruction::OpenView { .. }
+        | Instruction::ReadField { .. }
+        | Instruction::WriteField { .. }
+        | Instruction::CloseView { .. } => false,
+    }
 }
 
 fn terminator_targets(terminator: &Terminator) -> Vec<IrBlockId> {
