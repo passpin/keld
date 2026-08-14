@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [lib]
+name = "keld_runtime_v1"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

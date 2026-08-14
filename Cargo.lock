@@ -32,6 +32,7 @@ dependencies = [
  "keld-interpreter",
  "keld-ir",
  "keld-lifecycle",
+ "keld-native-backend",
  "keld-semantics",
  "keld-source",
  "keld-storage",

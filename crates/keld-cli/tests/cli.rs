@@ -127,7 +127,7 @@ fn runtime_fault_and_command_misuse_have_distinct_exit_codes() {
     assert!(misuse.stdout.is_empty());
     assert_eq!(
         String::from_utf8(misuse.stderr).unwrap(),
-        "usage: keld check <file> | keld run --engine interpreter <file> | keld dump-ir <file>\n"
+        "usage: keld check <file> | keld build <source> -o <program.exe> | keld run --engine <interpreter|native> <file> | keld dump-ir <file>\n"
     );
 }
 
