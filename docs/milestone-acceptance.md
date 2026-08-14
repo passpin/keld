@@ -1,9 +1,10 @@
-# Historical milestone acceptance: bootstrap, storage, cleanup, and List
+# Keld milestone acceptance: bootstrap, storage, cleanup, List, and Native-1
 
-This document records completed interpreter milestones. It is an acceptance
-map, not a promise of future behavior: every claim below points to a normative
-specification and an existing test suite. Native-1 is approved separately and
-is deliberately not claimed here.
+This document records completed interpreter milestones and the completed
+Native-1 Windows GNU gate. It is an acceptance map, not a promise of future
+behavior: every claim below points to a normative specification and an
+existing test suite. Deferred targets and language features remain outside
+this acceptance.
 
 ## Historical bootstrap acceptance
 
@@ -102,7 +103,7 @@ and final context teardown. Runtime model and allocator tests distinguish
 language allocation faults from internal store invariant failures. The
 historical full gate recorded 256 reference-model seeds and the GNU workspace,
 strict Clippy, formatting, and diff checks as passing; Native-1 differential
-execution remains pending.
+execution is recorded below.
 
 ## Verification command for this historical milestone
 
@@ -127,8 +128,8 @@ The approved `x86_64-w64-windows-gnu` LLVM Native-1 design is recorded in
 [`superpowers/specs/2026-08-14-keld-llvm-native-1-design.md`](superpowers/specs/2026-08-14-keld-llvm-native-1-design.md)
 and its task plan in
 [`superpowers/plans/2026-08-14-keld-llvm-native-1.md`](superpowers/plans/2026-08-14-keld-llvm-native-1.md).
-The Native-1 implementation is now executable on the frozen Windows GNU
-toolchain. The current evidence is split by gate:
+The Native-1 implementation is executable on the frozen Windows GNU toolchain.
+The evidence is split by gate:
 
 | Gate | Evidence in this checkout | Status |
 |---|---|---|
@@ -136,9 +137,14 @@ toolchain. The current evidence is split by gate:
 | Scalar CFG, calls, Phi, Text, direct List, structs, and entity smoke parity | `crates/keld-native-backend/tests/native_int.rs` at O0 and O2 | complete for the covered fixtures |
 | CLI build/native run staging | `crates/keld-cli/tests/cli.rs::native_engine_matches_representative_source_fixtures`, `native_engine_forwards_runtime_faults_with_interpreter_format`, and `native_build_handles_unicode_paths_and_refuses_collisions`, plus the GNU smoke commands in README | complete for covered fixtures |
 | Projected places and PE import audit | `crates/keld-native-backend/tests/native_int.rs::projected_list_receiver_runs_natively_at_both_optimization_levels` and the import assertions in `builds_and_runs_a_const_int_program` | complete for covered fixtures |
-| Test-only allocation-control DLL and version-1 observation schema | `keld-native-ffi-test`, the `KELD_TEST_CONTROL`/`KELD_TEST_OBSERVATION` contract, and the allocation-control cases in `native_int.rs` | context, Text, copy/concat, struct/entity, and List-growth controls covered; full cross-engine failure matrix pending |
-| Exhaustive instruction/terminator surface audit | `crates/keld-native-backend/tests/surface_audit.rs` (48 instructions, 6 terminators in the current IR) | complete |
+| Test-only allocation-control DLL and version-1 observation schema | `keld-native-ffi-test`, `crates/keld-native-abi/tests/allocation_sites.rs`, `crates/keld-ir/tests/allocation_schedule.rs`, and the `KELD_TEST_CONTROL`/`KELD_TEST_OBSERVATION` contract | complete; deterministic phase/ordinal IDs and context/store, Text, copy, struct/entity, and List-growth controls are covered |
+| Full cross-engine allocation-failure schedules | `crates/keld-native-backend/tests/differential.rs::{every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2,source_surface_fixtures_extend_the_same_differential_schedule,ir_only_surface_fixtures_extend_the_same_differential_schedule,allocation_schedule_covers_preferred_and_exact_list_growth_failures}` | complete at O0 and O2; interpreter and native observations, faults, spans, and event sequences match |
+| Exhaustive instruction/terminator source/IR differential surface | `crates/keld-native-backend/tests/differential.rs::every_executable_ir_variant_is_in_a_real_differential_fixture` and `surface_audit.rs` (48 instructions, 6 terminators) | complete |
 
-The table deliberately does not claim final Native-1 acceptance until the
-remaining allocation-failure differential matrix and full source/IR fixture
-coverage are present and green.
+Native-1 acceptance is complete for one-source `x86_64-w64-windows-gnu`
+executables: both LLVM O0 and O2 builds use the same validated executable IR,
+all current instruction and terminator variants have a real source or
+validated-IR differential fixture, every reachable semantic allocation point
+has deterministic frozen site IDs and failure coverage, and generated programs
+are exercised with the sibling versioned runtime DLL only. Linux, MSVC,
+WebAssembly, typed errors, and new language features remain deferred.

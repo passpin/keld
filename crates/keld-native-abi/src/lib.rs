@@ -13,6 +13,92 @@ pub const RUNTIME_IMPORT_LIBRARY_NAME: &str = "libkeld_runtime_v1.dll.a";
 /// Prefix used by every exported runtime symbol.
 pub const RUNTIME_EXPORT_PREFIX: &str = "keld_rt_v1_";
 
+/// Version of the test-only semantic allocation control record format.
+pub const TEST_CONTROL_SCHEMA_VERSION: u32 = 1;
+
+/// Semantic allocation phases shared by the interpreter and native test
+/// runtime. Engine-local allocations (frames, LLVM temporaries, place
+/// metadata, and handle-table growth) deliberately do not appear here.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum AllocationPhase {
+    Context,
+    Lifecycle,
+    Text,
+    Copy,
+    Concat,
+    Struct,
+    Entity,
+    Handle,
+    ListGrowthPreferred,
+    ListGrowthExact,
+}
+
+impl AllocationPhase {
+    /// Stable phase spelling used by `KELD_TEST_CONTROL` and observations.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Context => "context",
+            Self::Lifecycle => "lifecycle",
+            Self::Text => "text",
+            Self::Copy => "copy",
+            Self::Concat => "concat",
+            Self::Struct => "struct",
+            Self::Entity => "entity",
+            Self::Handle => "handle",
+            Self::ListGrowthPreferred => "list_growth_preferred",
+            Self::ListGrowthExact => "list_growth_exact",
+        }
+    }
+
+    const fn code(self) -> u32 {
+        match self {
+            Self::Context => 1,
+            Self::Lifecycle => 2,
+            Self::Text => 3,
+            Self::Copy => 4,
+            Self::Concat => 5,
+            Self::Struct => 6,
+            Self::Entity => 7,
+            Self::Handle => 8,
+            Self::ListGrowthPreferred => 9,
+            Self::ListGrowthExact => 10,
+        }
+    }
+}
+
+/// Computes a deterministic semantic allocation site ID.
+///
+/// The high 16 bits identify the ordered instruction coordinate and the low
+/// 16 bits identify the phase and structural-copy preorder ordinal. Base IDs
+/// are one-based; ordinal zero denotes the instruction's outermost value.
+/// `None` is returned when the frozen representation cannot encode the input.
+#[must_use]
+pub const fn checked_allocation_site_id(
+    base_id: u32,
+    phase: AllocationPhase,
+    ordinal: u32,
+) -> Option<u32> {
+    if base_id == 0 || base_id > 65_535 || ordinal >= 4095 {
+        return None;
+    }
+    let value = (base_id - 1) * 65_536 + phase.code() * 4_096 + ordinal + 1;
+    if value == 0 { None } else { Some(value) }
+}
+
+/// Computes a site ID for valid frozen inputs.
+///
+/// # Panics
+///
+/// Panics if the base or structural ordinal exceeds the frozen encoding.
+#[must_use]
+pub const fn allocation_site_id(base_id: u32, phase: AllocationPhase, ordinal: u32) -> u32 {
+    match checked_allocation_site_id(base_id, phase, ordinal) {
+        Some(value) => value,
+        None => panic!("allocation site exceeds the frozen Native-1 encoding"),
+    }
+}
+
 /// A generational opaque runtime handle. Zero is the empty handle.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

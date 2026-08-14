@@ -10,10 +10,11 @@ pub use cleanup::{CleanupEvent, ExecutionTrace};
 pub use fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFaultKind};
 pub use keld_semantics::FieldId;
 pub use list::{
-    AllocationController, CapacityError, ReserveFailure, RuntimeList, required_capacity,
+    AllocationController, AllocationPolicy, CapacityError, ReserveFailure, RuntimeList,
+    required_capacity,
 };
 pub use machine::{
-    ExecutionResult, Interpreter, TestControls, run_text_for_test, run_text_with_controls_for_test,
-    trace_text_for_test,
+    AllocationObservation, ExecutionResult, Interpreter, TestControls, run_text_for_test,
+    run_text_with_controls_for_test, trace_text_for_test,
 };
 pub use value::{CopyAllocation, EntityPayload, RuntimeText, Value, ValueKind, ValueTypeError};

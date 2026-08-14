@@ -40,6 +40,14 @@ flow, lifecycle, storage, or interpreter state to infer policy. Raw pointers
 and LLVM C API calls are confined to `keld-native-ffi` and `keld-native-llvm`;
 the ABI records and runtime core are safe Rust boundaries.
 
+Native-1's test-only allocation controls use the same validated executable IR
+on both engines. `keld-ir::AllocationSchedule` orders coordinates by
+`(FunctionId, IrBlockId, instruction_index)` and the ABI phase/ordinal encoding
+derives frozen site IDs. The test DLL records normalized status, fault, and
+semantic allocation events; the differential harness exercises every reachable
+single-failure frontier (including preferred-then-exact List growth) at O0 and
+O2. Production generated programs do not load the test DLL or LLVM.
+
 ## Crate ownership
 
 | Crate | Public input | Public output | Forbidden responsibility |
@@ -109,8 +117,10 @@ The interpreter milestone verifies nested `List[List[Int]]` and
 clearing, bounds, reservation retry, and cleanup. `Map`, `Set`, `Slice`,
 iterators, `for`, substrings, and Text integer indexing remain outside the
 bootstrap surface. Native-1 executes the covered Windows GNU fixtures through
-the same validated IR; broader cross-engine allocation schedules remain a
-separate acceptance gate. WebAssembly and other targets remain deferred.
+the same validated IR. The native differential and surface-audit suites cover
+all 48 current instruction variants and all 6 terminators, including the
+validated-IR-only forms that source lowering normalizes away. WebAssembly and
+other targets remain deferred.
 
 ## Diagnostic ownership
 

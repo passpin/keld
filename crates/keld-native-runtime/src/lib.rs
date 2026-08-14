@@ -2,9 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "test-controls")]
+use keld_native_abi::allocation_site_id;
 use keld_native_abi::{
-    FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink, KeldPlaceStep,
-    KeldValue, RuntimeStatus,
+    AllocationPhase, FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink,
+    KeldPlaceStep, KeldValue, RuntimeStatus,
 };
 use keld_runtime::{EntityId, Link, RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
 #[cfg(feature = "test-controls")]
@@ -106,7 +108,10 @@ struct TestControls {
     attempts: BTreeMap<(u32, String), u64>,
     observations: Vec<TestAllocationObservation>,
     observation_path: Option<PathBuf>,
-    current_site: u32,
+    current_base_site: u32,
+    fallback_site: u32,
+    pending_site: Option<u32>,
+    ordinals: BTreeMap<AllocationPhase, u32>,
 }
 
 #[cfg(feature = "test-controls")]
@@ -146,17 +151,23 @@ impl TestControls {
         controls
     }
 
-    fn set_site(&mut self, site_id: u32) {
-        self.current_site = site_id;
+    fn begin_operation(&mut self, fallback_site: u32) {
+        self.fallback_site = fallback_site;
+        self.current_base_site = self.pending_site.take().unwrap_or(fallback_site);
+        self.ordinals.clear();
     }
 
-    fn allow_at(&mut self, site_id: u32, phase: &str) -> bool {
-        self.set_site(site_id);
-        self.allow(phase)
+    fn set_pending_site(&mut self, site_id: u32) {
+        self.pending_site = Some(site_id);
     }
 
-    fn allow(&mut self, phase: &str) -> bool {
-        let key = (self.current_site, phase.to_owned());
+    fn allow_at(&mut self, phase: AllocationPhase, ordinal: u32) -> bool {
+        let site_id = if self.current_base_site == 0 {
+            0
+        } else {
+            allocation_site_id(self.current_base_site, phase, ordinal)
+        };
+        let key = (site_id, phase.as_str().to_owned());
         let attempt = self
             .attempts
             .entry(key.clone())
@@ -164,6 +175,15 @@ impl TestControls {
             .or_insert(1);
         let attempt = *attempt;
         let allowed = !self.failures.contains(&(key.0, key.1.clone(), attempt));
+        let legacy_allowed =
+            !self
+                .failures
+                .contains(&(self.current_base_site, key.1.clone(), attempt));
+        let fallback_allowed =
+            !self
+                .failures
+                .contains(&(self.fallback_site, key.1.clone(), attempt));
+        let allowed = allowed && legacy_allowed && fallback_allowed;
         self.observations.push(TestAllocationObservation {
             site_id: key.0,
             phase: key.1,
@@ -171,6 +191,12 @@ impl TestControls {
             allowed,
         });
         allowed
+    }
+
+    fn allow(&mut self, phase: AllocationPhase) -> bool {
+        let current = self.ordinals.get(&phase).copied().unwrap_or(0);
+        self.ordinals.insert(phase, current.saturating_add(1));
+        self.allow_at(phase, current)
     }
 
     fn write_observation(&self, status: RuntimeStatus, fault: Option<KeldFault>) {
@@ -272,13 +298,29 @@ impl RuntimeContext {
     /// Returns [`RuntimeContextError::Store`] when the independent runtime
     /// store cannot allocate its brand or root lifecycle.
     pub fn new_at(location: u32) -> Result<Self, RuntimeContextError> {
+        Self::new_at_with_site(location, location)
+    }
+
+    /// Creates a context while selecting the deterministic test allocation
+    /// base site independently from the source location ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeContextError::Store`] when the context store cannot
+    /// reserve its initial state or when the test schedule rejects setup.
+    pub fn new_at_with_site(location: u32, base_site: u32) -> Result<Self, RuntimeContextError> {
         #[cfg(not(feature = "test-controls"))]
+        let _ = (location, base_site);
+        #[cfg(feature = "test-controls")]
         let _ = location;
         #[cfg(feature = "test-controls")]
         let mut test_controls = TestControls::load();
         #[cfg(feature = "test-controls")]
-        if !test_controls.allow_at(location, "context") {
-            return Err(RuntimeContextError::Store(StoreError::Allocation));
+        {
+            test_controls.begin_operation(base_site);
+            if !test_controls.allow_at(AllocationPhase::Context, 0) {
+                return Err(RuntimeContextError::Store(StoreError::Allocation));
+            }
         }
         Ok(Self {
             store: Store::new().map_err(RuntimeContextError::Store)?,
@@ -295,17 +337,35 @@ impl RuntimeContext {
     /// synchronous runtime operation. This exists only in the test runtime
     /// and is deliberately absent from the production ABI.
     #[cfg(feature = "test-controls")]
-    pub fn begin_test_operation(&mut self, site_id: u32) {
-        self.test_controls.set_site(site_id);
+    pub fn begin_test_operation(&mut self, fallback_site: u32) {
+        self.test_controls.begin_operation(fallback_site);
+    }
+
+    /// Selects the deterministic semantic allocation base for the next FFI
+    /// operation. The marker is consumed by `begin_test_operation`.
+    #[cfg(feature = "test-controls")]
+    pub fn set_test_site(&mut self, site_id: u32) {
+        self.test_controls.set_pending_site(site_id);
     }
 
     #[cfg(feature = "test-controls")]
-    fn allow_test_allocation(&mut self, phase: &str) -> bool {
+    fn allow_test_allocation(&mut self, phase: AllocationPhase) -> bool {
         self.test_controls.allow(phase)
     }
 
+    #[cfg(feature = "test-controls")]
+    fn allow_test_allocation_at(&mut self, phase: AllocationPhase, ordinal: u32) -> bool {
+        self.test_controls.allow_at(phase, ordinal)
+    }
+
     #[cfg(not(feature = "test-controls"))]
-    fn allow_test_allocation(&self, _phase: &str) -> bool {
+    fn allow_test_allocation(&self, _phase: AllocationPhase) -> bool {
+        let _ = self;
+        true
+    }
+
+    #[cfg(not(feature = "test-controls"))]
+    fn allow_test_allocation_at(&self, _phase: AllocationPhase, _ordinal: u32) -> bool {
         let _ = self;
         true
     }
@@ -394,7 +454,7 @@ impl RuntimeContext {
         &mut self,
         parent: KeldLifecycle,
     ) -> Result<KeldLifecycle, NativeValueError> {
-        if !self.allow_test_allocation("lifecycle") {
+        if !self.allow_test_allocation(AllocationPhase::Lifecycle) {
             return Err(NativeValueError::Allocation);
         }
         let lifecycle = self
@@ -450,7 +510,7 @@ impl RuntimeContext {
                 self.validate_handle(field)?;
             }
         }
-        if !self.allow_test_allocation("entity") {
+        if !self.allow_test_allocation(AllocationPhase::Entity) {
             return Err(NativeValueError::Allocation);
         }
         let entity = self
@@ -635,7 +695,7 @@ impl RuntimeContext {
         if std::str::from_utf8(bytes).is_err() {
             return Err(NativeValueError::TypeMismatch);
         }
-        if !self.allow_test_allocation("text") {
+        if !self.allow_test_allocation(AllocationPhase::Text) {
             return Err(NativeValueError::Allocation);
         }
         let mut owned = Vec::new();
@@ -663,7 +723,7 @@ impl RuntimeContext {
             .len()
             .checked_add(right.len())
             .ok_or(NativeValueError::Allocation)?;
-        if !self.allow_test_allocation("concat") {
+        if !self.allow_test_allocation(AllocationPhase::Concat) {
             return Err(NativeValueError::Allocation);
         }
         let mut bytes = Vec::new();
@@ -733,7 +793,7 @@ impl RuntimeContext {
         if fields.len() != managed.len() {
             return Err(NativeValueError::TypeMismatch);
         }
-        if !self.allow_test_allocation("struct") {
+        if !self.allow_test_allocation(AllocationPhase::Struct) {
             return Err(NativeValueError::Allocation);
         }
         let mut owned = Vec::new();
@@ -954,7 +1014,7 @@ impl RuntimeContext {
             let required = length.checked_add(1).ok_or(NativeValueError::Capacity)?;
             let preferred = required.max(capacity.saturating_mul(2).max(4));
             let mut reserved = false;
-            if self.allow_test_allocation("list_growth_preferred") {
+            if self.allow_test_allocation(AllocationPhase::ListGrowthPreferred) {
                 let slot = self
                     .handles
                     .get_mut(index as usize)
@@ -971,7 +1031,8 @@ impl RuntimeContext {
                     .is_ok();
             }
             if !reserved
-                && (preferred == required || !self.allow_test_allocation("list_growth_exact"))
+                && (preferred == required
+                    || !self.allow_test_allocation(AllocationPhase::ListGrowthExact))
             {
                 return Err(NativeValueError::Allocation);
             }
@@ -1121,7 +1182,7 @@ impl RuntimeContext {
             return Ok(());
         }
         let preferred = required.max(capacity.saturating_mul(2).max(4));
-        if self.allow_test_allocation("list_growth_preferred") {
+        if self.allow_test_allocation(AllocationPhase::ListGrowthPreferred) {
             let slot = self
                 .handles
                 .get_mut(slot_index as usize)
@@ -1140,7 +1201,7 @@ impl RuntimeContext {
                 return Ok(());
             }
         }
-        if preferred == required || !self.allow_test_allocation("list_growth_exact") {
+        if preferred == required || !self.allow_test_allocation(AllocationPhase::ListGrowthExact) {
             return Err(NativeValueError::Allocation);
         }
         let slot = self
@@ -1196,7 +1257,7 @@ impl RuntimeContext {
             return Ok(true);
         }
         let preferred = required.max(capacity.saturating_mul(2).max(4));
-        if self.allow_test_allocation("list_growth_preferred") {
+        if self.allow_test_allocation(AllocationPhase::ListGrowthPreferred) {
             let slot = self
                 .handles
                 .get_mut(slot_index as usize)
@@ -1215,7 +1276,7 @@ impl RuntimeContext {
                 return Ok(true);
             }
         }
-        if preferred != required && self.allow_test_allocation("list_growth_exact") {
+        if preferred != required && self.allow_test_allocation(AllocationPhase::ListGrowthExact) {
             let slot = self
                 .handles
                 .get_mut(slot_index as usize)
@@ -1273,10 +1334,21 @@ impl RuntimeContext {
     ///
     /// Returns a stale handle or allocation failure; the source is unchanged.
     pub fn copy_managed(&mut self, value: KeldValue) -> Result<KeldValue, NativeValueError> {
+        let mut ordinal = 0;
+        self.copy_managed_inner(value, &mut ordinal)
+    }
+
+    fn copy_managed_inner(
+        &mut self,
+        value: KeldValue,
+        ordinal: &mut u32,
+    ) -> Result<KeldValue, NativeValueError> {
         if value.words[0] == 0 {
             return Ok(value);
         }
-        if !self.allow_test_allocation("copy") {
+        let current_ordinal = *ordinal;
+        *ordinal = ordinal.saturating_add(1);
+        if !self.allow_test_allocation_at(AllocationPhase::Copy, current_ordinal) {
             return Err(NativeValueError::Allocation);
         }
         let payload = self.payload(value)?.clone();
@@ -1289,7 +1361,7 @@ impl RuntimeContext {
                     .map_err(|_| NativeValueError::Allocation)?;
                 for (field, managed) in fields {
                     let field = if managed {
-                        match self.copy_managed(field) {
+                        match self.copy_managed_inner(field, ordinal) {
                             Ok(field) => field,
                             Err(error) => {
                                 for (copied, copied_managed) in copied_fields {
@@ -1317,7 +1389,7 @@ impl RuntimeContext {
                     .map_err(|_| NativeValueError::Allocation)?;
                 for (element, managed) in elements {
                     let element = if managed {
-                        match self.copy_managed(element) {
+                        match self.copy_managed_inner(element, ordinal) {
                             Ok(element) => element,
                             Err(error) => {
                                 for (copied, copied_managed) in copied_elements {
@@ -1338,11 +1410,17 @@ impl RuntimeContext {
                 }
             }
         };
-        if !self.allow_test_allocation("handle") {
+        if !self.allow_test_allocation_at(AllocationPhase::Handle, current_ordinal) {
             let _ = self.drop_payload(copied);
             return Err(NativeValueError::Allocation);
         }
-        let mut result = self.allocate_payload(copied)?;
+        let mut result = match self.allocate_payload_recover(copied) {
+            Ok(value) => value,
+            Err((error, payload)) => {
+                let _ = self.drop_payload(payload);
+                return Err(error);
+            }
+        };
         result.optional_some_layers = value.optional_some_layers;
         Ok(result)
     }
@@ -1378,29 +1456,41 @@ impl RuntimeContext {
     }
 
     fn allocate(&mut self, payload: NativePayload) -> Result<KeldValue, NativeValueError> {
-        if !self.allow_test_allocation("handle") {
+        if !self.allow_test_allocation(AllocationPhase::Handle) {
             return Err(NativeValueError::Allocation);
         }
-        self.allocate_payload(payload)
+        match self.allocate_payload_recover(payload) {
+            Ok(value) => Ok(value),
+            Err((error, payload)) => {
+                let _ = self.drop_payload(payload);
+                Err(error)
+            }
+        }
     }
 
-    fn allocate_payload(&mut self, payload: NativePayload) -> Result<KeldValue, NativeValueError> {
+    fn allocate_payload_recover(
+        &mut self,
+        payload: NativePayload,
+    ) -> Result<KeldValue, (NativeValueError, NativePayload)> {
         if let Some(index) = self.reusable_handles.pop() {
-            let slot = self
-                .handles
-                .get_mut(index as usize)
-                .ok_or(NativeValueError::InvalidHandle)?;
-            slot.generation = slot
-                .generation
-                .checked_add(1)
-                .ok_or(NativeValueError::Allocation)?;
+            let Some(slot) = self.handles.get_mut(index as usize) else {
+                self.reusable_handles.push(index);
+                return Err((NativeValueError::InvalidHandle, payload));
+            };
+            let Some(generation) = slot.generation.checked_add(1) else {
+                self.reusable_handles.push(index);
+                return Err((NativeValueError::Allocation, payload));
+            };
+            slot.generation = generation;
             slot.payload = Some(payload);
             return Ok(encode_handle(index, slot.generation));
         }
-        let index = u32::try_from(self.handles.len()).map_err(|_| NativeValueError::Allocation)?;
-        self.handles
-            .try_reserve(1)
-            .map_err(|_| NativeValueError::Allocation)?;
+        let Ok(index) = u32::try_from(self.handles.len()) else {
+            return Err((NativeValueError::Allocation, payload));
+        };
+        if self.handles.try_reserve(1).is_err() {
+            return Err((NativeValueError::Allocation, payload));
+        }
         self.handles.push(HandleSlot {
             generation: 1,
             payload: Some(payload),

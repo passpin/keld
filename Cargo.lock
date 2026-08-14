@@ -69,6 +69,7 @@ version = "0.1.0"
 dependencies = [
  "keld-flow",
  "keld-lifecycle",
+ "keld-native-abi",
  "keld-numeric",
  "keld-semantics",
  "keld-source",
@@ -93,11 +94,14 @@ name = "keld-native-backend"
 version = "0.1.0"
 dependencies = [
  "keld-flow",
+ "keld-interpreter",
  "keld-ir",
+ "keld-lifecycle",
  "keld-native-abi",
  "keld-native-llvm",
  "keld-semantics",
  "keld-source",
+ "keld-storage",
 ]
 
 [[package]]

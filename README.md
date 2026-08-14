@@ -20,8 +20,10 @@ cargo test --workspace
 cargo test --workspace --release
 ```
 
-Native builds require the pinned LLVM prefix from `scripts/bootstrap-llvm.ps1`
-and an x86-64 MinGW GNU toolchain. Activate the prefix before native commands:
+Native-1 targets Windows x86-64 GNU only. Native builds require the checked,
+pinned LLVM 22.1.8 prefix from `scripts/bootstrap-llvm.ps1` and an x86-64
+MinGW GNU `gcc.exe`; there is no MSVC linker fallback. Activate the prefix
+before native commands:
 
 ```powershell
 . scripts/activate-llvm.ps1

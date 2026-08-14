@@ -13,7 +13,10 @@ keld-source = { path = "../keld-source" }
 
 [dev-dependencies]
 keld-flow = { path = "../keld-flow" }
+keld-interpreter = { path = "../keld-interpreter" }
+keld-lifecycle = { path = "../keld-lifecycle" }
 keld-semantics = { path = "../keld-semantics" }
+keld-storage = { path = "../keld-storage" }
 
 [lints]
 workspace = true

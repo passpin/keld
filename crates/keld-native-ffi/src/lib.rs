@@ -8,6 +8,12 @@ use keld_native_runtime::{NativeValueError, RuntimeContext, RuntimeContextError}
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+#[cfg(feature = "test-controls")]
+use std::sync::atomic::{AtomicU32, Ordering};
+
+#[cfg(feature = "test-controls")]
+static PENDING_CONTEXT_SITE: AtomicU32 = AtomicU32::new(0);
+
 /// Returns the runtime ABI version without exposing Rust layout or panics.
 #[unsafe(no_mangle)]
 pub extern "C" fn keld_rt_v1_abi_version() -> u32 {
@@ -116,6 +122,35 @@ fn begin_test_operation(context: &mut RuntimeContext, location: u32) {
 
 #[cfg(not(feature = "test-controls"))]
 fn begin_test_operation(_context: &mut RuntimeContext, _location: u32) {}
+
+/// Marks the deterministic semantic allocation base for the next operation.
+///
+/// This helper is part of the test-control adapter surface. Production builds
+/// keep it as a no-op so the frozen runtime behavior and value ABI are
+/// unchanged. A null context records the marker for context construction.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_test_site(context: *mut RuntimeContext, site_id: u32) -> u32 {
+    #[cfg(feature = "test-controls")]
+    {
+        if context.is_null() {
+            PENDING_CONTEXT_SITE.store(site_id, Ordering::Relaxed);
+            return status_code(RuntimeStatus::Ok);
+        }
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: generated code supplies a live context for the dynamic
+            // call and the marker is borrowed only synchronously.
+            unsafe { &mut *context }.set_test_site(site_id);
+            status_code(RuntimeStatus::Ok)
+        }));
+        result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+    }
+    #[cfg(not(feature = "test-controls"))]
+    {
+        let _ = (context, site_id);
+        status_code(RuntimeStatus::Ok)
+    }
+}
 
 /// Records one successfully initialized managed Home in a call-bounded
 /// cleanup tracker. The ID and count buffers are owned by generated stack
@@ -287,7 +322,17 @@ pub extern "C" fn keld_rt_v1_context_new_at(
         *context_slot = std::ptr::null_mut();
         *kind_slot = 0;
         *location_slot = 0;
-        match RuntimeContext::new_at(location) {
+        #[cfg(feature = "test-controls")]
+        let pending_site = PENDING_CONTEXT_SITE.swap(0, Ordering::Relaxed);
+        #[cfg(feature = "test-controls")]
+        let base_site = if pending_site == 0 {
+            location
+        } else {
+            pending_site
+        };
+        #[cfg(not(feature = "test-controls"))]
+        let base_site = 0;
+        match RuntimeContext::new_at_with_site(location, base_site) {
             Ok(value) => {
                 *context_slot = Box::into_raw(Box::new(value));
                 status_code(RuntimeStatus::Ok)

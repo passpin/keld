@@ -1,4 +1,5 @@
 use crate::value::{CopyAllocation, Value, try_copy_value};
+use keld_ir::AllocationPhase;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -10,6 +11,14 @@ pub enum CapacityError {
 pub enum ReserveFailure {
     Capacity,
     Allocation,
+}
+
+/// Policy hook used by executable List growth. The interpreter's historical
+/// [`AllocationController`] implements the hook, while the full Native-1 test
+/// controller layers frozen site IDs on top of the same preferred/exact
+/// growth points.
+pub trait AllocationPolicy {
+    fn allow_list_attempt(&mut self, phase: AllocationPhase) -> bool;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -35,6 +44,12 @@ impl AllocationController {
     fn allow_list_attempt(&mut self) -> bool {
         self.list_attempt = self.list_attempt.saturating_add(1);
         !self.fail_list_attempts.contains(&self.list_attempt)
+    }
+}
+
+impl AllocationPolicy for AllocationController {
+    fn allow_list_attempt(&mut self, _phase: AllocationPhase) -> bool {
+        self.allow_list_attempt()
     }
 }
 
@@ -114,7 +129,7 @@ impl RuntimeList {
     pub fn push(
         &mut self,
         value: Value,
-        allocations: &mut AllocationController,
+        allocations: &mut impl AllocationPolicy,
     ) -> Result<(), ReserveFailure> {
         self.reserve(1, allocations)?;
         self.elements.push(value);
@@ -122,10 +137,19 @@ impl RuntimeList {
     }
 
     #[doc(hidden)]
+    pub fn push_with_controller(
+        &mut self,
+        value: Value,
+        allocations: &mut AllocationController,
+    ) -> Result<(), ReserveFailure> {
+        self.push(value, allocations)
+    }
+
+    #[doc(hidden)]
     pub fn reserve(
         &mut self,
         additional: i64,
-        allocations: &mut AllocationController,
+        allocations: &mut impl AllocationPolicy,
     ) -> Result<(), ReserveFailure> {
         let required = required_capacity(self.elements.len(), additional)
             .map_err(|CapacityError::Impossible| ReserveFailure::Capacity)?;
@@ -133,21 +157,26 @@ impl RuntimeList {
     }
 
     #[doc(hidden)]
-    pub fn try_reserve(&mut self, additional: i64, allocations: &mut AllocationController) -> bool {
+    pub fn try_reserve(
+        &mut self,
+        additional: i64,
+        allocations: &mut impl AllocationPolicy,
+    ) -> bool {
         self.reserve(additional, allocations).is_ok()
     }
 
     fn ensure_capacity(
         &mut self,
         required: usize,
-        allocations: &mut AllocationController,
+        allocations: &mut impl AllocationPolicy,
     ) -> Result<(), ReserveFailure> {
         if required <= self.elements.capacity() {
             return Ok(());
         }
         let preferred = required.max(self.elements.capacity().saturating_mul(2).max(4));
-        if self.try_allocate(preferred, allocations)
-            || (preferred != required && self.try_allocate(required, allocations))
+        if self.try_allocate(preferred, AllocationPhase::ListGrowthPreferred, allocations)
+            || (preferred != required
+                && self.try_allocate(required, AllocationPhase::ListGrowthExact, allocations))
         {
             Ok(())
         } else {
@@ -155,8 +184,13 @@ impl RuntimeList {
         }
     }
 
-    fn try_allocate(&mut self, target: usize, allocations: &mut AllocationController) -> bool {
-        if !allocations.allow_list_attempt() {
+    fn try_allocate(
+        &mut self,
+        target: usize,
+        phase: AllocationPhase,
+        allocations: &mut impl AllocationPolicy,
+    ) -> bool {
+        if !allocations.allow_list_attempt(phase) {
             return false;
         }
         let additional = target

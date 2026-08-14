@@ -1,6 +1,6 @@
 use keld_ir::{
-    Function, Instruction, IntBinaryOp, IrBlock, IrBlockId, IrType, Module, Register,
-    RegisterStorage, Terminator,
+    AllocationPhase, AllocationSchedule, Function, Instruction, IntBinaryOp, IrBlock, IrBlockId,
+    IrType, Module, Register, RegisterStorage, Terminator,
 };
 use keld_native_backend::{
     BuildRequest, NativeArtifact, OptimizationLevel, SourceMetadata, build_executable,
@@ -115,7 +115,7 @@ fn add_context_setup_export(path: &Path) {
         .expect("runtime export list must be readable")
         .replace(
             "keld_rt_v1_context_new\n",
-            "keld_rt_v1_context_new\nkeld_rt_v1_context_new_at\n",
+            "keld_rt_v1_context_new\nkeld_rt_v1_context_new_at\nkeld_rt_v1_test_site\n",
         );
     std::fs::write(path, exports).expect("runtime export list must be writable");
 }
@@ -1112,6 +1112,45 @@ fn test_runtime_allocation_controls_report_faults_at_the_current_instruction() {
                 "{tag} {optimization:?}"
             );
         }
+    }
+}
+
+#[test]
+fn frozen_site_schedule_controls_native_at_the_same_site_as_interpreter() {
+    let module = text_module();
+    let schedule = AllocationSchedule::from_module(&module);
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.id == module.main)
+        .expect("main function");
+    let base = schedule
+        .base_id(function.id, function.entry, 0)
+        .expect("entry allocation coordinate");
+    let site = schedule.site_id(base, AllocationPhase::Text, 0);
+    let controls = format!(
+        "site_id={site} phase={} attempt=1\n",
+        AllocationPhase::Text.as_str()
+    );
+    let metadata = SourceMetadata {
+        path: PathBuf::from("frozen-sites.keld"),
+        source: SourceText::from_str(SourceId(0), "frozen sites\n").expect("source"),
+    };
+    for optimization in [OptimizationLevel::O0, OptimizationLevel::O2] {
+        let output = run_test_runtime(
+            &format!("frozen-site-{optimization:?}"),
+            &module,
+            &metadata,
+            &controls,
+            optimization,
+        );
+        assert_eq!(output.status.code(), Some(2), "{optimization:?}");
+        assert!(output.stdout.is_empty(), "{optimization:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "frozen-sites.keld:1:1: runtime[AllocationFault]: runtime allocation failed\n",
+            "{optimization:?}"
+        );
     }
 }
 

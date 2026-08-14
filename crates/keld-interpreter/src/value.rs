@@ -330,15 +330,20 @@ pub struct EntityPayload {
 pub struct CopyAllocation;
 
 enum CopyTask<'value> {
-    Visit(&'value Value),
+    Visit {
+        value: &'value Value,
+        ordinal: u32,
+    },
     FinishStruct {
         optional_some_layers: u32,
         definition: DefId,
         fields: usize,
+        ordinal: u32,
     },
     FinishList {
         optional_some_layers: u32,
         elements: usize,
+        ordinal: u32,
     },
 }
 
@@ -350,16 +355,72 @@ pub(crate) fn try_copy_value_with_text_allocations(
     value: &Value,
     allow_text_allocation: &mut impl FnMut() -> bool,
 ) -> Result<Value, CopyAllocation> {
+    let mut policy = TextCopyPolicy {
+        allow_text_allocation,
+    };
+    try_copy_value_with_allocation_controls(value, &mut policy)
+}
+
+struct TextCopyPolicy<'a, F> {
+    allow_text_allocation: &'a mut F,
+}
+
+impl<F: FnMut() -> bool> CopyAllocationPolicy for TextCopyPolicy<'_, F> {
+    fn allow_copy(&mut self, _ordinal: u32) -> bool {
+        true
+    }
+
+    fn allow_text(&mut self) -> bool {
+        (self.allow_text_allocation)()
+    }
+
+    fn allow_handle(&mut self, _ordinal: u32) -> bool {
+        true
+    }
+}
+
+/// Policy callbacks for the semantic allocation points of a structural copy.
+pub(crate) trait CopyAllocationPolicy {
+    fn allow_copy(&mut self, ordinal: u32) -> bool;
+    fn allow_text(&mut self) -> bool;
+    fn allow_handle(&mut self, ordinal: u32) -> bool;
+}
+
+/// Deep-copies a managed value while exposing the semantic allocation points
+/// used by the Native-1 differential schedule. The copy and handle callbacks
+/// receive one preorder ordinal for every managed node. The text callback is
+/// separate so legacy interpreter-only tests can continue to inject heap-Text
+/// materialization failures.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn try_copy_value_with_allocation_controls(
+    value: &Value,
+    policy: &mut impl CopyAllocationPolicy,
+) -> Result<Value, CopyAllocation> {
     let mut work = Vec::new();
     let mut completed = Vec::new();
     work.try_reserve(1).map_err(|_| CopyAllocation)?;
     completed.try_reserve(1).map_err(|_| CopyAllocation)?;
-    work.push(CopyTask::Visit(value));
+    let mut next_ordinal = 0_u32;
+    work.push(CopyTask::Visit {
+        value,
+        ordinal: next_ordinal,
+    });
+    next_ordinal = next_ordinal.saturating_add(1);
     while let Some(task) = work.pop() {
         match task {
-            CopyTask::Visit(value) => {
+            CopyTask::Visit { value, ordinal } => {
+                let managed = matches!(
+                    value.kind,
+                    ValueKind::Text(_) | ValueKind::Struct { .. } | ValueKind::List(_)
+                );
+                if managed && !policy.allow_copy(ordinal) {
+                    return Err(CopyAllocation);
+                }
                 let layers = value.optional_some_layers;
-                if let Some(value) = copy_leaf(value, allow_text_allocation)? {
+                if let Some(value) = copy_leaf(value, &mut || policy.allow_text())? {
+                    if managed && !policy.allow_handle(ordinal) {
+                        return Err(CopyAllocation);
+                    }
                     push_completed(&mut completed, value)?;
                     continue;
                 }
@@ -371,9 +432,20 @@ pub(crate) fn try_copy_value_with_text_allocations(
                             optional_some_layers: layers,
                             definition: *definition,
                             fields: fields.len(),
+                            ordinal,
                         });
-                        for field in fields.iter().rev() {
-                            work.push(CopyTask::Visit(field));
+                        let child_start = next_ordinal;
+                        let child_count =
+                            u32::try_from(fields.len()).map_err(|_| CopyAllocation)?;
+                        next_ordinal = next_ordinal
+                            .checked_add(child_count)
+                            .ok_or(CopyAllocation)?;
+                        for (index, field) in fields.iter().enumerate().rev() {
+                            let index = u32::try_from(index).map_err(|_| CopyAllocation)?;
+                            work.push(CopyTask::Visit {
+                                value: field,
+                                ordinal: child_start.checked_add(index).ok_or(CopyAllocation)?,
+                            });
                         }
                     }
                     ValueKind::List(elements) => {
@@ -382,9 +454,20 @@ pub(crate) fn try_copy_value_with_text_allocations(
                         work.push(CopyTask::FinishList {
                             optional_some_layers: layers,
                             elements: elements.length(),
+                            ordinal,
                         });
-                        for element in elements.as_slice().iter().rev() {
-                            work.push(CopyTask::Visit(element));
+                        let child_start = next_ordinal;
+                        let child_count =
+                            u32::try_from(elements.length()).map_err(|_| CopyAllocation)?;
+                        next_ordinal = next_ordinal
+                            .checked_add(child_count)
+                            .ok_or(CopyAllocation)?;
+                        for (index, element) in elements.as_slice().iter().enumerate().rev() {
+                            let index = u32::try_from(index).map_err(|_| CopyAllocation)?;
+                            work.push(CopyTask::Visit {
+                                value: element,
+                                ordinal: child_start.checked_add(index).ok_or(CopyAllocation)?,
+                            });
                         }
                     }
                     ValueKind::Absent
@@ -401,6 +484,7 @@ pub(crate) fn try_copy_value_with_text_allocations(
                 optional_some_layers,
                 definition,
                 fields,
+                ordinal,
             } => {
                 let start = completed.len().checked_sub(fields).ok_or(CopyAllocation)?;
                 let mut copied_fields = Vec::new();
@@ -408,6 +492,9 @@ pub(crate) fn try_copy_value_with_text_allocations(
                     .try_reserve_exact(fields)
                     .map_err(|_| CopyAllocation)?;
                 copied_fields.extend(completed.drain(start..));
+                if !policy.allow_handle(ordinal) {
+                    return Err(CopyAllocation);
+                }
                 push_completed(
                     &mut completed,
                     Value::from_parts_for_test(
@@ -422,6 +509,7 @@ pub(crate) fn try_copy_value_with_text_allocations(
             CopyTask::FinishList {
                 optional_some_layers,
                 elements,
+                ordinal,
             } => {
                 let start = completed
                     .len()
@@ -432,6 +520,9 @@ pub(crate) fn try_copy_value_with_text_allocations(
                     .try_reserve_exact(elements)
                     .map_err(|_| CopyAllocation)?;
                 copied.extend(completed.drain(start..));
+                if !policy.allow_handle(ordinal) {
+                    return Err(CopyAllocation);
+                }
                 push_completed(
                     &mut completed,
                     Value::from_parts_for_test(

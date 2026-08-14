@@ -6,22 +6,34 @@ use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
 use crate::value::{
-    CopyAllocation, EntityPayload, Value, ValueKind, try_copy_value_with_text_allocations,
+    CopyAllocation, CopyAllocationPolicy, EntityPayload, Value, ValueKind,
+    try_copy_value_with_allocation_controls,
 };
-use crate::{AllocationController, ReserveFailure};
+use crate::{AllocationController, AllocationPolicy, ReserveFailure};
 use keld_ir::{
-    ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, IrType,
-    Module, Receiver, Register, Terminator, ViewMode,
+    AllocationPhase, AllocationSchedule, ArgumentProjection, ArgumentSource, FaultKind, Function,
+    Instruction, IrBlockId, IrType, Module, Receiver, Register, Terminator, ViewMode,
 };
 use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
 use keld_semantics::{CompareOp, DefId, FieldId, ParameterIndex};
 use keld_source::Span;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
     pub value: Value,
+}
+
+/// One semantic allocation attempt observed by the interpreter test runtime.
+/// The record uses the same frozen phase and site-ID representation as the
+/// Native-1 DLL observation stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AllocationObservation {
+    pub site_id: u32,
+    pub phase: AllocationPhase,
+    pub attempt: u64,
+    pub allowed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -32,6 +44,12 @@ pub struct TestControls {
     place_attempt: u64,
     fail_place_attempts: BTreeSet<u64>,
     allocations: AllocationController,
+    schedule_enabled: bool,
+    schedule_failures: BTreeSet<(u32, AllocationPhase, u64)>,
+    schedule_attempts: BTreeMap<(u32, AllocationPhase), u64>,
+    schedule_observations: Vec<AllocationObservation>,
+    current_base_site: u32,
+    allocation_ordinals: BTreeMap<AllocationPhase, u32>,
 }
 
 impl TestControls {
@@ -67,7 +85,45 @@ impl TestControls {
         }
     }
 
-    fn allow_text_attempt(&mut self) -> bool {
+    /// Creates controls from the frozen cross-engine failure schedule.
+    ///
+    /// Each tuple is `(site_id, phase, one_based_attempt)`. The schedule is
+    /// intentionally test-only and does not alter production interpreter
+    /// behavior or the source language.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fail_allocation_schedule(
+        failures: impl IntoIterator<Item = (u32, AllocationPhase, u64)>,
+    ) -> Self {
+        Self {
+            schedule_enabled: true,
+            schedule_failures: failures.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Alias retained for differential-test call sites that describe the
+    /// controls as a schedule rather than a failure list.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_allocation_schedule_for_test(
+        failures: impl IntoIterator<Item = (u32, AllocationPhase, u64)>,
+    ) -> Self {
+        Self::fail_allocation_schedule(failures)
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn allocation_observations_for_test(&self) -> &[AllocationObservation] {
+        &self.schedule_observations
+    }
+
+    fn allow_text_legacy_attempt(&mut self) -> bool {
+        self.text_attempt = self.text_attempt.saturating_add(1);
+        !self.fail_text_attempts.contains(&self.text_attempt)
+    }
+
+    fn allow_text_copy_attempt(&mut self) -> bool {
         self.text_attempt = self.text_attempt.saturating_add(1);
         !self.fail_text_attempts.contains(&self.text_attempt)
     }
@@ -76,10 +132,69 @@ impl TestControls {
         self.place_attempt = self.place_attempt.saturating_add(1);
         !self.fail_place_attempts.contains(&self.place_attempt)
     }
+
+    fn begin_allocation_operation(&mut self, base_site: u32) {
+        self.current_base_site = base_site;
+        self.allocation_ordinals.clear();
+    }
+
+    fn allow_allocation(&mut self, phase: AllocationPhase) -> bool {
+        let ordinal = self.allocation_ordinals.get(&phase).copied().unwrap_or(0);
+        self.allocation_ordinals
+            .insert(phase, ordinal.saturating_add(1));
+        self.allow_allocation_at(phase, ordinal)
+    }
+
+    fn allow_allocation_at(&mut self, phase: AllocationPhase, ordinal: u32) -> bool {
+        if !self.schedule_enabled {
+            return true;
+        }
+        let site_id = if self.current_base_site == 0 {
+            0
+        } else {
+            keld_ir::allocation_site_id(self.current_base_site, phase, ordinal)
+        };
+        let key = (site_id, phase);
+        let attempt = self
+            .schedule_attempts
+            .entry(key)
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        let attempt = *attempt;
+        let allowed = !self.schedule_failures.contains(&(site_id, phase, attempt));
+        self.schedule_observations.push(AllocationObservation {
+            site_id,
+            phase,
+            attempt,
+            allowed,
+        });
+        allowed
+    }
+}
+
+impl AllocationPolicy for TestControls {
+    fn allow_list_attempt(&mut self, phase: AllocationPhase) -> bool {
+        self.allocations.allow_list_attempt(phase) && self.allow_allocation(phase)
+    }
+}
+
+impl CopyAllocationPolicy for TestControls {
+    fn allow_copy(&mut self, ordinal: u32) -> bool {
+        self.allow_allocation_at(AllocationPhase::Copy, ordinal)
+    }
+
+    fn allow_text(&mut self) -> bool {
+        self.allow_text_copy_attempt()
+    }
+
+    fn allow_handle(&mut self, ordinal: u32) -> bool {
+        self.allow_allocation_at(AllocationPhase::Handle, ordinal)
+    }
 }
 
 pub struct Interpreter<'module> {
     module: &'module Module,
+    allocation_schedule: AllocationSchedule,
     store: Store<EntityPayload>,
     frames: Vec<Frame>,
     started: bool,
@@ -120,7 +235,7 @@ impl<'module> Interpreter<'module> {
 
     fn with_options(
         module: &'module Module,
-        controls: TestControls,
+        mut controls: TestControls,
         trace_cleanup: bool,
     ) -> Result<Self, InterpreterFailure> {
         let diagnostics = keld_ir::validate(module);
@@ -130,6 +245,19 @@ impl<'module> Interpreter<'module> {
             )));
         }
         let span = main_span(module);
+        let allocation_schedule = AllocationSchedule::from_module(module);
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.id == module.main)
+            .ok_or_else(|| internal("validated main function is missing"))?;
+        let context_site = allocation_schedule
+            .base_id(module.main, main.entry, 0)
+            .unwrap_or(1);
+        controls.begin_allocation_operation(context_site);
+        if !controls.allow_allocation_at(AllocationPhase::Context, 0) {
+            return Err(allocation_failure(span));
+        }
         let store = Store::new().map_err(|error| store_failure(error, span))?;
         let cleanup_scratch = CleanupScratch::new().map_err(|()| allocation_failure(span))?;
         let mut frames = Vec::new();
@@ -138,6 +266,7 @@ impl<'module> Interpreter<'module> {
             .map_err(|_| allocation_failure(span))?;
         Ok(Self {
             module,
+            allocation_schedule,
             store,
             frames,
             started: false,
@@ -167,6 +296,14 @@ impl<'module> Interpreter<'module> {
         before_instruction: &mut dyn FnMut(&Instruction),
     ) -> Result<ExecutionResult, InterpreterFailure> {
         self.run_main_with_hook(before_instruction)
+    }
+
+    /// Returns the semantic allocation observations collected by a test
+    /// schedule. Production callers receive an empty slice.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn allocation_observations_for_test(&self) -> &[AllocationObservation] {
+        &self.controls.schedule_observations
     }
 
     fn run_main_with_hook(
@@ -258,6 +395,16 @@ impl<'module> Interpreter<'module> {
             .blocks
             .get(block_index)
             .ok_or_else(|| internal("active frame references an unknown block"))?;
+        let allocation_site = self
+            .allocation_schedule
+            .base_id(
+                function.id,
+                block.id,
+                u32::try_from(instruction_index)
+                    .map_err(|_| internal("instruction index exceeds allocation schedule"))?,
+            )
+            .unwrap_or(0);
+        self.controls.begin_allocation_operation(allocation_site);
         if let Some(instruction) = block.instructions.get(instruction_index) {
             execute_instruction(
                 self.module,
@@ -391,8 +538,14 @@ fn execute_instruction(
             set_register(module, frames, *dst, Value::Bool(*value))?;
         }
         Instruction::ConstText { dst, value, .. } => {
-            let text = RuntimeText::try_from_str(value, || controls.allow_text_attempt())
+            if !controls.allow_allocation(AllocationPhase::Text) {
+                return Err(allocation_failure(span));
+            }
+            let text = RuntimeText::try_from_str(value, || controls.allow_text_legacy_attempt())
                 .map_err(|CopyAllocation| allocation_failure(span))?;
+            if !controls.allow_allocation(AllocationPhase::Handle) {
+                return Err(allocation_failure(span));
+            }
             set_register(module, frames, *dst, Value::Text(text))?;
         }
         Instruction::ConstNoneLink { dst, .. } => {
@@ -418,6 +571,9 @@ fn execute_instruction(
             set_register(module, frames, *dst, value)?;
         }
         Instruction::ListNew { dst, .. } => {
+            if !controls.allow_allocation(AllocationPhase::Handle) {
+                return Err(allocation_failure(span));
+            }
             set_register(module, frames, *dst, Value::List(crate::RuntimeList::new()))?;
         }
         Instruction::ListLength { dst, list, .. } => {
@@ -437,7 +593,7 @@ fn execute_instruction(
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
-                    .push(value, &mut controls.allocations)
+                    .push(value, controls)
                     .map_err(|failure| reserve_failure(failure, span))?;
                 Ok(())
             })?;
@@ -450,7 +606,7 @@ fn execute_instruction(
                     return Err(internal("validated list push received a non-list"));
                 };
                 elements
-                    .push(value, &mut controls.allocations)
+                    .push(value, controls)
                     .map_err(|failure| reserve_failure(failure, span))?;
                 Ok(())
             })?;
@@ -690,7 +846,7 @@ fn execute_instruction(
                             return Err(internal("validated reserve received a non-list"));
                         };
                         elements
-                            .reserve(additional, &mut controls.allocations)
+                            .reserve(additional, controls)
                             .map_err(|failure| reserve_failure(failure, span))
                     })
                 },
@@ -717,7 +873,7 @@ fn execute_instruction(
                         let ValueKind::List(elements) = list.kind_mut() else {
                             return Err(internal("validated try_reserve received a non-list"));
                         };
-                        Ok(elements.try_reserve(additional, &mut controls.allocations))
+                        Ok(elements.try_reserve(additional, controls))
                     })
                 },
             )?;
@@ -743,6 +899,9 @@ fn execute_instruction(
             set_register(module, frames, *dst, Value::Bool(is_empty))?;
         }
         Instruction::TextConcat { dst, lhs, rhs, .. } => {
+            if !controls.allow_allocation(AllocationPhase::Concat) {
+                return Err(allocation_failure(span));
+            }
             let value = with_register_value(module, store, frames, *lhs, span, |left| {
                 let ValueKind::Text(left) = left.kind() else {
                     return Err(internal("validated text concat received a non-text lhs"));
@@ -756,6 +915,9 @@ fn execute_instruction(
                         .map(Value::Text)
                 })
             })?;
+            if !controls.allow_allocation(AllocationPhase::Handle) {
+                return Err(allocation_failure(span));
+            }
             set_register(module, frames, *dst, value)?;
         }
         Instruction::CheckedUnaryInt { dst, op, src, .. } => {
@@ -797,6 +959,12 @@ fn execute_instruction(
         } => {
             let values =
                 materialize_fields(module, store, frames, *definition, fields, span, controls)?;
+            if !controls.allow_allocation(AllocationPhase::Struct) {
+                return Err(allocation_failure(span));
+            }
+            if !controls.allow_allocation(AllocationPhase::Handle) {
+                return Err(allocation_failure(span));
+            }
             set_register(
                 module,
                 frames,
@@ -971,6 +1139,9 @@ fn execute_effect_instruction(
     match instruction {
         Instruction::BeginLifecycle { dst, parent, .. } => {
             let parent = expect_lifecycle(frame_value(frames, *parent)?)?;
+            if !controls.allow_allocation(AllocationPhase::Lifecycle) {
+                return Err(allocation_failure(span));
+            }
             let lifecycle = store
                 .begin_lifecycle(parent)
                 .map_err(|error| store_failure(error, span))?;
@@ -1000,6 +1171,9 @@ fn execute_effect_instruction(
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
             let values =
                 materialize_fields(module, store, frames, *definition, fields, span, controls)?;
+            if !controls.allow_allocation(AllocationPhase::Entity) {
+                return Err(allocation_failure(span));
+            }
             let entity = store
                 .allocate(
                     RuntimeTypeId(definition.0),
@@ -2014,8 +2188,7 @@ fn structural_copy(
         controls.fail_structural_copies -= 1;
         return Err(allocation_failure(span));
     }
-    try_copy_value_with_text_allocations(value, &mut || controls.allow_text_attempt())
-        .map_err(|_| allocation_failure(span))
+    try_copy_value_with_allocation_controls(value, controls).map_err(|_| allocation_failure(span))
 }
 
 fn take_argument(

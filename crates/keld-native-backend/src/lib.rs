@@ -3,8 +3,9 @@
 #![forbid(unsafe_code)]
 
 use keld_ir::{
-    CompareOp, FaultKind as IrFaultKind, FunctionId, Instruction, IntBinaryOp, IntUnaryOp, IrType,
-    Module, ParameterIndex, Register, RegisterStorage, Terminator, validate,
+    AllocationSchedule, CompareOp, FaultKind as IrFaultKind, FunctionId, Instruction, IntBinaryOp,
+    IntUnaryOp, IrBlockId, IrType, Module, ParameterIndex, Register, RegisterStorage, Terminator,
+    validate,
 };
 use keld_native_abi::{RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
 use keld_native_llvm::{self, OptimizationLevel as LlvmOptimizationLevel};
@@ -458,6 +459,7 @@ struct ScalarLowerer<'module> {
     module: &'module Module,
     function: &'module keld_ir::Function,
     locations: &'module LocationTable,
+    allocation_schedule: &'module AllocationSchedule,
     lines: Vec<String>,
     current_label: String,
     faults: BTreeSet<(u32, u32)>,
@@ -482,11 +484,13 @@ impl<'module> ScalarLowerer<'module> {
         module: &'module Module,
         function: &'module keld_ir::Function,
         locations: &'module LocationTable,
+        allocation_schedule: &'module AllocationSchedule,
     ) -> Self {
         Self {
             module,
             function,
             locations,
+            allocation_schedule,
             lines: Vec::new(),
             current_label: String::new(),
             faults: BTreeSet::new(),
@@ -836,14 +840,20 @@ impl<'module> ScalarLowerer<'module> {
         source: Register,
         displaced: Register,
         span: Span,
+        block: IrBlockId,
+        instruction_index: u32,
     ) -> Result<(), BackendError> {
         if destination.projections.is_empty() {
-            return self.emit_instruction(&Instruction::InstallHome {
-                destination: destination.base,
-                source,
-                displaced,
-                span,
-            });
+            return self.emit_instruction(
+                &Instruction::InstallHome {
+                    destination: destination.base,
+                    source,
+                    displaced,
+                    span,
+                },
+                block,
+                instruction_index,
+            );
         }
         let entity_root = self
             .function
@@ -1006,11 +1016,16 @@ impl<'module> ScalarLowerer<'module> {
                 "Phi must precede non-Phi instructions in a block".to_owned(),
             ));
         }
-        for instruction in block.instructions.iter().take(leading_phi) {
-            self.emit_instruction(instruction)?;
-        }
-        for instruction in block.instructions.iter().skip(leading_phi) {
-            self.emit_instruction(instruction)?;
+        for (index, instruction) in block.instructions.iter().enumerate() {
+            self.emit_instruction(
+                instruction,
+                block.id,
+                u32::try_from(index).map_err(|_| {
+                    BackendError::Unsupported(
+                        "instruction index exceeds native allocation-site range".to_owned(),
+                    )
+                })?,
+            )?;
         }
         let result = self.emit_terminator(&block.terminator);
         if result.is_ok() {
@@ -1095,8 +1110,73 @@ impl<'module> ScalarLowerer<'module> {
         }
     }
 
+    fn instruction_allocates(&self, instruction: &Instruction) -> bool {
+        match instruction {
+            Instruction::ConstText { .. }
+            | Instruction::TextConcat { .. }
+            | Instruction::ConstructStruct { .. }
+            | Instruction::BeginLifecycle { .. }
+            | Instruction::AllocateEntity { .. }
+            | Instruction::ListNew { .. }
+            | Instruction::ListPush { .. }
+            | Instruction::ListPushPlace { .. }
+            | Instruction::ListReserve { .. }
+            | Instruction::ListTryReserve { .. } => true,
+            Instruction::Copy { dst, src, .. } => {
+                self.owns_register(*src) && self.is_home_register(*dst)
+            }
+            Instruction::ReadStructField { dst, .. } | Instruction::ReadField { dst, .. } => {
+                self.owns_register(*dst) && self.is_home_register(*dst)
+            }
+            Instruction::ListGet { dst, receiver, .. } => {
+                self.list_element_type(receiver.list).is_ok_and(|element| {
+                    self.owns_register(*dst)
+                        && self.is_home_register(*dst)
+                        && owns_native_payload(element)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_test_site(
+        &mut self,
+        block: IrBlockId,
+        instruction_index: u32,
+    ) -> Result<(), BackendError> {
+        let base = self
+            .allocation_schedule
+            .base_id(self.function.id, block, instruction_index)
+            .ok_or_else(|| {
+                BackendError::Unsupported(
+                    "allocation instruction is missing from deterministic site schedule".to_owned(),
+                )
+            })?;
+        let stem = format!("test_site_{}", self.lines.len());
+        let status = format!("%{stem}.status");
+        let ok = format!("%{stem}.ok");
+        let continuation = format!("{stem}.cont");
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_test_site(ptr %context, i32 {base})"
+        ));
+        self.line(format!("{ok} = icmp eq i32 {status}, 0"));
+        self.line(format!(
+            "br i1 {ok}, label %{continuation}, label %internal_exit"
+        ));
+        self.label(continuation);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn emit_instruction(&mut self, instruction: &Instruction) -> Result<(), BackendError> {
+    fn emit_instruction(
+        &mut self,
+        instruction: &Instruction,
+        block: IrBlockId,
+        instruction_index: u32,
+    ) -> Result<(), BackendError> {
+        if self.instruction_allocates(instruction) {
+            self.emit_test_site(block, instruction_index)?;
+        }
         match instruction {
             Instruction::ConstInt { dst, value, .. } => {
                 self.line(format!("{} = add i64 0, {value}", register_name(*dst)));
@@ -2224,7 +2304,14 @@ impl<'module> ScalarLowerer<'module> {
                 displaced,
                 span,
             } => {
-                self.emit_place_replace(destination, *source, *displaced, *span)?;
+                self.emit_place_replace(
+                    destination,
+                    *source,
+                    *displaced,
+                    *span,
+                    block,
+                    instruction_index,
+                )?;
             }
         }
         Ok(())
@@ -2793,10 +2880,11 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         }
     }
     let locations = LocationTable::from_module(module, &metadata.source);
+    let allocation_schedule = AllocationSchedule::from_module(module);
     let mut functions_ir = String::new();
     let mut text_literals = BTreeMap::new();
     for function in &module.functions {
-        let mut lowerer = ScalarLowerer::new(module, function, &locations);
+        let mut lowerer = ScalarLowerer::new(module, function, &locations, &allocation_schedule);
         let Some(entry) = function
             .blocks
             .iter()
@@ -2853,6 +2941,9 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         format!("getelementptr inbounds ([{path_type_length} x i8], ptr @keld_path, i64 0, i64 0)");
     let main_name = format!("keld_fn_{}", main.id.0);
     let main_location = locations.id_for(main.span);
+    let context_site = allocation_schedule
+        .base_id(main.id, main.entry, 0)
+        .unwrap_or(1);
     let mut literal_ir = String::new();
     for (name, bytes) in &text_literals {
         let array_length = bytes.len().saturating_add(1);
@@ -2885,11 +2976,22 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         "declare ptr @keld_rt_v1_context_new()\n",
         "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_new_at(i32, ptr, ptr, ptr)\n",
     );
+    ir = ir.replace(
+        "declare ptr @keld_rt_v1_context_new()\n",
+        "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_test_site(ptr, i32)\n",
+    );
     let old_context_call = "  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %root_init, label %no_context\nno_context:\n  ret i32 70\n";
     let new_context_call = format!(
         "  %context_owned = alloca i1\n  store i1 false, ptr %context_owned\n  %context_slot = alloca ptr\n  %context_status = call i32 @keld_rt_v1_context_new_at(i32 {main_location}, ptr %context_slot, ptr %out_kind, ptr %out_location)\n  %context = load ptr, ptr %context_slot\n  %context_ok = icmp eq i32 %context_status, 0\n  br i1 %context_ok, label %root_init, label %context_init_status\ncontext_init_status:\n  %context_init_language = icmp eq i32 %context_status, 1\n  br i1 %context_init_language, label %fault_dispatch, label %internal_main\n"
     );
     ir = ir.replace(old_context_call, &new_context_call);
+    let context_status_call = format!(
+        "  %context_status = call i32 @keld_rt_v1_context_new_at(i32 {main_location}, ptr %context_slot, ptr %out_kind, ptr %out_location)"
+    );
+    let context_status_with_site = format!(
+        "  %context_site_status = call i32 @keld_rt_v1_test_site(ptr null, i32 {context_site})\n  %context_site_ok = icmp eq i32 %context_site_status, 0\n  br i1 %context_site_ok, label %context_site_cont, label %internal_main\ncontext_site_cont:\n{context_status_call}"
+    );
+    ir = ir.replace(&context_status_call, &context_status_with_site);
     for location in locations.entries() {
         let _ = writeln!(
             ir,
