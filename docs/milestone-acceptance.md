@@ -1,14 +1,22 @@
-# Bootstrap Milestone Acceptance
+# Historical milestone acceptance: bootstrap, storage, cleanup, and List
 
-The first milestone is complete only when all 16 criteria below pass in both
-debug and release workspace tests. A compiler build alone is insufficient.
+This document records completed interpreter milestones. It is an acceptance
+map, not a promise of future behavior: every claim below points to a normative
+specification and an existing test suite. Native-1 is approved separately and
+is deliberately not claimed here.
 
-## Source-level acceptance cases
+## Historical bootstrap acceptance
+
+The first bootstrap milestone was complete only when all 16 criteria below
+passed in both debug and release workspace tests. A compiler build alone was
+insufficient.
+
+### Source-level acceptance cases
 
 The black-box table is executed by
 `crates/keld-cli/tests/milestone_acceptance.rs::criterion_10_library_and_cli_observations_match`.
 Every accepted program runs first through the `run_source` library API and then
-through the `keld` binary; both must produce the same decimal `Int`.
+through the `keld` binary; both produce the same decimal `Int`.
 
 | Case | Fixture | Expected result |
 |---|---|---|
@@ -25,51 +33,78 @@ through the `keld` binary; both must produce the same decimal `Int`.
 
 All paths are relative to `crates/keld-cli/tests/fixtures/`.
 
-## Static proof cases
+### Static proof cases
 
-| Criterion | Proof |
+| Criterion | Existing proof |
 |---:|---|
-| 1 | `milestone_acceptance::criterion_01_cyclic_graph_needs_no_ownership_syntax` and `cyclic_graph.keld` |
-| 2 | `milestone_acceptance::criterion_02_lifecycle_end_invalidates_member_links`; runtime unit `lifecycle_cleanup::lifecycle_end_stales_links_and_finish_runs_once` |
-| 3 | `milestone_acceptance::criterion_03_keep_to_ancestor_survives` and `keep_survives.keld` |
-| 4 | `milestone_acceptance::criterion_04_retired_direct_use_is_static_error` and `fail_retired_use.keld` |
-| 5 | `milestone_acceptance::criterion_05_stale_link_takes_absence_path` and `stale_link.keld` |
-| 6 | `milestone_acceptance::criterion_06_double_retirement_is_rejected`; lifecycle unit `retirement::retiring_a_must_alias_makes_both_names_retired` |
-| 7 | `milestone_acceptance::criterion_07_direct_reference_cannot_escape_to_persistent_storage`; lifecycle unit `links_and_escape::persistent_direct_reference_field_requires_a_link` |
-| 8 | `milestone_acceptance::criterion_08_cleanup_order_has_an_executable_proof`; runtime unit `lifecycle_cleanup::lifecycle_cleanup_is_reverse_adoption_order` |
-| 9 | `milestone_acceptance::criterion_09_runtime_model_and_generation_exhaustion_are_covered`; runtime tests listed below |
-| 10 | `milestone_acceptance::criterion_10_library_and_cli_observations_match` runs all ten source cases |
-| 11 | `milestone_acceptance::criterion_11_grammar_goldens_cover_the_milestone_syntax`; `keld-syntax/tests/lexer.rs` and `parser_golden.rs` |
-| 12 | `milestone_acceptance::criterion_12_may_alias_use_after_retirement_is_rejected` and `fail_may_alias.keld` |
-| 13 | `milestone_acceptance::criterion_13_identity_refined_distinct_parameters_are_accepted` and `alias_distinct.keld` |
-| 14 | `milestone_acceptance::criterion_14_broad_retirement_allows_link_reacquisition` and `broad_retirement.keld` |
-| 15 | `milestone_acceptance::criterion_15_views_close_before_structural_operations`; every passing fixture is validated and scanned independently |
-| 16 | `milestone_acceptance::criterion_16_numeric_stages_have_identical_boundaries`; numeric parity tests listed below |
+| 1 | `criterion_01_cyclic_graph_needs_no_ownership_syntax` and `cyclic_graph.keld` |
+| 2 | `criterion_02_lifecycle_end_invalidates_member_links`; runtime `lifecycle_cleanup::lifecycle_end_stales_links_and_finish_runs_once` |
+| 3 | `criterion_03_keep_to_ancestor_survives` and `keep_survives.keld` |
+| 4 | `criterion_04_retired_direct_use_is_static_error` and `fail_retired_use.keld` |
+| 5 | `criterion_05_stale_link_takes_absence_path` and `stale_link.keld` |
+| 6 | `criterion_06_double_retirement_is_rejected`; lifecycle `retirement::retiring_a_must_alias_makes_both_names_retired` |
+| 7 | `criterion_07_direct_reference_cannot_escape_to_persistent_storage`; lifecycle `links_and_escape::persistent_direct_reference_field_requires_a_link` |
+| 8 | `criterion_08_cleanup_order_has_an_executable_proof`; runtime `lifecycle_cleanup::lifecycle_cleanup_is_reverse_adoption_order` |
+| 9 | `criterion_09_runtime_model_and_generation_exhaustion_are_covered`; runtime model and generation tests below |
+| 10 | `criterion_10_library_and_cli_observations_match` runs all ten source cases |
+| 11 | `criterion_11_grammar_goldens_cover_the_milestone_syntax`; lexer/parser goldens |
+| 12 | `criterion_12_may_alias_use_after_retirement_is_rejected` and `fail_may_alias.keld` |
+| 13 | `criterion_13_identity_refined_distinct_parameters_are_accepted` and `alias_distinct.keld` |
+| 14 | `criterion_14_broad_retirement_allows_link_reacquisition` and `broad_retirement.keld` |
+| 15 | `criterion_15_views_close_before_structural_operations`; independently scanned validated fixtures |
+| 16 | `criterion_16_numeric_stages_have_identical_boundaries`; numeric parity tests below |
 
-## Runtime model cases
+### Runtime and numeric evidence
 
 `keld-runtime/tests/model_sequences.rs::store_matches_reference_model_for_generated_sequences`
-runs 256 seeds with 1,000 operations per seed. It compares a source-independent
-reference model against the real store after allocate, link, resolve, retire,
-begin, keep, and end operations. It verifies identities, slot reuse,
-generations, exact runtime types, lifecycle membership, stale resolution,
-cleanup order, and classified invalid-operation errors after every step.
+runs 256 seeds with 1,000 operations per seed and compares identities, slot
+reuse, generations, exact runtime types, lifecycle membership, stale
+resolution, cleanup order, and classified invalid-operation errors against a
+source-independent model. The generation-exhaustion unit proves exhausted
+slots are never reused.
 
-`keld-runtime/src/store.rs::generation_exhaustion_permanently_retires_the_slot`
-uses a bounded test generation counter to prove exhausted slots are never
-reused. The integration sequence test exercises ordinary generation advances;
-the focused unit reaches exhaustion without billions of iterations.
-
-## Numeric parity cases
-
-Criterion 16 checks the same boundary in constant evaluation and in executable
-IR interpretation for overflow, division by zero, `Int.MIN / -1`, and invalid
-shifts. It also checks that `Int.MIN % -1` returns zero. The exhaustive shared
-operation table is in
+Criterion 16 compares constant evaluation and executable-IR interpretation for
+overflow, division by zero, `Int.MIN / -1`, invalid shifts, and
+`Int.MIN % -1 == 0`. The exhaustive operation table is
 `keld-interpreter/tests/numeric.rs::runtime_numeric_edges_match_the_shared_checked_evaluator`;
-the normative primitive cases are in `keld-numeric/tests/int_boundaries.rs`.
+the normative cases are in [`spec/numeric-safety.md`](spec/numeric-safety.md).
 
-## Full verification command
+## Completed storage and value acceptance
+
+The storage milestone implements the contracts in
+[`spec/storage-values.md`](spec/storage-values.md), §§1–10 and §14. The
+corresponding executable evidence is distributed across
+`keld-semantics/tests/types.rs`, `keld-flow/tests/storage_scopes.rs`,
+`keld-storage/tests/loan_reservations.rs`,
+`keld-lifecycle/tests/{provenance_facts,links_and_escape,retirement}.rs`,
+`keld-ir/tests/validation.rs`, and the interpreter integration suites.
+
+Those tests cover `let`/`var` state, `take`, `.copy()`, normal and consuming
+parameters, owned returns, Optional values, nested managed aggregates, loan
+provenance, projected places, structural-view barriers, entity/link identity,
+and validation of every explicit move/loan/install/drop operation. The
+interpreter remains the semantic oracle and executes only validated IR.
+
+## Completed cleanup and List acceptance
+
+The List and cleanup milestone implements [`spec/storage-values.md`](spec/storage-values.md),
+§§11–13 and §15–§17. Focused tests cover direct and projected construction,
+length, push, remove, index loans, copy-get, replace, try-remove, clear,
+reserve, try-reserve, nested Lists/Text, capacity preservation, preferred then
+minimum growth, replacement-before-displaced-cleanup, and faulting bounds or
+capacity paths. `keld-interpreter/tests/projected_allocation.rs` proves the
+allocation-free projected `try_remove` path, while structural-view coverage
+rejects both projected List mutation instructions.
+
+Cleanup evidence covers reverse successful-initialization order, `MaybeLive`
+conditional homes, divergent CFG joins, partial initialization, entity cleanup,
+and final context teardown. Runtime model and allocator tests distinguish
+language allocation faults from internal store invariant failures. The
+historical full gate recorded 256 reference-model seeds and the GNU workspace,
+strict Clippy, formatting, and diff checks as passing; Native-1 differential
+execution remains pending.
+
+## Verification command for this historical milestone
 
 From the repository root in PowerShell:
 
@@ -83,5 +118,15 @@ cargo run --release -p keld-cli -- run --engine interpreter crates/keld-cli/test
 cargo run --release -p keld-cli -- dump-ir crates/keld-cli/tests/fixtures/keep_survives.keld
 ```
 
-The run command must write exactly `20` followed by one newline. The dump must
-be non-empty. Every command must exit zero.
+The run command writes exactly `20` followed by one newline; the dump is
+non-empty; every command exits zero.
+
+## Native-1 status
+
+The approved `x86_64-w64-windows-gnu` LLVM Native-1 design is recorded in
+[`superpowers/specs/2026-08-14-keld-llvm-native-1-design.md`](superpowers/specs/2026-08-14-keld-llvm-native-1-design.md)
+and its task plan in
+[`superpowers/plans/2026-08-14-keld-llvm-native-1.md`](superpowers/plans/2026-08-14-keld-llvm-native-1.md).
+No native acceptance criterion is complete until generated O0/O2 executables
+match the validated IR/interpreter, pass the restricted-import audit, and
+complete the frozen toolchain and allocation-failure gates.
