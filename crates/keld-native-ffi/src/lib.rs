@@ -4,7 +4,7 @@ use keld_native_abi::{
     ABI_VERSION, FaultKind, KeldEntity, KeldFault, KeldLifecycle, KeldLink, KeldPlaceStep,
     KeldValue, RuntimeStatus,
 };
-use keld_native_runtime::{NativeValueError, RuntimeContext};
+use keld_native_runtime::{NativeValueError, RuntimeContext, RuntimeContextError};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -264,6 +264,46 @@ pub extern "C" fn keld_rt_v1_context_new() -> *mut RuntimeContext {
         .ok()
         .and_then(Result::ok)
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// Creates a context while returning setup failures through the frozen status
+/// and fault slots. No context pointer is produced when setup fails.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_context_new_at(
+    location: u32,
+    context: *mut *mut RuntimeContext,
+    kind: *mut u32,
+    fault_location: *mut u32,
+) -> u32 {
+    if context.is_null() || kind.is_null() || fault_location.is_null() {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: output pointers are checked non-null and borrowed only for
+        // this synchronous call.
+        let (context_slot, kind_slot, location_slot) =
+            unsafe { (&mut *context, &mut *kind, &mut *fault_location) };
+        *context_slot = std::ptr::null_mut();
+        *kind_slot = 0;
+        *location_slot = 0;
+        match RuntimeContext::new_at(location) {
+            Ok(value) => {
+                *context_slot = Box::into_raw(Box::new(value));
+                status_code(RuntimeStatus::Ok)
+            }
+            Err(error) if error.is_allocation() => {
+                *kind_slot = FaultKind::Allocation as u32;
+                *location_slot = location;
+                status_code(RuntimeStatus::LanguageFault)
+            }
+            Err(RuntimeContextError::Store(_)) => {
+                *location_slot = location;
+                status_code(RuntimeStatus::InternalFailure)
+            }
+        }
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
 }
 
 /// Destroys a context after generated `main` has finished execution.

@@ -2852,6 +2852,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let path_pointer =
         format!("getelementptr inbounds ([{path_type_length} x i8], ptr @keld_path, i64 0, i64 0)");
     let main_name = format!("keld_fn_{}", main.id.0);
+    let main_location = locations.id_for(main.span);
     let mut literal_ir = String::new();
     for (name, bytes) in &text_literals {
         let array_length = bytes.len().saturating_add(1);
@@ -2875,7 +2876,20 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let new_context_bootstrap = format!(
         "  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %root_init, label %no_context\nno_context:\n  ret i32 70\nroot_init:\n  %root_lifecycle = alloca {{ i64, i32, i32 }}\n  %root_status = call i32 @keld_rt_v1_context_root_lifecycle(ptr %context, ptr %root_lifecycle)\n  %root_ok = icmp eq i32 %root_status, 0\n  br i1 %root_ok, label %context_ready, label %destroy_internal\ncontext_ready:\n  %root_value = load {{ i64, i32, i32 }}, ptr %root_lifecycle\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} %root_value, ptr %out_value, ptr %out_kind, ptr %out_location)"
     );
+    let new_context_bootstrap = new_context_bootstrap.replace(
+        "context_ready:\n  %root_value",
+        "context_ready:\n  store i1 true, ptr %context_owned\n  %root_value",
+    );
     ir = ir.replace(&old_context_bootstrap, &new_context_bootstrap);
+    ir = ir.replace(
+        "declare ptr @keld_rt_v1_context_new()\n",
+        "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_new_at(i32, ptr, ptr, ptr)\n",
+    );
+    let old_context_call = "  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %root_init, label %no_context\nno_context:\n  ret i32 70\n";
+    let new_context_call = format!(
+        "  %context_owned = alloca i1\n  store i1 false, ptr %context_owned\n  %context_slot = alloca ptr\n  %context_status = call i32 @keld_rt_v1_context_new_at(i32 {main_location}, ptr %context_slot, ptr %out_kind, ptr %out_location)\n  %context = load ptr, ptr %context_slot\n  %context_ok = icmp eq i32 %context_status, 0\n  br i1 %context_ok, label %root_init, label %context_init_status\ncontext_init_status:\n  %context_init_language = icmp eq i32 %context_status, 1\n  br i1 %context_init_language, label %fault_dispatch, label %internal_main\n"
+    );
+    ir = ir.replace(old_context_call, &new_context_call);
     for location in locations.entries() {
         let _ = writeln!(
             ir,
@@ -2887,13 +2901,17 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     for location in locations.entries() {
         let _ = write!(
             ir,
-            "fault_location_{}:\n  %fault_status_{} = call i32 @keld_rt_v1_print_fault(i32 %out_kind_value, ptr {}, i64 {}, i32 {}, i32 {})\n  %fault_print_ok_{} = icmp eq i32 %fault_status_{}, 0\n  br i1 %fault_print_ok_{}, label %destroy_fault, label %destroy_internal\n",
+            "fault_location_{}:\n  %fault_status_{} = call i32 @keld_rt_v1_print_fault(i32 %out_kind_value, ptr {}, i64 {}, i32 {}, i32 {})\n  %fault_print_ok_{} = icmp eq i32 %fault_status_{}, 0\n  br i1 %fault_print_ok_{}, label %fault_cleanup_dispatch_{}, label %destroy_internal\nfault_cleanup_dispatch_{}:\n  %fault_has_context_{} = load i1, ptr %context_owned\n  br i1 %fault_has_context_{}, label %destroy_fault, label %fault_done\n",
             location.id,
             location.id,
             path_pointer,
             path_length,
             location.line,
             location.column,
+            location.id,
+            location.id,
+            location.id,
+            location.id,
             location.id,
             location.id,
             location.id,

@@ -8,6 +8,9 @@ use keld_native_backend::{
 use keld_source::{SourceId, SourceText, Span};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_TEST_TEMP: AtomicU64 = AtomicU64::new(1);
 
 fn span() -> Span {
     Span::new(SourceId(0), 0, 0).expect("empty source span")
@@ -106,6 +109,24 @@ fn request(
     }
 }
 
+fn add_context_setup_export(path: &Path) {
+    let exports = std::fs::read_to_string(path)
+        .expect("runtime export list must be readable")
+        .replace(
+            "keld_rt_v1_context_new\n",
+            "keld_rt_v1_context_new\nkeld_rt_v1_context_new_at\n",
+        );
+    std::fs::write(path, exports).expect("runtime export list must be writable");
+}
+
+fn native_temp(tag: &str) -> PathBuf {
+    let sequence = NEXT_TEST_TEMP.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "keld-native-{tag}-{}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -117,10 +138,14 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
         "build keld-native-ffi first: {}",
         ffi_dll.display()
     );
-    let temp = std::env::temp_dir().join(format!("keld-native-{tag}-{}", std::process::id()));
+    runtime_artifacts_with_dll(tag, &ffi_dll)
+}
+
+fn runtime_artifacts_with_dll(tag: &str, ffi_dll: &Path) -> (PathBuf, PathBuf) {
+    let temp = native_temp(tag);
     std::fs::create_dir_all(&temp).expect("temporary directory");
     let runtime_dll = temp.join("keld_runtime_v1.dll");
-    std::fs::copy(&ffi_dll, &runtime_dll).expect("runtime DLL copy");
+    std::fs::copy(ffi_dll, &runtime_dll).expect("runtime DLL copy");
     let import_library = temp.join("libkeld_runtime_v1.dll.a");
     let export_list = temp.join("runtime.def");
     std::fs::write(
@@ -128,6 +153,7 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
         "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\nkeld_rt_v1_struct_new\nkeld_rt_v1_struct_field\nkeld_rt_v1_place_resolve\nkeld_rt_v1_place_replace\nkeld_rt_v1_home_track\nkeld_rt_v1_home_untrack\nkeld_rt_v1_cleanup_scope\nkeld_rt_v1_begin_lifecycle\nkeld_rt_v1_end_lifecycle\nkeld_rt_v1_allocate_entity\nkeld_rt_v1_entity_to_link\nkeld_rt_v1_resolve_link\nkeld_rt_v1_entity_field\nkeld_rt_v1_replace_field\nkeld_rt_v1_keep_entity\nkeld_rt_v1_retire_entity\n",
     )
     .expect("runtime export list");
+    add_context_setup_export(&export_list);
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
     let status = Command::new(dlltool)
         .args([
@@ -143,6 +169,20 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
         .expect("dlltool");
     assert!(status.success(), "dlltool failed: {status}");
     (runtime_dll, import_library)
+}
+
+fn test_runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let ffi_dll = root.join("target/x86_64-pc-windows-gnu/release/keld_runtime_v1_test.dll");
+    assert!(
+        ffi_dll.is_file(),
+        "build keld-native-ffi-test first: {}",
+        ffi_dll.display()
+    );
+    runtime_artifacts_with_dll(tag, &ffi_dll)
 }
 
 fn binary_module(lhs: i64, op: IntBinaryOp, rhs: i64) -> Module {
@@ -898,7 +938,7 @@ fn builds_and_runs_a_const_int_program() {
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
     );
-    let temp = std::env::temp_dir().join(format!("keld-native-int-{}", std::process::id()));
+    let temp = native_temp("int");
     std::fs::create_dir_all(&temp).expect("temporary directory");
     let runtime_dll = temp.join("keld_runtime_v1.dll");
     std::fs::copy(&ffi_dll, &runtime_dll).expect("runtime DLL copy");
@@ -909,6 +949,7 @@ fn builds_and_runs_a_const_int_program() {
         "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
+    add_context_setup_export(&export_list);
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
     let status = Command::new(dlltool)
         .args([
@@ -966,6 +1007,42 @@ fn builds_and_runs_a_const_int_program() {
 }
 
 #[test]
+fn test_runtime_reports_context_allocation_at_main_span() {
+    let (runtime_dll, import_library) = test_runtime_artifacts("context-fault");
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let control = directory.join("control.txt");
+    let observation = directory.join("observation.txt");
+    std::fs::write(&control, "site_id=1 phase=context attempt=1\n").expect("control file");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("setup.keld"),
+        source: SourceText::from_str(SourceId(0), "setup\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = directory.join(format!("context-fault-{index}.exe"));
+        let artifact = build_executable(
+            &const_module(7),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("native context-fault build");
+        let child = Command::new(&artifact.executable)
+            .env("KELD_TEST_CONTROL", &control)
+            .env("KELD_TEST_OBSERVATION", &observation)
+            .output()
+            .expect("native context-fault executable");
+        assert_eq!(child.status.code(), Some(2));
+        assert!(child.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&child.stderr),
+            "setup.keld:1:1: runtime[AllocationFault]: runtime allocation failed\n"
+        );
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -978,7 +1055,7 @@ fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
     );
-    let temp = std::env::temp_dir().join(format!("keld-native-scalar-{}", std::process::id()));
+    let temp = native_temp("scalar");
     std::fs::create_dir_all(&temp).expect("temporary directory");
     let runtime_dll = temp.join("keld_runtime_v1.dll");
     std::fs::copy(&ffi_dll, &runtime_dll).expect("runtime DLL copy");
@@ -989,6 +1066,7 @@ fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
         "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
+    add_context_setup_export(&export_list);
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
     let status = Command::new(dlltool)
         .args([
@@ -1093,7 +1171,7 @@ fn scalar_faults_preserve_kind_span_and_unreachable_is_internal() {
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
     );
-    let temp = std::env::temp_dir().join(format!("keld-native-fault-{}", std::process::id()));
+    let temp = native_temp("fault");
     std::fs::create_dir_all(&temp).expect("temporary directory");
     let runtime_dll = temp.join("keld_runtime_v1.dll");
     std::fs::copy(&ffi_dll, &runtime_dll).expect("runtime DLL copy");
@@ -1104,6 +1182,7 @@ fn scalar_faults_preserve_kind_span_and_unreachable_is_internal() {
         "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
+    add_context_setup_export(&export_list);
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
     let status = Command::new(dlltool)
         .args([

@@ -80,6 +80,13 @@ impl fmt::Display for RuntimeContextError {
 
 impl std::error::Error for RuntimeContextError {}
 
+impl RuntimeContextError {
+    #[must_use]
+    pub const fn is_allocation(&self) -> bool {
+        matches!(self, Self::Store(StoreError::Allocation))
+    }
+}
+
 /// Runtime state shared by generated functions. The store remains source
 /// independent; later Native-1 layers add managed payload descriptors here.
 pub struct RuntimeContext {
@@ -141,6 +148,11 @@ impl TestControls {
 
     fn set_site(&mut self, site_id: u32) {
         self.current_site = site_id;
+    }
+
+    fn allow_at(&mut self, site_id: u32, phase: &str) -> bool {
+        self.set_site(site_id);
+        self.allow(phase)
     }
 
     fn allow(&mut self, phase: &str) -> bool {
@@ -245,6 +257,29 @@ impl RuntimeContext {
     /// Returns [`RuntimeContextError::Store`] if the independent runtime store
     /// cannot allocate its brand or root lifecycle.
     pub fn new() -> Result<Self, RuntimeContextError> {
+        Self::new_at(0)
+    }
+
+    /// Creates a context while selecting the source location used for a
+    /// test-only context/store allocation failure.
+    ///
+    /// Production builds ignore the location and have no failure injection.
+    /// The native FFI uses this constructor so setup failures can be reported
+    /// as a language `AllocationFault` before a context pointer exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeContextError::Store`] when the independent runtime
+    /// store cannot allocate its brand or root lifecycle.
+    pub fn new_at(location: u32) -> Result<Self, RuntimeContextError> {
+        #[cfg(not(feature = "test-controls"))]
+        let _ = location;
+        #[cfg(feature = "test-controls")]
+        let mut test_controls = TestControls::load();
+        #[cfg(feature = "test-controls")]
+        if !test_controls.allow_at(location, "context") {
+            return Err(RuntimeContextError::Store(StoreError::Allocation));
+        }
         Ok(Self {
             store: Store::new().map_err(RuntimeContextError::Store)?,
             handles: Vec::new(),
@@ -252,7 +287,7 @@ impl RuntimeContext {
             status: RuntimeStatus::Ok,
             first_failure: None,
             #[cfg(feature = "test-controls")]
-            test_controls: TestControls::load(),
+            test_controls,
         })
     }
 
