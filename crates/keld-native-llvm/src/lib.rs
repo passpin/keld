@@ -55,11 +55,13 @@ mod enabled {
     use llvm_sys::analysis::{LLVMVerifierFailureAction, LLVMVerifyModule};
     use llvm_sys::core::{
         LLVMAddFunction, LLVMAppendBasicBlockInContext, LLVMBuildCall2, LLVMBuildRet, LLVMConstInt,
-        LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext, LLVMDisposeBuilder,
+        LLVMContextCreate, LLVMContextDispose, LLVMCreateBuilderInContext,
+        LLVMCreateMemoryBufferWithMemoryRangeCopy, LLVMDisposeBuilder, LLVMDisposeMemoryBuffer,
         LLVMDisposeMessage, LLVMDisposeModule, LLVMFunctionType, LLVMInt32TypeInContext,
         LLVMInt64TypeInContext, LLVMModuleCreateWithNameInContext, LLVMPositionBuilderAtEnd,
         LLVMPrintModuleToString, LLVMSetDataLayout, LLVMSetSourceFileName, LLVMSetTarget,
     };
+    use llvm_sys::ir_reader::LLVMParseIRInContext2;
     use llvm_sys::prelude::{LLVMContextRef, LLVMModuleRef};
     use llvm_sys::target::{LLVMCopyStringRepOfTargetData, LLVMDisposeTargetData};
     use llvm_sys::target_machine::{
@@ -376,6 +378,154 @@ mod enabled {
         }
     }
 
+    /// Parses, verifies, optimizes, and emits one generated LLVM IR module.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlvmError`] when parsing, verification, optimization, or
+    /// object emission fails, or when a supplied name contains a NUL byte.
+    #[allow(clippy::too_many_lines)]
+    pub fn emit_ir(
+        output: &Path,
+        module_name: &str,
+        ir: &str,
+        triple: &str,
+        level: OptimizationLevel,
+    ) -> Result<(), LlvmError> {
+        initialize_x86_target();
+        let module_name = cstring(module_name)?;
+        let source_file = cstring(module_name.to_string_lossy())?;
+        let triple = cstring(triple)?;
+        let output = cstring(output.to_string_lossy())?;
+        let context = unsafe { LLVMContextCreate() };
+        if context.is_null() {
+            return Err(LlvmError::Message(
+                "LLVM context creation failed".to_owned(),
+            ));
+        }
+        let buffer = unsafe {
+            LLVMCreateMemoryBufferWithMemoryRangeCopy(
+                ir.as_ptr().cast(),
+                ir.len(),
+                module_name.as_ptr(),
+            )
+        };
+        if buffer.is_null() {
+            unsafe { LLVMContextDispose(context) };
+            return Err(LlvmError::Message(
+                "LLVM IR memory-buffer creation failed".to_owned(),
+            ));
+        }
+        let mut module = null_mut();
+        let mut diagnostic = null_mut();
+        // SAFETY: context and buffer are valid handles; parser initializes the
+        // module and diagnostic out pointers for this call.
+        let failed =
+            unsafe { LLVMParseIRInContext2(context, buffer, &raw mut module, &raw mut diagnostic) };
+        // SAFETY: the parser does not consume the buffer.
+        unsafe { LLVMDisposeMemoryBuffer(buffer) };
+        if failed != 0 || module.is_null() {
+            let text = message(diagnostic);
+            unsafe { LLVMContextDispose(context) };
+            return Err(LlvmError::Message(format!(
+                "LLVM IR parsing failed: {text}"
+            )));
+        }
+        let mut resources = Resources {
+            context,
+            module,
+            builder: null_mut(),
+            target_machine: null_mut(),
+        };
+        let mut target = null_mut();
+        let mut target_error = null_mut();
+        // SAFETY: triple and out pointers are valid for this call.
+        let target_failed = unsafe {
+            LLVMGetTargetFromTriple(triple.as_ptr(), &raw mut target, &raw mut target_error)
+        };
+        if target_failed != 0 || target.is_null() {
+            return Err(LlvmError::Message(format!(
+                "LLVM target lookup failed: {}",
+                message(target_error)
+            )));
+        }
+        let opt_level = match level {
+            OptimizationLevel::O0 => LLVMCodeGenOptLevel::LLVMCodeGenLevelNone,
+            OptimizationLevel::O2 => LLVMCodeGenOptLevel::LLVMCodeGenLevelDefault,
+        };
+        let generic_cpu = cstring("generic")?;
+        let empty_features = cstring("")?;
+        // SAFETY: target and all C strings are valid; the returned target
+        // machine is owned by Resources.
+        resources.target_machine = unsafe {
+            LLVMCreateTargetMachine(
+                target,
+                triple.as_ptr(),
+                generic_cpu.as_ptr(),
+                empty_features.as_ptr(),
+                opt_level,
+                LLVMRelocMode::LLVMRelocDefault,
+                LLVMCodeModel::LLVMCodeModelDefault,
+            )
+        };
+        if resources.target_machine.is_null() {
+            return Err(LlvmError::Message(
+                "LLVM target-machine creation failed".to_owned(),
+            ));
+        }
+        // SAFETY: module and C strings remain live for this call.
+        unsafe {
+            LLVMSetTarget(resources.module, triple.as_ptr());
+            LLVMSetSourceFileName(
+                resources.module,
+                source_file.as_ptr(),
+                source_file.as_bytes().len(),
+            );
+        }
+        let target_data = unsafe { LLVMCreateTargetDataLayout(resources.target_machine) };
+        if target_data.is_null() {
+            return Err(LlvmError::Message(
+                "LLVM target data-layout creation failed".to_owned(),
+            ));
+        }
+        // SAFETY: target_data and module are valid; the copied layout is
+        // disposed after LLVM copies it into the module.
+        unsafe {
+            let layout = LLVMCopyStringRepOfTargetData(target_data);
+            if layout.is_null() {
+                LLVMDisposeTargetData(target_data);
+                return Err(LlvmError::Message(
+                    "LLVM target data-layout string was null".to_owned(),
+                ));
+            }
+            LLVMSetDataLayout(resources.module, layout);
+            LLVMDisposeMessage(layout);
+            LLVMDisposeTargetData(target_data);
+        }
+        verify(resources.module, "before optimization")?;
+        run_passes(resources.module, resources.target_machine, level)?;
+        verify(resources.module, "after optimization")?;
+        let mut diagnostic = null_mut();
+        // SAFETY: all handles and output path remain live for this call.
+        let failed = unsafe {
+            LLVMTargetMachineEmitToFile(
+                resources.target_machine,
+                resources.module,
+                output.as_ptr(),
+                LLVMCodeGenFileType::LLVMObjectFile,
+                &raw mut diagnostic,
+            )
+        };
+        if failed == 0 {
+            Ok(())
+        } else {
+            Err(LlvmError::Message(format!(
+                "LLVM object emission failed: {}",
+                message(diagnostic)
+            )))
+        }
+    }
+
     /// Returns textual IR for focused backend diagnostics.
     ///
     /// # Errors
@@ -441,13 +591,24 @@ mod enabled {
 }
 
 #[cfg(feature = "llvm")]
-pub use enabled::{emit_const_return_program, print_const_return_ir};
+pub use enabled::{emit_const_return_program, emit_ir, print_const_return_ir};
 
 #[cfg(not(feature = "llvm"))]
 pub fn emit_const_return_program(
     _output: &Path,
     _module_name: &str,
     _value: i64,
+    _triple: &str,
+    _level: OptimizationLevel,
+) -> Result<(), LlvmError> {
+    Err(LlvmError::FeatureDisabled)
+}
+
+#[cfg(not(feature = "llvm"))]
+pub fn emit_ir(
+    _output: &Path,
+    _module_name: &str,
+    _ir: &str,
     _triple: &str,
     _level: OptimizationLevel,
 ) -> Result<(), LlvmError> {

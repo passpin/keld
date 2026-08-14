@@ -2,11 +2,16 @@
 
 #![forbid(unsafe_code)]
 
-use keld_ir::{Instruction, IrType, Module, Register, Terminator, validate};
+use keld_ir::{
+    CompareOp, FaultKind as IrFaultKind, Instruction, IntBinaryOp, IntUnaryOp, IrType, Module,
+    Register, Terminator, validate,
+};
 use keld_native_abi::{RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
 use keld_native_llvm::{self, OptimizationLevel as LlvmOptimizationLevel};
-use keld_source::{Diagnostic, SourceText};
+use keld_source::{BytePos, Diagnostic, SourceText, Span};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +19,144 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const TARGET_TRIPLE: &str = "x86_64-w64-windows-gnu";
 const LLVM_VERSION: &str = "22.1.8";
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(1);
+
+/// One deterministic source location embedded in a native executable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceLocation {
+    pub id: u32,
+    pub source_id: u32,
+    pub start: u32,
+    pub end: u32,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// Deterministic location table shared by scalar lowering and fault rendering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocationTable {
+    entries: Vec<SourceLocation>,
+    ids: BTreeMap<(u32, u32, u32), u32>,
+}
+
+impl LocationTable {
+    /// Builds IDs after deduplicating and sorting source spans.
+    #[must_use]
+    pub fn from_module(module: &Module, source: &SourceText) -> Self {
+        let mut spans = BTreeSet::new();
+        for function in &module.functions {
+            spans.insert((
+                function.span.source().0,
+                function.span.start().0,
+                function.span.end().0,
+            ));
+            for block in &function.blocks {
+                for instruction in &block.instructions {
+                    let span = instruction_span(instruction);
+                    spans.insert((span.source().0, span.start().0, span.end().0));
+                }
+                if let Some(span) = terminator_span(&block.terminator) {
+                    spans.insert((span.source().0, span.start().0, span.end().0));
+                }
+            }
+        }
+        let mut entries = Vec::with_capacity(spans.len());
+        let mut ids = BTreeMap::new();
+        for (index, (source_id, start, end)) in spans.into_iter().enumerate() {
+            let id = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            let (line, column) = if source.id().0 == source_id {
+                source.line_col(BytePos(start)).unwrap_or((1, 1))
+            } else {
+                (1, 1)
+            };
+            ids.insert((source_id, start, end), id);
+            entries.push(SourceLocation {
+                id,
+                source_id,
+                start,
+                end,
+                line,
+                column,
+            });
+        }
+        Self { entries, ids }
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[SourceLocation] {
+        &self.entries
+    }
+
+    #[must_use]
+    pub fn id_for(&self, span: Span) -> u32 {
+        self.ids
+            .get(&(span.source().0, span.start().0, span.end().0))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+fn instruction_span(instruction: &Instruction) -> Span {
+    match instruction {
+        Instruction::ConstInt { span, .. }
+        | Instruction::ConstBool { span, .. }
+        | Instruction::ConstText { span, .. }
+        | Instruction::ConstNoneLink { span, .. }
+        | Instruction::Copy { span, .. }
+        | Instruction::Take { span, .. }
+        | Instruction::InstallHome { span, .. }
+        | Instruction::MoveHome { span, .. }
+        | Instruction::DropHome { span, .. }
+        | Instruction::DropIfLive { span, .. }
+        | Instruction::DropSlot { span, .. }
+        | Instruction::CleanupTrackedScope { span, .. }
+        | Instruction::ReplacePlace { span, .. }
+        | Instruction::ReplaceField { span, .. }
+        | Instruction::ListNew { span, .. }
+        | Instruction::ListLength { span, .. }
+        | Instruction::ListPush { span, .. }
+        | Instruction::ListPushPlace { span, .. }
+        | Instruction::ListRemove { span, .. }
+        | Instruction::ListRemovePlace { span, .. }
+        | Instruction::ListIndex { span, .. }
+        | Instruction::ListGet { span, .. }
+        | Instruction::ListReplace { span, .. }
+        | Instruction::ListTryRemove { span, .. }
+        | Instruction::ListClear { span, .. }
+        | Instruction::ListReserve { span, .. }
+        | Instruction::ListTryReserve { span, .. }
+        | Instruction::TextByteLength { span, .. }
+        | Instruction::TextIsEmpty { span, .. }
+        | Instruction::TextConcat { span, .. }
+        | Instruction::CheckedUnaryInt { span, .. }
+        | Instruction::CheckedBinaryInt { span, .. }
+        | Instruction::Not { span, .. }
+        | Instruction::Compare { span, .. }
+        | Instruction::Phi { span, .. }
+        | Instruction::ConstructStruct { span, .. }
+        | Instruction::ReadStructField { span, .. }
+        | Instruction::BeginLifecycle { span, .. }
+        | Instruction::EndLifecycle { span, .. }
+        | Instruction::AllocateEntity { span, .. }
+        | Instruction::EntityToLink { span, .. }
+        | Instruction::OpenView { span, .. }
+        | Instruction::ReadField { span, .. }
+        | Instruction::WriteField { span, .. }
+        | Instruction::CloseView { span, .. }
+        | Instruction::KeepEntity { span, .. }
+        | Instruction::RetireEntity { span, .. }
+        | Instruction::Call { span, .. } => *span,
+    }
+}
+
+fn terminator_span(terminator: &Terminator) -> Option<Span> {
+    match terminator {
+        Terminator::ResolveLink { span, .. } | Terminator::Fault { span, .. } => Some(*span),
+        Terminator::Goto(_)
+        | Terminator::Branch { .. }
+        | Terminator::Return(_)
+        | Terminator::Unreachable => None,
+    }
+}
 
 /// Optimization levels frozen by the Native-1 CLI contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,7 +339,534 @@ fn require_runtime_artifacts(request: &BuildRequest) -> Result<(), BackendError>
     Ok(())
 }
 
-fn const_return_value(module: &Module) -> Result<i64, BackendError> {
+fn scalar_type(ty: &IrType) -> Option<&'static str> {
+    match ty {
+        IrType::Bool => Some("i1"),
+        IrType::Int => Some("i64"),
+        IrType::Lifecycle
+        | IrType::Unit
+        | IrType::Struct(_)
+        | IrType::Entity(_)
+        | IrType::Link { .. }
+        | IrType::Text
+        | IrType::List(_)
+        | IrType::Optional(_) => None,
+    }
+}
+
+fn ir_fault_code(kind: IrFaultKind) -> u32 {
+    match kind {
+        IrFaultKind::Arithmetic => 1,
+        IrFaultKind::DivisionByZero => 2,
+        IrFaultKind::Shift => 3,
+        IrFaultKind::Allocation => 4,
+        IrFaultKind::Capacity => 5,
+    }
+}
+
+fn llvm_compare(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Eq => "eq",
+        CompareOp::NotEq => "ne",
+        CompareOp::Less => "slt",
+        CompareOp::LessEq => "sle",
+        CompareOp::Greater => "sgt",
+        CompareOp::GreaterEq => "sge",
+    }
+}
+
+fn llvm_type_for_register(
+    function: &keld_ir::Function,
+    register: Register,
+) -> Result<&'static str, BackendError> {
+    function
+        .register_types
+        .get(register.0 as usize)
+        .and_then(scalar_type)
+        .ok_or_else(|| {
+            BackendError::Unsupported(format!(
+                "register %{} is not a supported scalar value",
+                register.0
+            ))
+        })
+}
+
+fn register_name(register: Register) -> String {
+    format!("%r{}", register.0)
+}
+
+fn escape_llvm_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::new();
+    for byte in bytes {
+        match byte {
+            b' '..=b'!' | b'#'..=b'[' | b']'..=b'~' => escaped.push(char::from(*byte)),
+            _ => {
+                let _ = write!(escaped, "\\{byte:02X}");
+            }
+        }
+    }
+    escaped
+}
+
+struct ScalarLowerer<'module> {
+    function: &'module keld_ir::Function,
+    locations: &'module LocationTable,
+    lines: Vec<String>,
+    current_label: String,
+    faults: BTreeSet<(u32, u32)>,
+}
+
+impl<'module> ScalarLowerer<'module> {
+    fn new(function: &'module keld_ir::Function, locations: &'module LocationTable) -> Self {
+        Self {
+            function,
+            locations,
+            lines: Vec::new(),
+            current_label: String::new(),
+            faults: BTreeSet::new(),
+        }
+    }
+
+    fn line(&mut self, value: impl Into<String>) {
+        self.lines.push(format!("  {}", value.into()));
+    }
+
+    fn label(&mut self, value: impl Into<String>) {
+        self.current_label = value.into();
+        self.lines.push(format!("{}:", self.current_label));
+    }
+
+    fn continuation(&mut self, register: Register, suffix: &str) -> String {
+        format!("cont_{}_{}_{}", self.current_label, register.0, suffix)
+    }
+
+    fn fault_label(&mut self, kind: IrFaultKind, span: Span) -> String {
+        let key = (ir_fault_code(kind), self.locations.id_for(span));
+        self.faults.insert(key);
+        format!("fault_{}_{}", key.0, key.1)
+    }
+
+    fn emit_block(&mut self, block: &keld_ir::IrBlock) -> Result<(), BackendError> {
+        self.label(format!("bb{}", block.id.0));
+        let mut saw_non_phi = false;
+        for instruction in &block.instructions {
+            if matches!(instruction, Instruction::Phi { .. }) {
+                if saw_non_phi {
+                    return Err(BackendError::Unsupported(
+                        "Phi must precede non-Phi instructions in a block".to_owned(),
+                    ));
+                }
+            } else {
+                saw_non_phi = true;
+            }
+            self.emit_instruction(instruction)?;
+        }
+        self.emit_terminator(&block.terminator)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn emit_instruction(&mut self, instruction: &Instruction) -> Result<(), BackendError> {
+        match instruction {
+            Instruction::ConstInt { dst, value, .. } => {
+                self.line(format!("{} = add i64 0, {value}", register_name(*dst)));
+            }
+            Instruction::ConstBool { dst, value, .. } => {
+                let expected = i32::from(*value);
+                self.line(format!(
+                    "{} = icmp eq i1 {expected}, 1",
+                    register_name(*dst)
+                ));
+            }
+            Instruction::CheckedUnaryInt { dst, op, src, span } => {
+                self.emit_unary(*dst, *op, *src, *span);
+            }
+            Instruction::CheckedBinaryInt {
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
+            } => self.emit_binary(*dst, *op, *lhs, *rhs, *span),
+            Instruction::Not { dst, src, .. } => {
+                self.line(format!(
+                    "{} = xor i1 {}, true",
+                    register_name(*dst),
+                    register_name(*src)
+                ));
+            }
+            Instruction::Compare {
+                dst, op, lhs, rhs, ..
+            } => {
+                let ty = llvm_type_for_register(self.function, *lhs)?;
+                if ty != llvm_type_for_register(self.function, *rhs)? {
+                    return Err(BackendError::Unsupported(
+                        "scalar comparison operands have different types".to_owned(),
+                    ));
+                }
+                if matches!(
+                    op,
+                    CompareOp::Less | CompareOp::LessEq | CompareOp::Greater | CompareOp::GreaterEq
+                ) && ty != "i64"
+                {
+                    return Err(BackendError::Unsupported(
+                        "ordered comparison requires Int operands".to_owned(),
+                    ));
+                }
+                self.line(format!(
+                    "{} = icmp {} {} {}, {}",
+                    register_name(*dst),
+                    llvm_compare(*op),
+                    ty,
+                    register_name(*lhs),
+                    register_name(*rhs)
+                ));
+            }
+            Instruction::Phi { dst, inputs, .. } => {
+                let ty = llvm_type_for_register(self.function, *dst)?;
+                let values = inputs
+                    .iter()
+                    .map(|(block, register)| {
+                        format!("[ {}, %bb{} ]", register_name(*register), block.0)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(format!("{} = phi {ty} {values}", register_name(*dst)));
+            }
+            Instruction::ConstText { .. }
+            | Instruction::ConstNoneLink { .. }
+            | Instruction::Copy { .. }
+            | Instruction::Take { .. }
+            | Instruction::InstallHome { .. }
+            | Instruction::MoveHome { .. }
+            | Instruction::DropHome { .. }
+            | Instruction::DropIfLive { .. }
+            | Instruction::DropSlot { .. }
+            | Instruction::CleanupTrackedScope { .. }
+            | Instruction::ReplacePlace { .. }
+            | Instruction::ReplaceField { .. }
+            | Instruction::ListNew { .. }
+            | Instruction::ListLength { .. }
+            | Instruction::ListPush { .. }
+            | Instruction::ListPushPlace { .. }
+            | Instruction::ListRemove { .. }
+            | Instruction::ListRemovePlace { .. }
+            | Instruction::ListIndex { .. }
+            | Instruction::ListGet { .. }
+            | Instruction::ListReplace { .. }
+            | Instruction::ListTryRemove { .. }
+            | Instruction::ListClear { .. }
+            | Instruction::ListReserve { .. }
+            | Instruction::ListTryReserve { .. }
+            | Instruction::TextByteLength { .. }
+            | Instruction::TextIsEmpty { .. }
+            | Instruction::TextConcat { .. }
+            | Instruction::ConstructStruct { .. }
+            | Instruction::ReadStructField { .. }
+            | Instruction::BeginLifecycle { .. }
+            | Instruction::EndLifecycle { .. }
+            | Instruction::AllocateEntity { .. }
+            | Instruction::EntityToLink { .. }
+            | Instruction::OpenView { .. }
+            | Instruction::ReadField { .. }
+            | Instruction::WriteField { .. }
+            | Instruction::CloseView { .. }
+            | Instruction::KeepEntity { .. }
+            | Instruction::RetireEntity { .. }
+            | Instruction::Call { .. } => {
+                return Err(BackendError::Unsupported(
+                    "native scalar lowering encountered a managed or call instruction".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_unary(&mut self, dst: Register, op: IntUnaryOp, src: Register, span: Span) {
+        let continuation = self.continuation(dst, "unary");
+        let fault = self.fault_label(IrFaultKind::Arithmetic, span);
+        match op {
+            IntUnaryOp::Neg => {
+                let pair = format!("{}.pair", register_name(dst));
+                let result = register_name(dst);
+                let overflow = format!("{result}.overflow");
+                self.line(format!(
+                    "{pair} = call {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64 0, i64 {})",
+                    register_name(src)
+                ));
+                self.line(format!("{result} = extractvalue {{ i64, i1 }} {pair}, 0"));
+                self.line(format!("{overflow} = extractvalue {{ i64, i1 }} {pair}, 1"));
+                self.line(format!(
+                    "br i1 {overflow}, label %{fault}, label %{continuation}"
+                ));
+                self.label(continuation);
+            }
+        }
+    }
+
+    fn emit_binary(
+        &mut self,
+        dst: Register,
+        op: IntBinaryOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) {
+        match op {
+            IntBinaryOp::Add | IntBinaryOp::Sub | IntBinaryOp::Mul => {
+                let intrinsic = match op {
+                    IntBinaryOp::Add => "sadd",
+                    IntBinaryOp::Sub => "ssub",
+                    IntBinaryOp::Mul => "smul",
+                    IntBinaryOp::Div | IntBinaryOp::Rem | IntBinaryOp::Shl | IntBinaryOp::Shr => {
+                        unreachable!("matched arithmetic intrinsic")
+                    }
+                };
+                let pair = format!("{}.pair", register_name(dst));
+                let result = register_name(dst);
+                let overflow = format!("{result}.overflow");
+                let continuation = self.continuation(dst, "checked");
+                let fault = self.fault_label(IrFaultKind::Arithmetic, span);
+                self.line(format!(
+                    "{pair} = call {{ i64, i1 }} @llvm.{intrinsic}.with.overflow.i64(i64 {}, i64 {})",
+                    register_name(lhs),
+                    register_name(rhs)
+                ));
+                self.line(format!("{result} = extractvalue {{ i64, i1 }} {pair}, 0"));
+                self.line(format!("{overflow} = extractvalue {{ i64, i1 }} {pair}, 1"));
+                self.line(format!(
+                    "br i1 {overflow}, label %{fault}, label %{continuation}"
+                ));
+                self.label(continuation);
+            }
+            IntBinaryOp::Div | IntBinaryOp::Rem => {
+                self.emit_division(dst, op, lhs, rhs, span);
+            }
+            IntBinaryOp::Shl | IntBinaryOp::Shr => {
+                self.emit_shift(dst, op, lhs, rhs, span);
+            }
+        }
+    }
+
+    fn emit_division(
+        &mut self,
+        dst: Register,
+        op: IntBinaryOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) {
+        let result = register_name(dst);
+        let label_stem = format!("r{}", dst.0);
+        let zero = format!("{result}.zero");
+        let nonzero = format!("{label_stem}.nonzero");
+        let special = format!("{label_stem}.special");
+        let normal = format!("{label_stem}.normal");
+        let continuation = self.continuation(dst, "division");
+        let division_fault = self.fault_label(IrFaultKind::DivisionByZero, span);
+        self.line(format!("{zero} = icmp eq i64 {}, 0", register_name(rhs)));
+        self.line(format!(
+            "br i1 {zero}, label %{division_fault}, label %{nonzero}"
+        ));
+        self.label(nonzero.clone());
+        let lhs_min = format!("{result}.lhs_min");
+        let rhs_neg_one = format!("{result}.rhs_neg_one");
+        let special_case = format!("{result}.special_case");
+        self.line(format!(
+            "{lhs_min} = icmp eq i64 {}, -9223372036854775808",
+            register_name(lhs)
+        ));
+        self.line(format!(
+            "{rhs_neg_one} = icmp eq i64 {}, -1",
+            register_name(rhs)
+        ));
+        self.line(format!("{special_case} = and i1 {lhs_min}, {rhs_neg_one}"));
+        if matches!(op, IntBinaryOp::Div) {
+            let arithmetic_fault = self.fault_label(IrFaultKind::Arithmetic, span);
+            self.line(format!(
+                "br i1 {special_case}, label %{arithmetic_fault}, label %{normal}"
+            ));
+            self.label(normal);
+            self.line(format!(
+                "{result} = sdiv i64 {}, {}",
+                register_name(lhs),
+                register_name(rhs)
+            ));
+            self.line(format!("br label %{continuation}"));
+        } else {
+            self.line(format!(
+                "br i1 {special_case}, label %{special}, label %{normal}"
+            ));
+            self.label(special.clone());
+            let special_value = format!("{result}.special_value");
+            self.line(format!("{special_value} = add i64 0, 0"));
+            self.line(format!("br label %{continuation}"));
+            self.label(normal.clone());
+            let normal_value = format!("{result}.normal_value");
+            self.line(format!(
+                "{normal_value} = srem i64 {}, {}",
+                register_name(lhs),
+                register_name(rhs)
+            ));
+            self.line(format!("br label %{continuation}"));
+            self.label(continuation.clone());
+            self.line(format!(
+                "{result} = phi i64 [ {special_value}, %{special} ], [ {normal_value}, %{normal} ]"
+            ));
+            return;
+        }
+        self.label(continuation);
+    }
+
+    fn emit_shift(
+        &mut self,
+        dst: Register,
+        op: IntBinaryOp,
+        lhs: Register,
+        rhs: Register,
+        span: Span,
+    ) {
+        let result = register_name(dst);
+        let label_stem = format!("r{}", dst.0);
+        let negative = format!("{result}.negative");
+        let too_large = format!("{result}.too_large");
+        let invalid = format!("{result}.invalid");
+        let valid = format!("{label_stem}.valid");
+        let continuation = self.continuation(dst, "shift");
+        let shift_fault = self.fault_label(IrFaultKind::Shift, span);
+        self.line(format!(
+            "{negative} = icmp slt i64 {}, 0",
+            register_name(rhs)
+        ));
+        self.line(format!(
+            "{too_large} = icmp sge i64 {}, 64",
+            register_name(rhs)
+        ));
+        self.line(format!("{invalid} = or i1 {negative}, {too_large}"));
+        self.line(format!(
+            "br i1 {invalid}, label %{shift_fault}, label %{valid}"
+        ));
+        self.label(valid.clone());
+        match op {
+            IntBinaryOp::Shr => {
+                self.line(format!(
+                    "{result} = ashr i64 {}, {}",
+                    register_name(lhs),
+                    register_name(rhs)
+                ));
+                self.line(format!("br label %{continuation}"));
+            }
+            IntBinaryOp::Shl => {
+                let amount = format!("{result}.amount");
+                let lhs_wide = format!("{result}.lhs_wide");
+                let one = format!("{result}.one");
+                let power = format!("{result}.power");
+                let product = format!("{result}.product");
+                let low = format!("{result}.low");
+                let high = format!("{result}.high");
+                let fits = format!("{result}.fits");
+                let wide_ok = format!("{label_stem}.wide_ok");
+                let arithmetic_fault = self.fault_label(IrFaultKind::Arithmetic, span);
+                self.line(format!(
+                    "{amount} = sext i64 {} to i128",
+                    register_name(rhs)
+                ));
+                self.line(format!(
+                    "{lhs_wide} = sext i64 {} to i128",
+                    register_name(lhs)
+                ));
+                self.line(format!("{one} = add i128 0, 1"));
+                self.line(format!("{power} = shl i128 {one}, {amount}"));
+                self.line(format!("{product} = mul i128 {lhs_wide}, {power}"));
+                self.line(format!(
+                    "{low} = icmp sge i128 {product}, -9223372036854775808"
+                ));
+                self.line(format!(
+                    "{high} = icmp sle i128 {product}, 9223372036854775807"
+                ));
+                self.line(format!("{fits} = and i1 {low}, {high}"));
+                self.line(format!(
+                    "br i1 {fits}, label %{wide_ok}, label %{arithmetic_fault}"
+                ));
+                self.label(wide_ok);
+                self.line(format!("{result} = trunc i128 {product} to i64"));
+                self.line(format!("br label %{continuation}"));
+            }
+            IntBinaryOp::Add
+            | IntBinaryOp::Sub
+            | IntBinaryOp::Mul
+            | IntBinaryOp::Div
+            | IntBinaryOp::Rem => unreachable!("matched shift operation"),
+        }
+        self.label(continuation);
+    }
+
+    fn emit_terminator(&mut self, terminator: &Terminator) -> Result<(), BackendError> {
+        match terminator {
+            Terminator::Goto(target) => self.line(format!("br label %bb{}", target.0)),
+            Terminator::Branch {
+                condition,
+                then_block,
+                else_block,
+            } => self.line(format!(
+                "br i1 {}, label %bb{}, label %bb{}",
+                register_name(*condition),
+                then_block.0,
+                else_block.0
+            )),
+            Terminator::Return(Some(register)) => {
+                let ty = llvm_type_for_register(self.function, *register)?;
+                if ty != "i64" {
+                    return Err(BackendError::Unsupported(
+                        "native scalar main must return Int".to_owned(),
+                    ));
+                }
+                self.line(format!(
+                    "store i64 {}, ptr %out_value",
+                    register_name(*register)
+                ));
+                self.line("ret i32 0");
+            }
+            Terminator::Return(None) => {
+                return Err(BackendError::Unsupported(
+                    "native scalar main requires an Int return value".to_owned(),
+                ));
+            }
+            Terminator::Fault { kind, span } => {
+                let label = self.fault_label(*kind, *span);
+                self.line(format!("br label %{label}"));
+            }
+            Terminator::Unreachable => self.line("br label %internal_exit"),
+            Terminator::ResolveLink { .. } => {
+                return Err(BackendError::Unsupported(
+                    "native scalar lowering cannot resolve links".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> String {
+        let faults = self.faults.iter().copied().collect::<Vec<_>>();
+        for (kind, location) in faults {
+            self.lines.push(format!("fault_{kind}_{location}:"));
+            self.line(format!("store i32 {kind}, ptr %out_kind"));
+            self.line(format!("store i32 {location}, ptr %out_location"));
+            self.line("br label %fault_exit");
+        }
+        self.lines.push("fault_exit:".to_owned());
+        self.line("ret i32 1");
+        self.lines.push("internal_exit:".to_owned());
+        self.line("ret i32 2");
+        self.lines.join("\n")
+    }
+}
+
+fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String, BackendError> {
+    if !module.definitions.is_empty() || module.functions.len() != 1 {
+        return Err(BackendError::Unsupported(
+            "native scalar lowering requires one definition-free function".to_owned(),
+        ));
+    }
     let Some(function) = module
         .functions
         .iter()
@@ -206,38 +876,76 @@ fn const_return_value(module: &Module) -> Result<i64, BackendError> {
             "module main function is missing".to_owned(),
         ));
     };
-    if module.functions.len() != 1
-        || !function.parameters.is_empty()
-        || function.return_type != IrType::Int
-        || function.blocks.len() != 1
-        || function.entry.0 != 0
-    {
+    if !function.parameters.is_empty() || function.return_type != IrType::Int {
         return Err(BackendError::Unsupported(
-            "task-3 backend accepts one parameterless Int function".to_owned(),
+            "native scalar main must be parameterless and return Int".to_owned(),
         ));
     }
-    let block = &function.blocks[0];
-    let mut constants = std::collections::BTreeMap::<Register, i64>::new();
-    for instruction in &block.instructions {
-        match instruction {
-            Instruction::ConstInt { dst, value, .. } => {
-                constants.insert(*dst, *value);
-            }
-            _ => {
-                return Err(BackendError::Unsupported(
-                    "only ConstInt instructions are implemented in task 3".to_owned(),
-                ));
-            }
+    for (index, ty) in function.register_types.iter().enumerate() {
+        if *ty != IrType::Lifecycle && scalar_type(ty).is_none() {
+            return Err(BackendError::Unsupported(format!(
+                "register {index} has a non-scalar type"
+            )));
         }
     }
-    let Terminator::Return(Some(result)) = block.terminator else {
+    let locations = LocationTable::from_module(module, &metadata.source);
+    let mut lowerer = ScalarLowerer::new(function, &locations);
+    let Some(entry) = function
+        .blocks
+        .iter()
+        .find(|block| block.id == function.entry)
+    else {
         return Err(BackendError::Unsupported(
-            "task-3 backend requires Return(Some(Int))".to_owned(),
+            "native scalar entry block is missing".to_owned(),
         ));
     };
-    constants.get(&result).copied().ok_or_else(|| {
-        BackendError::Unsupported("return register is not defined by ConstInt".to_owned())
-    })
+    lowerer.emit_block(entry)?;
+    for block in &function.blocks {
+        if block.id != function.entry {
+            lowerer.emit_block(block)?;
+        }
+    }
+    let program = lowerer.finish();
+    let path = metadata.path.to_string_lossy();
+    let path_bytes = path.as_bytes();
+    let path_length = path_bytes.len();
+    let path_global = escape_llvm_bytes(path_bytes);
+    let path_type_length = path_length.saturating_add(1);
+    let path_pointer =
+        format!("getelementptr inbounds ([{path_type_length} x i8], ptr @keld_path, i64 0, i64 0)");
+    let mut ir = format!(
+        "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\ndefine i32 @keld_program_main(ptr %out_value, ptr %out_kind, ptr %out_location) {{\n{program}\n}}\n\n"
+    );
+    ir.push_str(
+        "define i32 @main() {\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %status = call i32 @keld_program_main(ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %internal_main\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
+    );
+    for location in locations.entries() {
+        let _ = writeln!(
+            ir,
+            "    i32 {}, label %fault_location_{}",
+            location.id, location.id
+        );
+    }
+    ir.push_str("  ]\n");
+    for location in locations.entries() {
+        let _ = write!(
+            ir,
+            "fault_location_{}:\n  %fault_status_{} = call i32 @keld_rt_v1_print_fault(i32 %out_kind_value, ptr {}, i64 {}, i32 {}, i32 {})\n  %fault_print_ok_{} = icmp eq i32 %fault_status_{}, 0\n  br i1 %fault_print_ok_{}, label %fault_done, label %internal_main\n",
+            location.id,
+            location.id,
+            path_pointer,
+            path_length,
+            location.line,
+            location.column,
+            location.id,
+            location.id,
+            location.id,
+        );
+    }
+    ir.push_str(
+        "fault_unknown:\n  br label %internal_main\nfault_done:\n  ret i32 2\ndone:\n  ret i32 0\ninternal_main:\n  ret i32 70\n}\n",
+    );
+    Ok(ir)
 }
 
 /// Builds one standalone GNU Windows executable from validated executable IR.
@@ -272,7 +980,7 @@ pub fn build_executable(
     validate_llvm_prefix(&request.llvm_prefix)?;
     let gcc = resolve_gcc(request.gcc.as_deref())?;
     require_runtime_artifacts(request)?;
-    let value = const_return_value(module)?;
+    let generated_ir = lower_scalar_ir(module, metadata)?;
     let stage_name = format!(
         ".keld-native-stage-{}-{}",
         std::process::id(),
@@ -294,10 +1002,10 @@ pub fn build_executable(
         OptimizationLevel::O0 => LlvmOptimizationLevel::O0,
         OptimizationLevel::O2 => LlvmOptimizationLevel::O2,
     };
-    keld_native_llvm::emit_const_return_program(
+    keld_native_llvm::emit_ir(
         &object,
         module_name,
-        value,
+        &generated_ir,
         TARGET_TRIPLE,
         llvm_level,
     )
