@@ -270,7 +270,8 @@ impl RuntimeContext {
     }
 
     #[cfg(not(feature = "test-controls"))]
-    fn allow_test_allocation(&mut self, _phase: &str) -> bool {
+    fn allow_test_allocation(&self, _phase: &str) -> bool {
+        let _ = self;
         true
     }
 
@@ -1076,8 +1077,8 @@ impl RuntimeContext {
         additional: i64,
     ) -> Result<(), NativeValueError> {
         let (slot_index, generation) = decode_handle(list)?;
-        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
         let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
+        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
         let required = length
             .checked_add(additional)
             .ok_or(NativeValueError::Capacity)?;
@@ -1143,10 +1144,10 @@ impl RuntimeContext {
         // `false` for a negative or otherwise unrepresentable request rather
         // than turning the capacity check into a language fault. Handle and
         // type errors remain hard runtime failures and are returned below.
+        let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
         let Ok(additional) = usize::try_from(additional) else {
             return Ok(false);
         };
-        let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
         let Some(required) = length.checked_add(additional) else {
             return Ok(false);
         };

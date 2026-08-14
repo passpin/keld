@@ -97,3 +97,18 @@ fn try_reserve_returns_false_for_negative_or_impossible_capacity() {
     assert_eq!(context.list_length(list), Ok(0));
     context.drop_managed(list).expect("drop list");
 }
+
+#[test]
+fn reserve_validates_stale_handles_before_capacity_classification() {
+    let mut context = RuntimeContext::new().expect("context");
+    let list = context.list_new().expect("list");
+    context.drop_managed(list).expect("drop list");
+    assert_eq!(
+        context.list_reserve(list, -1),
+        Err(NativeValueError::InvalidHandle)
+    );
+    assert_eq!(
+        context.list_try_reserve(list, -1),
+        Err(NativeValueError::InvalidHandle)
+    );
+}
