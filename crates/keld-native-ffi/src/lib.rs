@@ -1,11 +1,8 @@
-//! Narrow adapter for the versioned runtime C ABI.
-
-#![allow(unsafe_code)]
-#![deny(unsafe_op_in_unsafe_fn)]
+// Narrow adapter for the versioned runtime C ABI.
 
 use keld_native_abi::{
-    ABI_VERSION, FaultKind, KeldEntity, KeldFault, KeldLifecycle, KeldLink, KeldValue,
-    RuntimeStatus,
+    ABI_VERSION, FaultKind, KeldEntity, KeldFault, KeldLifecycle, KeldLink, KeldPlaceStep,
+    KeldValue, RuntimeStatus,
 };
 use keld_native_runtime::{NativeValueError, RuntimeContext};
 use std::io::Write;
@@ -112,6 +109,154 @@ fn record_value_failure(
     status_code(context.status())
 }
 
+#[cfg(feature = "test-controls")]
+fn begin_test_operation(context: &mut RuntimeContext, location: u32) {
+    context.begin_test_operation(location);
+}
+
+#[cfg(not(feature = "test-controls"))]
+fn begin_test_operation(_context: &mut RuntimeContext, _location: u32) {}
+
+/// Records one successfully initialized managed Home in a call-bounded
+/// cleanup tracker. The ID and count buffers are owned by generated stack
+/// storage and are borrowed only for this call.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_home_track(
+    ids: *mut u32,
+    count: *mut u32,
+    home: u32,
+    capacity: u32,
+) -> u32 {
+    if ids.is_null() || count.is_null() {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(capacity) = usize::try_from(capacity) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        // SAFETY: generated code supplies stack arrays with the declared
+        // capacity and borrows them only for this synchronous operation.
+        let ids = unsafe { std::slice::from_raw_parts_mut(ids, capacity) };
+        // SAFETY: `count` is a generated stack slot valid for this call.
+        let count = unsafe { &mut *count };
+        let Ok(active) = usize::try_from(*count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        if active > capacity {
+            return status_code(RuntimeStatus::InternalFailure);
+        }
+        if ids[..active].contains(&home) {
+            return status_code(RuntimeStatus::Ok);
+        }
+        if active == capacity {
+            return status_code(RuntimeStatus::InternalFailure);
+        }
+        ids[active] = home;
+        *count = count.saturating_add(1);
+        status_code(RuntimeStatus::Ok)
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+}
+
+/// Removes one managed Home from a call-bounded cleanup tracker.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_home_untrack(
+    ids: *mut u32,
+    count: *mut u32,
+    home: u32,
+    capacity: u32,
+) -> u32 {
+    if ids.is_null() || count.is_null() {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(capacity) = usize::try_from(capacity) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        // SAFETY: generated code supplies stack arrays with the declared
+        // capacity and borrows them only for this synchronous operation.
+        let ids = unsafe { std::slice::from_raw_parts_mut(ids, capacity) };
+        // SAFETY: `count` is a generated stack slot valid for this call.
+        let count = unsafe { &mut *count };
+        let Ok(active) = usize::try_from(*count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        if active > capacity {
+            return status_code(RuntimeStatus::InternalFailure);
+        }
+        if let Some(position) = ids[..active]
+            .iter()
+            .position(|candidate| *candidate == home)
+        {
+            ids.copy_within(position + 1..active, position);
+            *count -= 1;
+        }
+        status_code(RuntimeStatus::Ok)
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+}
+
+/// Drops the active Homes for one explicit `CleanupTrackedScope` in reverse
+/// successful-initialization order. All pointers are borrowed synchronously;
+/// none are retained by the runtime.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_cleanup_scope(
+    context: *mut RuntimeContext,
+    ids: *mut u32,
+    count: *mut u32,
+    slots: *const *mut KeldValue,
+    capacity: u32,
+    slot_count: u32,
+    location: u32,
+) -> u32 {
+    if context.is_null() || ids.is_null() || count.is_null() || slots.is_null() {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(capacity) = usize::try_from(capacity) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        let Ok(slot_count) = usize::try_from(slot_count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        // SAFETY: generated code supplies stack arrays with the declared
+        // capacities and borrows them only for this synchronous operation.
+        let ids = unsafe { std::slice::from_raw_parts_mut(ids, capacity) };
+        // SAFETY: `slots` points at the generated register-slot pointer array.
+        let slots = unsafe { std::slice::from_raw_parts(slots, slot_count) };
+        // SAFETY: all pointers are checked non-null and borrowed synchronously.
+        let (context, count) = unsafe { (&mut *context, &mut *count) };
+        let Ok(mut active) = usize::try_from(*count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        if active > capacity {
+            return status_code(RuntimeStatus::InternalFailure);
+        }
+        while active > 0 {
+            active -= 1;
+            let Ok(home) = usize::try_from(ids[active]) else {
+                return status_code(RuntimeStatus::InternalFailure);
+            };
+            let Some(slot) = slots.get(home).copied().filter(|slot| !slot.is_null()) else {
+                return status_code(RuntimeStatus::InternalFailure);
+            };
+            // SAFETY: the slot pointer was installed by generated entry
+            // lowering and remains live for the entire function call.
+            let value = unsafe { &mut *slot };
+            match context.drop_managed(*value) {
+                Ok(()) => *value = KeldValue::default(),
+                Err(error) => return record_value_failure(context, error, location),
+            }
+        }
+        *count = 0;
+        status_code(RuntimeStatus::Ok)
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+}
+
 /// Creates one native runtime context. Null is an internal failure sentinel.
 #[unsafe(no_mangle)]
 pub extern "C" fn keld_rt_v1_context_new() -> *mut RuntimeContext {
@@ -130,7 +275,11 @@ pub extern "C" fn keld_rt_v1_context_destroy(context: *mut RuntimeContext) -> u3
     }
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: ownership is transferred exactly once by context_new.
-        unsafe { drop(Box::from_raw(context)) };
+        // The test adapter writes its observation before releasing ownership.
+        let context = unsafe { Box::from_raw(context) };
+        #[cfg(feature = "test-controls")]
+        context.finish_test_observation();
+        drop(context);
         status_code(RuntimeStatus::Ok)
     }));
     result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
@@ -217,6 +366,7 @@ pub extern "C" fn keld_rt_v1_value_copy(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed only for this call.
         let (context, source) = unsafe { (&mut *context, *src) };
+        begin_test_operation(context, location);
         match context.copy_managed(source) {
             Ok(value) => {
                 // SAFETY: dst is a valid caller-owned output slot.
@@ -243,6 +393,7 @@ pub extern "C" fn keld_rt_v1_value_drop(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed only for this call.
         let (context, source) = unsafe { (&mut *context, *value) };
+        begin_test_operation(context, location);
         match context.drop_managed(source) {
             Ok(()) => {
                 // SAFETY: value is a valid caller-owned slot.
@@ -272,6 +423,7 @@ pub extern "C" fn keld_rt_v1_text_new(
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, bytes) =
             unsafe { (&mut *context, std::slice::from_raw_parts(bytes, length)) };
+        begin_test_operation(context, location);
         match context.text_new(bytes) {
             Ok(value) => {
                 // SAFETY: dst is a valid caller-owned output slot.
@@ -382,6 +534,7 @@ pub extern "C" fn keld_rt_v1_text_concat(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, lhs, rhs) = unsafe { (&mut *context, *lhs, *rhs) };
+        begin_test_operation(context, location);
         match context.text_concat(lhs, rhs) {
             Ok(value) => {
                 // SAFETY: dst is a valid caller-owned output slot.
@@ -408,6 +561,7 @@ pub extern "C" fn keld_rt_v1_list_new(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let context = unsafe { &mut *context };
+        begin_test_operation(context, location);
         match context.list_new() {
             Ok(value) => {
                 // SAFETY: dst is a valid caller-owned output slot.
@@ -463,6 +617,7 @@ pub extern "C" fn keld_rt_v1_list_push(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, list, value) = unsafe { (&mut *context, *list, *value) };
+        begin_test_operation(context, location);
         match context.list_push(list, value, managed != 0) {
             Ok(()) => status_code(RuntimeStatus::Ok),
             Err(error) => record_value_failure(context, error, location),
@@ -471,7 +626,9 @@ pub extern "C" fn keld_rt_v1_list_push(
     result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
 }
 
-/// Gets one List element, deep-copying managed elements.
+/// Gets one List element. Bit 0 requests a deep copy for a managed payload;
+/// bit 1 wraps the present value in one Optional layer. The latter is kept
+/// separate because `ListIndex` loans an element without Optional wrapping.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn keld_rt_v1_list_get(
@@ -488,11 +645,19 @@ pub extern "C" fn keld_rt_v1_list_get(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, list) = unsafe { (&mut *context, *list) };
+        begin_test_operation(context, location);
         let value = match context.list_get(list, index) {
             Ok((value, _)) => value,
+            Err(NativeValueError::Bounds) if managed & 2 != 0 => {
+                // `List.get` is an Optional-producing operation: an absent or
+                // out-of-range index is a committed None, not a fault.
+                // SAFETY: out is a valid caller-owned output slot.
+                unsafe { *out = KeldValue::default() };
+                return status_code(RuntimeStatus::Ok);
+            }
             Err(error) => return record_value_failure(context, error, location),
         };
-        let value = if managed != 0 {
+        let value = if managed & 1 != 0 {
             match context.copy_managed(value) {
                 Ok(value) => value,
                 Err(error) => return record_value_failure(context, error, location),
@@ -500,9 +665,13 @@ pub extern "C" fn keld_rt_v1_list_get(
         } else {
             value
         };
-        let value = KeldValue {
-            optional_some_layers: 1,
-            ..value
+        let value = if managed & 2 != 0 || managed == 1 {
+            KeldValue {
+                optional_some_layers: value.optional_some_layers.saturating_add(1),
+                ..value
+            }
+        } else {
+            value
         };
         // SAFETY: out is a valid caller-owned output slot.
         unsafe { *out = value };
@@ -589,7 +758,7 @@ pub extern "C" fn keld_rt_v1_list_try_remove(
         match context.list_remove(list, index) {
             Ok((value, _)) => {
                 let value = KeldValue {
-                    optional_some_layers: 1,
+                    optional_some_layers: value.optional_some_layers.saturating_add(1),
                     ..value
                 };
                 // SAFETY: out is a valid caller-owned output slot.
@@ -635,7 +804,7 @@ pub extern "C" fn keld_rt_v1_list_clear(
 pub extern "C" fn keld_rt_v1_list_reserve(
     context: *mut RuntimeContext,
     list: *const KeldValue,
-    additional: u64,
+    additional: i64,
     location: u32,
 ) -> u32 {
     if context.is_null() || list.is_null() {
@@ -644,6 +813,7 @@ pub extern "C" fn keld_rt_v1_list_reserve(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, list) = unsafe { (&mut *context, *list) };
+        begin_test_operation(context, location);
         match context.list_reserve(list, additional) {
             Ok(()) => status_code(RuntimeStatus::Ok),
             Err(error) => record_value_failure(context, error, location),
@@ -658,7 +828,7 @@ pub extern "C" fn keld_rt_v1_list_reserve(
 pub extern "C" fn keld_rt_v1_list_try_reserve(
     context: *mut RuntimeContext,
     list: *const KeldValue,
-    additional: u64,
+    additional: i64,
     out: *mut u8,
     location: u32,
 ) -> u32 {
@@ -668,6 +838,7 @@ pub extern "C" fn keld_rt_v1_list_try_reserve(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, list) = unsafe { (&mut *context, *list) };
+        begin_test_operation(context, location);
         match context.list_try_reserve(list, additional) {
             Ok(success) => {
                 // SAFETY: out is a valid caller-owned output slot.
@@ -721,6 +892,7 @@ pub extern "C" fn keld_rt_v1_struct_new(
         };
         // SAFETY: context is checked non-null and borrowed synchronously.
         let context = unsafe { &mut *context };
+        begin_test_operation(context, location);
         let flags = managed.iter().map(|flag| *flag != 0).collect::<Vec<_>>();
         match context.struct_new(definition, fields, &flags) {
             Ok(value) => {
@@ -734,7 +906,8 @@ pub extern "C" fn keld_rt_v1_struct_new(
     result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
 }
 
-/// Reads one struct field, deep-copying it when the field is managed.
+/// Reads one struct field. `managed` requests a deep copy for an owned result;
+/// zero is used for a loan result and returns the field envelope unchanged.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn keld_rt_v1_struct_field(
@@ -751,11 +924,12 @@ pub extern "C" fn keld_rt_v1_struct_field(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, value) = unsafe { (&mut *context, *value) };
-        let (field, field_is_managed) = match context.struct_field(value, field) {
+        begin_test_operation(context, location);
+        let (field, _field_is_managed) = match context.struct_field(value, field) {
             Ok(field) => field,
             Err(error) => return record_value_failure(context, error, location),
         };
-        let field = if managed != 0 || field_is_managed {
+        let field = if managed != 0 {
             match context.copy_managed(field) {
                 Ok(field) => field,
                 Err(error) => return record_value_failure(context, error, location),
@@ -766,6 +940,97 @@ pub extern "C" fn keld_rt_v1_struct_field(
         // SAFETY: out is a valid caller-owned output slot.
         unsafe { *out = field };
         status_code(RuntimeStatus::Ok)
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+}
+
+/// Resolves a synchronous projected place into an envelope slot.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_place_resolve(
+    context: *mut RuntimeContext,
+    root: *const KeldValue,
+    entity_root: u8,
+    steps: *const KeldPlaceStep,
+    count: u32,
+    out: *mut KeldValue,
+    location: u32,
+) -> u32 {
+    if context.is_null() || root.is_null() || out.is_null() || (count != 0 && steps.is_null()) {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(count) = usize::try_from(count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        // SAFETY: non-null arrays are validated for non-zero lengths and are
+        // borrowed only for this synchronous call.
+        let steps = if count == 0 {
+            &[][..]
+        } else {
+            // SAFETY: `steps` is non-null and has `count` caller-owned items.
+            unsafe { std::slice::from_raw_parts(steps, count) }
+        };
+        // SAFETY: pointers are checked non-null and borrowed synchronously.
+        let (context, root) = unsafe { (&mut *context, *root) };
+        let entity = (entity_root != 0).then(|| entity_from_value(root));
+        match context.place_resolve(root, entity, steps) {
+            Ok(value) => {
+                // SAFETY: out is a valid caller-owned output slot.
+                unsafe { *out = value };
+                status_code(RuntimeStatus::Ok)
+            }
+            Err(error) => record_value_failure(context, error, location),
+        }
+    }));
+    result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
+}
+
+/// Replaces a synchronous projected place and returns its displaced value.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn keld_rt_v1_place_replace(
+    context: *mut RuntimeContext,
+    root: *const KeldValue,
+    entity_root: u8,
+    steps: *const KeldPlaceStep,
+    count: u32,
+    value: *const KeldValue,
+    out: *mut KeldValue,
+    managed: u8,
+    location: u32,
+) -> u32 {
+    if context.is_null()
+        || root.is_null()
+        || value.is_null()
+        || out.is_null()
+        || (count != 0 && steps.is_null())
+    {
+        return status_code(RuntimeStatus::InternalFailure);
+    }
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let Ok(count) = usize::try_from(count) else {
+            return status_code(RuntimeStatus::InternalFailure);
+        };
+        // SAFETY: non-null arrays are validated for non-zero lengths and are
+        // borrowed only for this synchronous call.
+        let steps = if count == 0 {
+            &[][..]
+        } else {
+            // SAFETY: `steps` is non-null and has `count` caller-owned items.
+            unsafe { std::slice::from_raw_parts(steps, count) }
+        };
+        // SAFETY: pointers are checked non-null and borrowed synchronously.
+        let (context, root, value) = unsafe { (&mut *context, *root, *value) };
+        let entity = (entity_root != 0).then(|| entity_from_value(root));
+        match context.place_replace(root, entity, steps, value, managed != 0) {
+            Ok((displaced, _)) => {
+                // SAFETY: out is a valid caller-owned output slot.
+                unsafe { *out = displaced };
+                status_code(RuntimeStatus::Ok)
+            }
+            Err(error) => record_value_failure(context, error, location),
+        }
     }));
     result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
 }
@@ -785,6 +1050,7 @@ pub extern "C" fn keld_rt_v1_begin_lifecycle(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, parent) = unsafe { (&mut *context, *parent) };
+        begin_test_operation(context, location);
         match context.begin_lifecycle(parent) {
             Ok(lifecycle) => {
                 // SAFETY: dst is a valid caller-owned output slot.
@@ -811,6 +1077,7 @@ pub extern "C" fn keld_rt_v1_end_lifecycle(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, lifecycle) = unsafe { (&mut *context, *lifecycle) };
+        begin_test_operation(context, location);
         match context.end_lifecycle(lifecycle) {
             Ok(()) => status_code(RuntimeStatus::Ok),
             Err(error) => record_value_failure(context, error, location),
@@ -857,6 +1124,7 @@ pub extern "C" fn keld_rt_v1_allocate_entity(
         };
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, lifecycle) = unsafe { (&mut *context, *lifecycle) };
+        begin_test_operation(context, location);
         let flags = managed.iter().map(|flag| *flag != 0).collect::<Vec<_>>();
         match context.allocate_entity(definition, fields, &flags, lifecycle) {
             Ok(entity) => {
@@ -981,7 +1249,8 @@ pub extern "C" fn keld_rt_v1_resolve_link(
     result.unwrap_or(status_code(RuntimeStatus::InternalFailure))
 }
 
-/// Reads one entity field, copying managed values when requested.
+/// Reads one entity field. `managed` requests a deep copy for an owned result;
+/// zero is used for a loan result and returns the field envelope unchanged.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn keld_rt_v1_entity_field(
@@ -998,12 +1267,12 @@ pub extern "C" fn keld_rt_v1_entity_field(
     let result = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: pointers are checked non-null and borrowed synchronously.
         let (context, entity) = unsafe { (&mut *context, *entity) };
-        let (field, field_is_managed) = match context.entity_field(entity_from_value(entity), field)
-        {
-            Ok(field) => field,
-            Err(error) => return record_value_failure(context, error, location),
-        };
-        let field = if managed != 0 || field_is_managed {
+        let (field, _field_is_managed) =
+            match context.entity_field(entity_from_value(entity), field) {
+                Ok(field) => field,
+                Err(error) => return record_value_failure(context, error, location),
+            };
+        let field = if managed != 0 {
             match context.copy_managed(field) {
                 Ok(field) => field,
                 Err(error) => return record_value_failure(context, error, location),

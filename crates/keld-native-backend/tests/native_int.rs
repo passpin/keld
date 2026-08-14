@@ -111,7 +111,7 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let ffi_dll = root.join("target/x86_64-pc-windows-gnu/release/keld_native_ffi.dll");
+    let ffi_dll = root.join("target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll");
     assert!(
         ffi_dll.is_file(),
         "build keld-native-ffi first: {}",
@@ -125,7 +125,7 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
     let export_list = temp.join("runtime.def");
     std::fs::write(
         &export_list,
-        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\nkeld_rt_v1_struct_new\nkeld_rt_v1_struct_field\nkeld_rt_v1_begin_lifecycle\nkeld_rt_v1_end_lifecycle\nkeld_rt_v1_allocate_entity\nkeld_rt_v1_entity_to_link\nkeld_rt_v1_resolve_link\nkeld_rt_v1_entity_field\nkeld_rt_v1_replace_field\nkeld_rt_v1_keep_entity\nkeld_rt_v1_retire_entity\n",
+        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\nkeld_rt_v1_struct_new\nkeld_rt_v1_struct_field\nkeld_rt_v1_place_resolve\nkeld_rt_v1_place_replace\nkeld_rt_v1_home_track\nkeld_rt_v1_home_untrack\nkeld_rt_v1_cleanup_scope\nkeld_rt_v1_begin_lifecycle\nkeld_rt_v1_end_lifecycle\nkeld_rt_v1_allocate_entity\nkeld_rt_v1_entity_to_link\nkeld_rt_v1_resolve_link\nkeld_rt_v1_entity_field\nkeld_rt_v1_replace_field\nkeld_rt_v1_keep_entity\nkeld_rt_v1_retire_entity\n",
     )
     .expect("runtime export list");
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
@@ -382,6 +382,212 @@ fn list_module() -> Module {
                 ],
                 Terminator::Return(Some(Register(9))),
             )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn projected_list_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::List(Box::new(IrType::List(Box::new(IrType::Int)))),
+        IrType::List(Box::new(IrType::Int)),
+        IrType::Int,
+        IrType::Int,
+        IrType::List(Box::new(IrType::Int)),
+        IrType::Int,
+        IrType::Int,
+        IrType::Int,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    for register in [1_u32, 2] {
+        register_storage[register as usize] = RegisterStorage::Home {
+            scope: keld_flow::StorageScopeId(0),
+            conditional: false,
+        };
+    }
+    register_storage[5] = RegisterStorage::Loan;
+    Module {
+        definitions: Vec::new(),
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![block(
+                0,
+                vec![
+                    Instruction::ListNew {
+                        dst: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ListNew {
+                        dst: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(3),
+                        value: 7,
+                        span: source_span,
+                    },
+                    Instruction::ListPush {
+                        list: Register(2),
+                        value: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(4),
+                        value: 0,
+                        span: source_span,
+                    },
+                    Instruction::ListPush {
+                        list: Register(1),
+                        value: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::ListIndex {
+                        dst: Register(5),
+                        receiver: keld_ir::Receiver {
+                            list: Register(1),
+                            source: None,
+                        },
+                        index: Register(4),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(6),
+                        value: 9,
+                        span: source_span,
+                    },
+                    Instruction::ListPushPlace {
+                        list: Register(5),
+                        source: keld_ir::ArgumentSource {
+                            base: Register(1),
+                            projections: vec![keld_ir::ArgumentProjection::Index(Register(4))],
+                        },
+                        value: Register(6),
+                        span: source_span,
+                    },
+                    Instruction::ListLength {
+                        dst: Register(8),
+                        list: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(9),
+                        value: 9,
+                        span: source_span,
+                    },
+                ],
+                Terminator::Return(Some(Register(9))),
+            )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
+}
+
+fn managed_phi_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::Bool,
+        IrType::Text,
+        IrType::Text,
+        IrType::Text,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    for register in [2_u32, 3, 4] {
+        register_storage[register as usize] = RegisterStorage::Home {
+            scope: keld_flow::StorageScopeId(0),
+            conditional: false,
+        };
+    }
+    Module {
+        definitions: Vec::new(),
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![
+                block(
+                    0,
+                    vec![Instruction::ConstBool {
+                        dst: Register(1),
+                        value: true,
+                        span: source_span,
+                    }],
+                    Terminator::Branch {
+                        condition: Register(1),
+                        then_block: IrBlockId(1),
+                        else_block: IrBlockId(2),
+                    },
+                ),
+                block(
+                    1,
+                    vec![Instruction::ConstText {
+                        dst: Register(2),
+                        value: "then".to_owned(),
+                        span: source_span,
+                    }],
+                    Terminator::Goto(IrBlockId(3)),
+                ),
+                block(
+                    2,
+                    vec![Instruction::ConstText {
+                        dst: Register(3),
+                        value: "else".to_owned(),
+                        span: source_span,
+                    }],
+                    Terminator::Goto(IrBlockId(3)),
+                ),
+                block(
+                    3,
+                    vec![
+                        Instruction::Phi {
+                            dst: Register(4),
+                            inputs: vec![(IrBlockId(1), Register(2)), (IrBlockId(2), Register(3))],
+                            span: source_span,
+                        },
+                        Instruction::TextByteLength {
+                            dst: Register(5),
+                            text: Register(4),
+                            span: source_span,
+                        },
+                        Instruction::DropHome {
+                            home: Register(4),
+                            span: source_span,
+                        },
+                        Instruction::CleanupTrackedScope {
+                            scope: keld_flow::StorageScopeId(0),
+                            span: source_span,
+                        },
+                    ],
+                    Terminator::Return(Some(Register(5))),
+                ),
+            ],
             entry: IrBlockId(0),
         }],
         main: keld_semantics::FunctionId(0),
@@ -687,7 +893,7 @@ fn builds_and_runs_a_const_int_program() {
         .and_then(Path::parent)
         .expect("workspace root");
     let target = root.join("target/x86_64-pc-windows-gnu/release");
-    let ffi_dll = target.join("keld_native_ffi.dll");
+    let ffi_dll = target.join("keld_runtime_v1.dll");
     assert!(
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
@@ -738,6 +944,24 @@ fn builds_and_runs_a_const_int_program() {
             .expect("native executable");
         assert!(child.status.success(), "native status: {}", child.status);
         assert_eq!(child.stdout, format!("{value}\n").as_bytes());
+        if index == 0 {
+            let objdump = std::env::var_os("KELD_OBJDUMP").unwrap_or_else(|| "objdump".into());
+            let imports = Command::new(objdump)
+                .arg("-p")
+                .arg(&artifact.executable)
+                .output()
+                .expect("PE import audit tool");
+            assert!(
+                imports.status.success(),
+                "objdump failed: {}",
+                imports.status
+            );
+            let imports = String::from_utf8_lossy(&imports.stdout).to_ascii_lowercase();
+            assert!(imports.contains("keld_runtime_v1.dll"));
+            assert!(!imports.contains("libllvm-22.dll"));
+            assert!(!imports.contains("libgcc"));
+            assert!(!imports.contains("libwinpthread"));
+        }
     }
 }
 
@@ -749,7 +973,7 @@ fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
         .and_then(Path::parent)
         .expect("workspace root");
     let target = root.join("target/x86_64-pc-windows-gnu/release");
-    let ffi_dll = target.join("keld_native_ffi.dll");
+    let ffi_dll = target.join("keld_runtime_v1.dll");
     assert!(
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
@@ -864,7 +1088,7 @@ fn scalar_faults_preserve_kind_span_and_unreachable_is_internal() {
         .and_then(Path::parent)
         .expect("workspace root");
     let target = root.join("target/x86_64-pc-windows-gnu/release");
-    let ffi_dll = target.join("keld_native_ffi.dll");
+    let ffi_dll = target.join("keld_runtime_v1.dll");
     assert!(
         ffi_dll.is_file(),
         "build keld-native-ffi first: {ffi_dll:?}"
@@ -1157,6 +1381,66 @@ fn direct_list_operations_run_natively() {
 }
 
 #[test]
+fn projected_list_receiver_runs_natively_at_both_optimization_levels() {
+    let (runtime_dll, import_library) = runtime_artifacts("projected-list");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("projected-list.keld"),
+        source: SourceText::from_str(SourceId(0), "projected list\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("projected-list-{index}.exe"));
+        let artifact = build_executable(
+            &projected_list_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("projected list native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("projected list native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"9\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn managed_phi_transfers_the_selected_envelope_at_both_optimization_levels() {
+    let (runtime_dll, import_library) = runtime_artifacts("managed-phi");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("managed-phi.keld"),
+        source: SourceText::from_str(SourceId(0), "managed phi\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("managed-phi-{index}.exe"));
+        let artifact = build_executable(
+            &managed_phi_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("managed Phi native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("managed Phi native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"4\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
 fn struct_construction_and_managed_field_copy_run_natively() {
     let (runtime_dll, import_library) = runtime_artifacts("struct");
     let metadata = SourceMetadata {
@@ -1255,7 +1539,13 @@ fn identity_and_main_module() -> Module {
                     dst: Some(Register(2)),
                     function: keld_semantics::FunctionId(0),
                     arguments: vec![(keld_ir::ParameterIndex(0), Register(1))],
-                    argument_sources: vec![(keld_ir::ParameterIndex(0), None)],
+                    argument_sources: vec![(
+                        keld_ir::ParameterIndex(0),
+                        Some(keld_ir::ArgumentSource {
+                            base: Register(1),
+                            projections: Vec::new(),
+                        }),
+                    )],
                     current_lifecycle: Register(0),
                     span: source_span,
                 },
@@ -1322,6 +1612,103 @@ fn unit_call_module() -> Module {
     Module {
         definitions: Vec::new(),
         functions: vec![unit, main],
+        main: keld_semantics::FunctionId(1),
+    }
+}
+
+fn managed_call_module(mode: keld_semantics::ParameterMode) -> Module {
+    let source_span = span();
+    let managed_type = IrType::Text;
+    let mut callee_instructions = vec![Instruction::TextByteLength {
+        dst: Register(2),
+        text: Register(1),
+        span: source_span,
+    }];
+    if mode == keld_semantics::ParameterMode::Take {
+        callee_instructions.push(Instruction::DropIfLive {
+            home: Register(1),
+            span: source_span,
+        });
+    }
+    let callee = Function {
+        id: keld_semantics::FunctionId(0),
+        span: source_span,
+        parameters: vec![Register(1)],
+        parameter_modes: vec![mode],
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, managed_type.clone(), IrType::Int],
+        register_storage: vec![
+            RegisterStorage::Trivial,
+            if mode == keld_semantics::ParameterMode::Take {
+                RegisterStorage::Home {
+                    scope: keld_flow::StorageScopeId(0),
+                    conditional: false,
+                }
+            } else {
+                RegisterStorage::Loan
+            },
+            RegisterStorage::Trivial,
+        ],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            callee_instructions,
+            Terminator::Return(Some(Register(2))),
+        )],
+        entry: IrBlockId(0),
+    };
+    let mut main_storage = vec![RegisterStorage::Trivial; 3];
+    main_storage[1] = RegisterStorage::Home {
+        scope: keld_flow::StorageScopeId(0),
+        conditional: false,
+    };
+    let main = Function {
+        id: keld_semantics::FunctionId(1),
+        span: source_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, managed_type, IrType::Int],
+        register_storage: main_storage,
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            vec![
+                Instruction::ConstText {
+                    dst: Register(1),
+                    value: "managed call".to_owned(),
+                    span: source_span,
+                },
+                Instruction::Call {
+                    dst: Some(Register(2)),
+                    function: keld_semantics::FunctionId(0),
+                    arguments: vec![(keld_ir::ParameterIndex(0), Register(1))],
+                    argument_sources: vec![(
+                        keld_ir::ParameterIndex(0),
+                        Some(keld_ir::ArgumentSource {
+                            base: Register(1),
+                            projections: Vec::new(),
+                        }),
+                    )],
+                    current_lifecycle: Register(0),
+                    span: source_span,
+                },
+                Instruction::CleanupTrackedScope {
+                    scope: keld_flow::StorageScopeId(0),
+                    span: source_span,
+                },
+            ],
+            Terminator::Return(Some(Register(2))),
+        )],
+        entry: IrBlockId(0),
+    };
+    Module {
+        definitions: Vec::new(),
+        functions: vec![callee, main],
         main: keld_semantics::FunctionId(1),
     }
 }
@@ -1469,5 +1856,43 @@ fn scalar_callee_fault_keeps_the_callee_location() {
             String::from_utf8_lossy(&child.stderr),
             "call-fault.keld:2:1: runtime[ArithmeticFault]: checked integer arithmetic overflow\n"
         );
+    }
+}
+
+#[test]
+fn managed_call_modes_transfer_and_mutate_the_encoded_argument() {
+    let (runtime_dll, import_library) = runtime_artifacts("managed-calls");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("managed-calls.keld"),
+        source: SourceText::from_str(SourceId(0), "managed calls\n").expect("source"),
+    };
+    for (index, mode) in [
+        keld_semantics::ParameterMode::Loan,
+        keld_semantics::ParameterMode::Take,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("managed-call-{index}.exe"));
+        let artifact = build_executable(
+            &managed_call_module(mode),
+            &metadata,
+            &request(
+                &output,
+                &runtime_dll,
+                &import_library,
+                OptimizationLevel::O2,
+            ),
+        )
+        .expect("managed call native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("managed call native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"12\n");
+        assert!(child.stderr.is_empty());
     }
 }

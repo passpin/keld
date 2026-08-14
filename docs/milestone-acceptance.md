@@ -127,6 +127,18 @@ The approved `x86_64-w64-windows-gnu` LLVM Native-1 design is recorded in
 [`superpowers/specs/2026-08-14-keld-llvm-native-1-design.md`](superpowers/specs/2026-08-14-keld-llvm-native-1-design.md)
 and its task plan in
 [`superpowers/plans/2026-08-14-keld-llvm-native-1.md`](superpowers/plans/2026-08-14-keld-llvm-native-1.md).
-No native acceptance criterion is complete until generated O0/O2 executables
-match the validated IR/interpreter, pass the restricted-import audit, and
-complete the frozen toolchain and allocation-failure gates.
+The Native-1 implementation is now executable on the frozen Windows GNU
+toolchain. The current evidence is split by gate:
+
+| Gate | Evidence in this checkout | Status |
+|---|---|---|
+| LLVM/ABI foundation | `keld-native-toolchain` tests, ABI layout tests, and `scripts/bootstrap-llvm.ps1` | complete |
+| Scalar CFG, calls, Phi, Text, direct List, structs, and entity smoke parity | `crates/keld-native-backend/tests/native_int.rs` at O0 and O2 | complete for the covered fixtures |
+| CLI build/native run staging | `crates/keld-cli/tests/cli.rs` plus the GNU smoke commands in README | complete |
+| Projected places and PE import audit | `crates/keld-native-backend/tests/native_int.rs::projected_list_receiver_runs_natively_at_both_optimization_levels` and the import assertions in `builds_and_runs_a_const_int_program` | complete for covered fixtures |
+| Test-only allocation-control DLL and version-1 observation schema | `keld-native-ffi-test`, `keld-native-runtime` `test-controls`, and the `KELD_TEST_CONTROL`/`KELD_TEST_OBSERVATION` contract | complete as a runtime foundation; full cross-engine failure matrix pending |
+| Exhaustive instruction/terminator surface audit | `crates/keld-native-backend/tests/surface_audit.rs` (48 instructions, 6 terminators in the current IR) | complete |
+
+The table deliberately does not claim final Native-1 acceptance until the
+remaining allocation-failure differential matrix and full source/IR fixture
+coverage are present and green.

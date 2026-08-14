@@ -1,6 +1,47 @@
 use keld_native_runtime::{NativeValueError, RuntimeContext};
 
 #[test]
+fn projected_places_resolve_and_replace_nested_values_synchronously() {
+    let mut context = RuntimeContext::new().expect("context");
+    let inner = context.list_new().expect("inner list");
+    context
+        .list_push(inner, RuntimeContext::int_value(4), false)
+        .expect("first element");
+    context
+        .list_push(inner, RuntimeContext::int_value(8), false)
+        .expect("second element");
+    let root = context
+        .struct_new(1, &[inner], &[true])
+        .expect("root struct");
+    let steps = [
+        keld_native_abi::KeldPlaceStep {
+            kind: 0,
+            reserved: 0,
+            value: 0,
+        },
+        keld_native_abi::KeldPlaceStep {
+            kind: 1,
+            reserved: 0,
+            value: 1,
+        },
+    ];
+    assert_eq!(
+        context.place_resolve(root, None, &steps),
+        Ok(RuntimeContext::int_value(8))
+    );
+    let (displaced, managed) = context
+        .place_replace(root, None, &steps, RuntimeContext::int_value(9), false)
+        .expect("replace projected value");
+    assert_eq!(displaced, RuntimeContext::int_value(8));
+    assert!(!managed);
+    assert_eq!(
+        context.place_resolve(root, None, &steps),
+        Ok(RuntimeContext::int_value(9))
+    );
+    context.drop_managed(root).expect("drop root");
+}
+
+#[test]
 fn generational_managed_struct_copy_and_drop_reject_stale_handles() {
     let mut context = RuntimeContext::new().expect("context");
     let text = context.text_new(b"hello").expect("text");
@@ -45,4 +86,14 @@ fn list_mutations_preserve_bounds_and_deep_copy_elements() {
     context.drop_managed(removed).expect("removed text");
     context.drop_managed(list).expect("drop list");
     context.drop_managed(copied).expect("drop copied list");
+}
+
+#[test]
+fn try_reserve_returns_false_for_negative_or_impossible_capacity() {
+    let mut context = RuntimeContext::new().expect("context");
+    let list = context.list_new().expect("list");
+    assert_eq!(context.list_try_reserve(list, -1), Ok(false));
+    assert_eq!(context.list_try_reserve(list, i64::MAX), Ok(false));
+    assert_eq!(context.list_length(list), Ok(0));
+    context.drop_managed(list).expect("drop list");
 }

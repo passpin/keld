@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const TARGET_TRIPLE: &str = "x86_64-w64-windows-gnu";
 const LLVM_VERSION: &str = "22.1.8";
 const VALUE_IR_TYPE: &str = "{ i32, i32, [3 x i64] }";
+const PLACE_STEP_IR_TYPE: &str = "{ i32, i32, i64 }";
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(1);
 
 /// One deterministic source location embedded in a native executable.
@@ -367,6 +368,19 @@ fn is_managed_type(ty: &IrType) -> bool {
     )
 }
 
+fn owns_native_payload(ty: &IrType) -> bool {
+    match ty {
+        IrType::Struct(_) | IrType::Text | IrType::List(_) => true,
+        IrType::Optional(inner) => owns_native_payload(inner),
+        IrType::Unit
+        | IrType::Bool
+        | IrType::Int
+        | IrType::Entity(_)
+        | IrType::Link { .. }
+        | IrType::Lifecycle => false,
+    }
+}
+
 fn value_type(ty: &IrType) -> Option<&'static str> {
     scalar_type(ty).or_else(|| is_managed_type(ty).then_some(VALUE_IR_TYPE))
 }
@@ -449,7 +463,18 @@ struct ScalarLowerer<'module> {
     faults: BTreeSet<(u32, u32)>,
     text_literals: BTreeMap<String, Vec<u8>>,
     view_entities: BTreeMap<keld_ir::ViewId, Register>,
+    block_exit_labels: BTreeMap<keld_ir::IrBlockId, String>,
+    home_trackers: BTreeMap<u32, HomeTracker>,
     slots_emitted: bool,
+}
+
+#[derive(Clone, Debug)]
+struct HomeTracker {
+    ids: String,
+    count: String,
+    slots: String,
+    capacity: u32,
+    slot_count: u32,
 }
 
 impl<'module> ScalarLowerer<'module> {
@@ -467,6 +492,8 @@ impl<'module> ScalarLowerer<'module> {
             faults: BTreeSet::new(),
             text_literals: BTreeMap::new(),
             view_entities: BTreeMap::new(),
+            block_exit_labels: BTreeMap::new(),
+            home_trackers: BTreeMap::new(),
             slots_emitted: false,
         }
     }
@@ -500,6 +527,84 @@ impl<'module> ScalarLowerer<'module> {
             .register_types
             .get(register.0 as usize)
             .is_some_and(is_managed_type)
+    }
+
+    fn is_home_register(&self, register: Register) -> bool {
+        matches!(
+            self.function.register_storage.get(register.0 as usize),
+            Some(keld_ir::RegisterStorage::Home { .. })
+        )
+    }
+
+    fn owns_register(&self, register: Register) -> bool {
+        self.function
+            .register_types
+            .get(register.0 as usize)
+            .is_some_and(owns_native_payload)
+    }
+
+    fn tracker_for_register(&self, register: Register) -> Option<&HomeTracker> {
+        let RegisterStorage::Home { scope, .. } =
+            self.function.register_storage.get(register.0 as usize)?
+        else {
+            return None;
+        };
+        self.home_trackers.get(&scope.0)
+    }
+
+    fn is_tracked_home(&self, register: Register) -> bool {
+        self.owns_register(register) && self.tracker_for_register(register).is_some()
+    }
+
+    fn emit_home_track(&mut self, register: Register) -> Result<(), BackendError> {
+        if !self.is_tracked_home(register) {
+            return Ok(());
+        }
+        let tracker = self
+            .tracker_for_register(register)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::Unsupported("managed Home tracker is missing".to_owned())
+            })?;
+        let status = format!("%home_track_status_{}", self.lines.len());
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_home_track(ptr {}, ptr {}, i32 {}, i32 {})",
+            tracker.ids, tracker.count, register.0, tracker.capacity
+        ));
+        self.emit_runtime_status(&status, format!("home_track_cont_{}", self.lines.len()));
+        Ok(())
+    }
+
+    fn emit_home_untrack(&mut self, register: Register) -> Result<(), BackendError> {
+        if !self.is_tracked_home(register) {
+            return Ok(());
+        }
+        let tracker = self
+            .tracker_for_register(register)
+            .cloned()
+            .ok_or_else(|| {
+                BackendError::Unsupported("managed Home tracker is missing".to_owned())
+            })?;
+        let status = format!("%home_untrack_status_{}", self.lines.len());
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_home_untrack(ptr {}, ptr {}, i32 {}, i32 {})",
+            tracker.ids, tracker.count, register.0, tracker.capacity
+        ));
+        self.emit_runtime_status(&status, format!("home_untrack_cont_{}", self.lines.len()));
+        Ok(())
+    }
+
+    fn emit_cleanup_scope(&mut self, scope: u32, span: Span) {
+        let Some(tracker) = self.home_trackers.get(&scope).cloned() else {
+            return;
+        };
+        let status = format!("%scope_cleanup_status_{}", self.lines.len());
+        let location = self.locations.id_for(span);
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_cleanup_scope(ptr %context, ptr {}, ptr {}, ptr {}, i32 {}, i32 {}, i32 {location})",
+            tracker.ids, tracker.count, tracker.slots, tracker.capacity, tracker.slot_count
+        ));
+        self.emit_runtime_status(&status, format!("scope_cleanup_cont_{}", self.lines.len()));
     }
 
     fn list_element_type(&self, list: Register) -> Result<&IrType, BackendError> {
@@ -568,7 +673,12 @@ impl<'module> ScalarLowerer<'module> {
 
     fn emit_value_argument(&mut self, register: Register) -> Result<(String, bool), BackendError> {
         if self.is_managed_register(register) {
-            return Ok((self.value_name(register), true));
+            let owns = self
+                .function
+                .register_types
+                .get(register.0 as usize)
+                .is_some_and(owns_native_payload);
+            return Ok((self.value_name(register), owns));
         }
         let ty = self.value_type(register)?;
         let slot = format!("%list_argument_{}.slot", self.lines.len());
@@ -640,6 +750,191 @@ impl<'module> ScalarLowerer<'module> {
         Ok(())
     }
 
+    fn emit_place_pointer(
+        &mut self,
+        source: &keld_ir::ArgumentSource,
+        span: Span,
+    ) -> Result<String, BackendError> {
+        if source.projections.is_empty() {
+            return Ok(self.value_name(source.base));
+        }
+        let entity_root = self
+            .function
+            .register_types
+            .get(source.base.0 as usize)
+            .is_some_and(|ty| matches!(ty, IrType::Entity(_)));
+        if !entity_root && !self.is_managed_register(source.base) {
+            return Err(BackendError::Unsupported(
+                "projected place root is not managed".to_owned(),
+            ));
+        }
+        let count = source.projections.len();
+        let steps = format!("%place_steps_{}", self.lines.len());
+        self.line(format!("{steps} = alloca [{count} x {PLACE_STEP_IR_TYPE}]"));
+        for (index, projection) in source.projections.iter().enumerate() {
+            let pointer = format!("%place_step_{}_{}", self.lines.len(), index);
+            self.line(format!(
+                "{pointer} = getelementptr inbounds [{count} x {PLACE_STEP_IR_TYPE}], ptr {steps}, i64 0, i64 {index}"
+            ));
+            match projection {
+                keld_ir::ArgumentProjection::Field(field) => self.line(format!(
+                    "store {PLACE_STEP_IR_TYPE} {{ i32 0, i32 0, i64 {} }}, ptr {pointer}",
+                    field.0
+                )),
+                keld_ir::ArgumentProjection::Index(index_register) => {
+                    if !matches!(
+                        self.function.register_types.get(index_register.0 as usize),
+                        Some(IrType::Int)
+                    ) {
+                        return Err(BackendError::Unsupported(
+                            "projected place index is not Int".to_owned(),
+                        ));
+                    }
+                    let step_value = format!("%place_step_value_{}", self.lines.len());
+                    let step_index = format!("%place_step_index_{}", self.lines.len());
+                    self.line(format!(
+                        "{step_value} = insertvalue {PLACE_STEP_IR_TYPE} zeroinitializer, i32 1, 0"
+                    ));
+                    self.line(format!(
+                        "{step_index} = insertvalue {PLACE_STEP_IR_TYPE} {step_value}, i64 {}, 2",
+                        register_name(*index_register)
+                    ));
+                    self.line(format!(
+                        "store {PLACE_STEP_IR_TYPE} {step_index}, ptr {pointer}"
+                    ));
+                }
+            }
+        }
+        let output = format!("%place_value_{}.slot", self.lines.len());
+        let status = format!("%place_resolve_status_{}", self.lines.len());
+        let location = self.locations.id_for(span);
+        self.line(format!("{output} = alloca {VALUE_IR_TYPE}"));
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_place_resolve(ptr %context, ptr {}, i8 {}, ptr {steps}, i32 {count}, ptr {output}, i32 {location})",
+            self.value_name(source.base),
+            u8::from(entity_root),
+        ));
+        self.emit_runtime_status(&status, format!("place_resolve_cont_{}", self.lines.len()));
+        Ok(output)
+    }
+
+    fn emit_receiver_list_pointer(
+        &mut self,
+        receiver: &keld_ir::Receiver,
+        span: Span,
+    ) -> Result<String, BackendError> {
+        if let Some(source) = receiver.source.as_ref() {
+            self.emit_place_pointer(source, span)
+        } else {
+            Ok(self.value_name(receiver.list))
+        }
+    }
+
+    fn emit_place_replace(
+        &mut self,
+        destination: &keld_ir::ArgumentSource,
+        source: Register,
+        displaced: Register,
+        span: Span,
+    ) -> Result<(), BackendError> {
+        if destination.projections.is_empty() {
+            return self.emit_instruction(&Instruction::InstallHome {
+                destination: destination.base,
+                source,
+                displaced,
+                span,
+            });
+        }
+        let entity_root = self
+            .function
+            .register_types
+            .get(destination.base.0 as usize)
+            .is_some_and(|ty| matches!(ty, IrType::Entity(_)));
+        let count = destination.projections.len();
+        let steps = format!("%place_replace_steps_{}", self.lines.len());
+        self.line(format!("{steps} = alloca [{count} x {PLACE_STEP_IR_TYPE}]"));
+        for (index, projection) in destination.projections.iter().enumerate() {
+            let pointer = format!("%place_replace_step_{}_{}", self.lines.len(), index);
+            self.line(format!(
+                "{pointer} = getelementptr inbounds [{count} x {PLACE_STEP_IR_TYPE}], ptr {steps}, i64 0, i64 {index}"
+            ));
+            match projection {
+                keld_ir::ArgumentProjection::Field(field) => self.line(format!(
+                    "store {PLACE_STEP_IR_TYPE} {{ i32 0, i32 0, i64 {} }}, ptr {pointer}",
+                    field.0
+                )),
+                keld_ir::ArgumentProjection::Index(index_register) => {
+                    if !matches!(
+                        self.function.register_types.get(index_register.0 as usize),
+                        Some(IrType::Int)
+                    ) {
+                        return Err(BackendError::Unsupported(
+                            "projected place index is not Int".to_owned(),
+                        ));
+                    }
+                    let step_value = format!("%place_replace_step_value_{}", self.lines.len());
+                    let step_index = format!("%place_replace_step_index_{}", self.lines.len());
+                    self.line(format!(
+                        "{step_value} = insertvalue {PLACE_STEP_IR_TYPE} zeroinitializer, i32 1, 0"
+                    ));
+                    self.line(format!(
+                        "{step_index} = insertvalue {PLACE_STEP_IR_TYPE} {step_value}, i64 {}, 2",
+                        register_name(*index_register)
+                    ));
+                    self.line(format!(
+                        "store {PLACE_STEP_IR_TYPE} {step_index}, ptr {pointer}"
+                    ));
+                }
+            }
+        }
+        let output = format!("%place_replace_{}.slot", self.lines.len());
+        let status = format!("%place_replace_status_{}", self.lines.len());
+        let location = self.locations.id_for(span);
+        let (value_pointer, managed) = self.emit_value_argument(source)?;
+        self.line(format!("{output} = alloca {VALUE_IR_TYPE}"));
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_place_replace(ptr %context, ptr {}, i8 {}, ptr {steps}, i32 {count}, ptr {value_pointer}, ptr {output}, i8 {}, i32 {location})",
+            self.value_name(destination.base),
+            u8::from(entity_root),
+            u8::from(managed),
+        ));
+        self.emit_runtime_status(&status, format!("place_replace_cont_{}", self.lines.len()));
+        self.emit_value_result(displaced, &output)?;
+        if managed {
+            self.emit_home_untrack(source)?;
+            self.line(format!(
+                "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                self.value_name(source)
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_list_read(
+        &mut self,
+        destination: Register,
+        receiver: &keld_ir::Receiver,
+        index: Register,
+        span: Span,
+        copy: bool,
+    ) -> Result<(), BackendError> {
+        let element = self.list_element_type(receiver.list)?;
+        let managed = copy && owns_native_payload(element);
+        let flags = u8::from(managed) | (u8::from(copy) << 1);
+        let list_pointer = self.emit_receiver_list_pointer(receiver, span)?;
+        let output = format!("%list_get_{}", self.lines.len());
+        let status = format!("%list_get_status_{}", self.lines.len());
+        let location = self.locations.id_for(span);
+        self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+        self.line(format!(
+            "{status} = call i32 @keld_rt_v1_list_get(ptr %context, ptr {list_pointer}, i64 {}, ptr {output}.slot, i8 {}, i32 {location})",
+            register_name(index),
+            flags
+        ));
+        self.emit_runtime_status(&status, format!("list_get_cont_{}", self.lines.len()));
+        self.emit_value_result(destination, &format!("{output}.slot"))
+    }
+
     fn next_label(&self, prefix: &str) -> String {
         format!("{prefix}_{}", self.lines.len())
     }
@@ -693,6 +988,9 @@ impl<'module> ScalarLowerer<'module> {
 
     fn emit_block(&mut self, block: &keld_ir::IrBlock) -> Result<(), BackendError> {
         self.label(format!("bb{}", block.id.0));
+        if block.id == self.function.entry && !self.slots_emitted {
+            self.emit_managed_slots();
+        }
         let leading_phi = block
             .instructions
             .iter()
@@ -711,13 +1009,15 @@ impl<'module> ScalarLowerer<'module> {
         for instruction in block.instructions.iter().take(leading_phi) {
             self.emit_instruction(instruction)?;
         }
-        if block.id == self.function.entry && !self.slots_emitted {
-            self.emit_managed_slots();
-        }
         for instruction in block.instructions.iter().skip(leading_phi) {
             self.emit_instruction(instruction)?;
         }
-        self.emit_terminator(&block.terminator)
+        let result = self.emit_terminator(&block.terminator);
+        if result.is_ok() {
+            self.block_exit_labels
+                .insert(block.id, self.current_label.clone());
+        }
+        result
     }
 
     fn emit_managed_slots(&mut self) {
@@ -731,6 +1031,67 @@ impl<'module> ScalarLowerer<'module> {
                 self.line(format!("{slot} = alloca {VALUE_IR_TYPE}"));
                 self.line(format!("store {VALUE_IR_TYPE} zeroinitializer, ptr {slot}"));
             }
+        }
+
+        let mut capacities = BTreeMap::<u32, u32>::new();
+        for (index, storage) in self.function.register_storage.iter().enumerate() {
+            let register = Register(
+                u32::try_from(index).expect("register index exceeds native register range"),
+            );
+            if self.owns_register(register)
+                && let RegisterStorage::Home { scope, .. } = storage
+            {
+                capacities
+                    .entry(scope.0)
+                    .and_modify(|capacity| *capacity = capacity.saturating_add(1))
+                    .or_insert(1);
+            }
+        }
+        let slot_count = u32::try_from(self.function.register_types.len())
+            .expect("register count exceeds native ABI range");
+        for (scope, capacity) in capacities {
+            let ids = format!("%home_scope_{scope}_ids");
+            let count = format!("%home_scope_{scope}_count");
+            let slots = format!("%home_scope_{scope}_slots");
+            self.line(format!("{ids} = alloca [{capacity} x i32]"));
+            self.line(format!("{count} = alloca i32"));
+            self.line(format!("store i32 0, ptr {count}"));
+            self.line(format!("{slots} = alloca [{slot_count} x ptr]"));
+            for index in 0..slot_count {
+                let pointer = format!("%home_scope_{scope}_slot_{index}");
+                self.line(format!(
+                    "{pointer} = getelementptr inbounds [{slot_count} x ptr], ptr {slots}, i64 0, i64 {index}"
+                ));
+                self.line(format!("store ptr null, ptr {pointer}"));
+            }
+            for (index, storage) in self.function.register_storage.iter().enumerate() {
+                let register = Register(
+                    u32::try_from(index).expect("register index exceeds native register range"),
+                );
+                if self.owns_register(register)
+                    && matches!(
+                        storage,
+                        RegisterStorage::Home { scope: home_scope, .. }
+                            if home_scope.0 == scope
+                    )
+                {
+                    let pointer = format!("%home_scope_{scope}_slot_{}", register.0);
+                    self.line(format!(
+                        "store ptr {}, ptr {pointer}",
+                        self.value_name(register)
+                    ));
+                }
+            }
+            self.home_trackers.insert(
+                scope,
+                HomeTracker {
+                    ids,
+                    count,
+                    slots,
+                    capacity,
+                    slot_count,
+                },
+            );
         }
     }
 
@@ -771,6 +1132,60 @@ impl<'module> ScalarLowerer<'module> {
                 rhs,
                 span,
             } => {
+                let identity_compare = matches!(
+                    self.function.register_types.get(lhs.0 as usize),
+                    Some(IrType::Entity(_) | IrType::Link { .. })
+                ) && matches!(
+                    self.function.register_types.get(rhs.0 as usize),
+                    Some(IrType::Entity(_) | IrType::Link { .. })
+                );
+                if identity_compare {
+                    if !matches!(op, CompareOp::Eq | CompareOp::NotEq) {
+                        return Err(BackendError::Unsupported(
+                            "identity comparison supports only equality".to_owned(),
+                        ));
+                    }
+                    let lhs_value = format!("%identity_lhs_{}", self.lines.len());
+                    let rhs_value = format!("%identity_rhs_{}", self.lines.len());
+                    self.line(format!(
+                        "{lhs_value} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*lhs)
+                    ));
+                    self.line(format!(
+                        "{rhs_value} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*rhs)
+                    ));
+                    let mut equal = None;
+                    for word_index in 0..3 {
+                        let lhs_word =
+                            format!("%identity_lhs_word_{}_{}", self.lines.len(), word_index);
+                        let rhs_word =
+                            format!("%identity_rhs_word_{}_{}", self.lines.len(), word_index);
+                        let same = format!("%identity_same_{}_{}", self.lines.len(), word_index);
+                        self.line(format!(
+                            "{lhs_word} = extractvalue {VALUE_IR_TYPE} {lhs_value}, 2, {word_index}"
+                        ));
+                        self.line(format!(
+                            "{rhs_word} = extractvalue {VALUE_IR_TYPE} {rhs_value}, 2, {word_index}"
+                        ));
+                        self.line(format!("{same} = icmp eq i64 {lhs_word}, {rhs_word}"));
+                        equal = Some(match equal {
+                            None => same,
+                            Some(previous) => {
+                                let combined = format!("%identity_equal_{}", self.lines.len());
+                                self.line(format!("{combined} = and i1 {previous}, {same}"));
+                                combined
+                            }
+                        });
+                    }
+                    let equal = equal.expect("identity has three fixed words");
+                    if matches!(op, CompareOp::Eq) {
+                        self.line(format!("{} = xor i1 {equal}, false", register_name(*dst)));
+                    } else {
+                        self.line(format!("{} = xor i1 {equal}, true", register_name(*dst)));
+                    }
+                    return Ok(());
+                }
                 if matches!(
                     self.function.register_types.get(lhs.0 as usize),
                     Some(IrType::Text)
@@ -837,11 +1252,58 @@ impl<'module> ScalarLowerer<'module> {
                 ));
             }
             Instruction::Phi { dst, inputs, .. } => {
+                if self.is_managed_register(*dst) {
+                    let pointers = inputs
+                        .iter()
+                        .map(|(block, register)| {
+                            let label = self
+                                .block_exit_labels
+                                .get(block)
+                                .cloned()
+                                .unwrap_or_else(|| format!("bb{}", block.0));
+                            format!("[ {}, %{label} ]", self.value_name(*register))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let pointer = format!("%phi_managed_ptr_{}", self.lines.len());
+                    let value = format!("%phi_managed_value_{}", self.lines.len());
+                    self.line(format!("{pointer} = phi ptr {pointers}"));
+                    self.line(format!("{value} = load {VALUE_IR_TYPE}, ptr {pointer}"));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {value}, ptr {}",
+                        self.value_name(*dst)
+                    ));
+                    self.emit_home_track(*dst)?;
+                    // A managed Phi whose destination is an owned Home is a
+                    // move from the selected predecessor Home, just like the
+                    // interpreter's `take_register` during block entry.  The
+                    // envelope is copied into the destination slot above, so
+                    // clear every Home input afterward; only the selected
+                    // input can be live, and clearing an unselected empty Home
+                    // is harmless.  Loan Phis retain their source envelopes.
+                    if self.is_home_register(*dst) {
+                        for (_, source) in inputs {
+                            if *source != *dst && self.is_home_register(*source) {
+                                self.line(format!(
+                                    "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                                    self.value_name(*source)
+                                ));
+                                self.emit_home_untrack(*source)?;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
                 let ty = llvm_type_for_register(self.function, *dst)?;
                 let values = inputs
                     .iter()
                     .map(|(block, register)| {
-                        format!("[ {}, %bb{} ]", register_name(*register), block.0)
+                        let label = self
+                            .block_exit_labels
+                            .get(block)
+                            .cloned()
+                            .unwrap_or_else(|| format!("bb{}", block.0));
+                        format!("[ {}, %{label} ]", register_name(*register))
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -875,6 +1337,7 @@ impl<'module> ScalarLowerer<'module> {
                     self.value_name(*dst),
                 ));
                 self.emit_runtime_status(&status, format!("text_new_cont_{}", self.lines.len()));
+                self.emit_home_track(*dst)?;
             }
             Instruction::TextByteLength { dst, text, span } => {
                 let output = format!("%text_length_{}", self.lines.len());
@@ -920,9 +1383,25 @@ impl<'module> ScalarLowerer<'module> {
                     self.value_name(*dst),
                 ));
                 self.emit_runtime_status(&status, format!("text_concat_cont_{}", self.lines.len()));
+                self.emit_home_track(*dst)?;
             }
             Instruction::Copy { dst, src, span } => {
-                if self.is_managed_register(*src) {
+                if self.is_managed_register(*dst) && !self.is_home_register(*dst) {
+                    let value = format!("%value_copy_loan_{}", self.lines.len());
+                    self.line(format!(
+                        "{value} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*src)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {value}, ptr {}",
+                        self.value_name(*dst)
+                    ));
+                } else if self
+                    .function
+                    .register_types
+                    .get(src.0 as usize)
+                    .is_some_and(owns_native_payload)
+                {
                     let status = format!("%value_copy_status_{}", self.lines.len());
                     let location = self.locations.id_for(*span);
                     self.line(format!(
@@ -934,6 +1413,17 @@ impl<'module> ScalarLowerer<'module> {
                         &status,
                         format!("value_copy_cont_{}", self.lines.len()),
                     );
+                    self.emit_home_track(*dst)?;
+                } else if self.is_managed_register(*src) {
+                    let value = format!("%value_copy_fixed_{}", self.lines.len());
+                    self.line(format!(
+                        "{value} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*src)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {value}, ptr {}",
+                        self.value_name(*dst)
+                    ));
                 } else {
                     let ty = self.value_type(*src)?;
                     if ty == "i64" {
@@ -972,6 +1462,8 @@ impl<'module> ScalarLowerer<'module> {
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*src)
                     ));
+                    self.emit_home_untrack(*src)?;
+                    self.emit_home_track(*dst)?;
                 } else {
                     let ty = self.value_type(*src)?;
                     self.line(format!(
@@ -998,6 +1490,8 @@ impl<'module> ScalarLowerer<'module> {
                         "{incoming} = load {VALUE_IR_TYPE}, ptr {}",
                         self.value_name(*source)
                     ));
+                    self.emit_home_untrack(*destination)?;
+                    self.emit_home_untrack(*source)?;
                     self.line(format!(
                         "store {VALUE_IR_TYPE} {previous}, ptr {}",
                         self.value_name(*displaced)
@@ -1010,6 +1504,7 @@ impl<'module> ScalarLowerer<'module> {
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*source)
                     ));
+                    self.emit_home_track(*destination)?;
                 } else {
                     let ty = self.value_type(*source)?;
                     let previous = format!("%install_previous_{}", self.lines.len());
@@ -1047,6 +1542,8 @@ impl<'module> ScalarLowerer<'module> {
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*source)
                     ));
+                    self.emit_home_untrack(*source)?;
+                    self.emit_home_track(*destination)?;
                 } else {
                     let ty = self.value_type(*source)?;
                     self.line(format!(
@@ -1059,7 +1556,12 @@ impl<'module> ScalarLowerer<'module> {
             Instruction::DropHome { home, span }
             | Instruction::DropIfLive { home, span }
             | Instruction::DropSlot { slot: home, span } => {
-                if self.is_managed_register(*home) {
+                if self
+                    .function
+                    .register_types
+                    .get(home.0 as usize)
+                    .is_some_and(owns_native_payload)
+                {
                     let status = format!("%value_drop_status_{}", self.lines.len());
                     let location = self.locations.id_for(*span);
                     self.line(format!(
@@ -1070,44 +1572,11 @@ impl<'module> ScalarLowerer<'module> {
                         &status,
                         format!("value_drop_cont_{}", self.lines.len()),
                     );
+                    self.emit_home_untrack(*home)?;
                 }
             }
             Instruction::CleanupTrackedScope { scope, span } => {
-                let homes = self
-                    .function
-                    .register_storage
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .filter_map(|(index, storage)| {
-                        let RegisterStorage::Home {
-                            scope: home_scope, ..
-                        } = storage
-                        else {
-                            return None;
-                        };
-                        (home_scope == scope).then(|| {
-                            Register(
-                                u32::try_from(index)
-                                    .expect("register index exceeds native register range"),
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                for home in homes {
-                    if self.is_managed_register(home) {
-                        let status = format!("%scope_drop_status_{}", self.lines.len());
-                        let location = self.locations.id_for(*span);
-                        self.line(format!(
-                            "{status} = call i32 @keld_rt_v1_value_drop(ptr %context, ptr {}, i32 {location})",
-                            self.value_name(home)
-                        ));
-                        self.emit_runtime_status(
-                            &status,
-                            format!("scope_drop_cont_{}", self.lines.len()),
-                        );
-                    }
-                }
+                self.emit_cleanup_scope(scope.0, *span);
             }
             Instruction::ConstructStruct {
                 dst,
@@ -1183,12 +1652,14 @@ impl<'module> ScalarLowerer<'module> {
                     self.value_name(*dst)
                 ));
                 self.emit_runtime_status(&status, format!("struct_new_cont_{}", self.lines.len()));
+                self.emit_home_track(*dst)?;
                 for (_, source) in fields {
-                    if self.is_managed_register(*source) {
+                    if self.owns_register(*source) {
                         self.line(format!(
                             "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                             self.value_name(*source)
                         ));
+                        self.emit_home_untrack(*source)?;
                     }
                 }
             }
@@ -1213,7 +1684,7 @@ impl<'module> ScalarLowerer<'module> {
                 self.line(format!(
                     "{status} = call i32 @keld_rt_v1_struct_field(ptr %context, ptr {}, i32 {index}, ptr {output}.slot, i8 {}, i32 {location})",
                     self.value_name(*base),
-                    u8::from(self.is_managed_register(*dst))
+                    u8::from(self.owns_register(*dst) && self.is_home_register(*dst))
                 ));
                 self.emit_runtime_status(&status, format!("struct_read_cont_{}", self.lines.len()));
                 self.emit_value_result(*dst, &format!("{output}.slot"))?;
@@ -1338,12 +1809,14 @@ impl<'module> ScalarLowerer<'module> {
                     &status,
                     format!("allocate_entity_cont_{}", self.lines.len()),
                 );
+                self.emit_home_track(*dst)?;
                 for (_, source) in fields {
-                    if self.is_managed_register(*source) {
+                    if self.owns_register(*source) {
                         self.line(format!(
                             "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                             self.value_name(*source)
                         ));
+                        self.emit_home_untrack(*source)?;
                     }
                 }
             }
@@ -1381,7 +1854,7 @@ impl<'module> ScalarLowerer<'module> {
                 self.line(format!(
                     "{status} = call i32 @keld_rt_v1_entity_field(ptr %context, ptr {}, i32 {index}, ptr {output}.slot, i8 {}, i32 {location})",
                     self.value_name(entity),
-                    u8::from(self.is_managed_register(*dst))
+                    u8::from(self.owns_register(*dst) && self.is_home_register(*dst))
                 ));
                 self.emit_runtime_status(&status, format!("entity_read_cont_{}", self.lines.len()));
                 self.emit_value_result(*dst, &format!("{output}.slot"))?;
@@ -1397,7 +1870,7 @@ impl<'module> ScalarLowerer<'module> {
                 })?;
                 let definition = self.entity_register_definition(entity)?;
                 let field_type = self.definition_field_type(definition, *field)?;
-                let managed = is_managed_type(field_type);
+                let managed = owns_native_payload(field_type);
                 let (value_pointer, _) = self.emit_value_argument(*value)?;
                 let output = format!("%entity_write_{}", self.lines.len());
                 let status = format!("%entity_write_status_{}", self.lines.len());
@@ -1426,6 +1899,7 @@ impl<'module> ScalarLowerer<'module> {
                         &drop_status,
                         format!("entity_write_drop_cont_{}", self.lines.len()),
                     );
+                    self.emit_home_untrack(*value)?;
                 }
             }
             Instruction::CloseView { view, .. } => {
@@ -1443,7 +1917,7 @@ impl<'module> ScalarLowerer<'module> {
                 })?;
                 let definition = self.entity_register_definition(entity)?;
                 let field_type = self.definition_field_type(definition, *field)?;
-                let managed = is_managed_type(field_type);
+                let managed = owns_native_payload(field_type);
                 let (value_pointer, _) = self.emit_value_argument(*source)?;
                 let output = format!("%entity_replace_{}", self.lines.len());
                 let status = format!("%entity_replace_status_{}", self.lines.len());
@@ -1461,6 +1935,7 @@ impl<'module> ScalarLowerer<'module> {
                 );
                 self.emit_value_result(*displaced, &format!("{output}.slot"))?;
                 if managed {
+                    self.emit_home_untrack(*source)?;
                     self.line(format!(
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*source)
@@ -1505,6 +1980,7 @@ impl<'module> ScalarLowerer<'module> {
                     self.value_name(*dst)
                 ));
                 self.emit_runtime_status(&status, format!("list_new_cont_{}", self.lines.len()));
+                self.emit_home_track(*dst)?;
             }
             Instruction::ListLength { dst, list, span } => {
                 let output = format!("%list_length_{}", self.lines.len());
@@ -1523,7 +1999,7 @@ impl<'module> ScalarLowerer<'module> {
             }
             Instruction::ListPush { list, value, span } => {
                 let element = self.list_element_type(*list)?;
-                let managed = is_managed_type(element);
+                let managed = owns_native_payload(element);
                 let (value_pointer, _) = self.emit_value_argument(*value)?;
                 let status = format!("%list_push_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
@@ -1534,6 +2010,7 @@ impl<'module> ScalarLowerer<'module> {
                 ));
                 self.emit_runtime_status(&status, format!("list_push_cont_{}", self.lines.len()));
                 if managed {
+                    self.emit_home_untrack(*value)?;
                     self.line(format!(
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*value)
@@ -1546,16 +2023,27 @@ impl<'module> ScalarLowerer<'module> {
                 value,
                 span,
             } => {
-                if source.base != *list || !source.projections.is_empty() {
-                    return Err(BackendError::Unsupported(
-                        "projected List push requires a runtime place lowering".to_owned(),
+                let list_pointer = self.emit_place_pointer(source, *span)?;
+                let element = self.list_element_type(*list)?;
+                let managed = owns_native_payload(element);
+                let (value_pointer, _) = self.emit_value_argument(*value)?;
+                let status = format!("%list_push_place_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_push(ptr %context, ptr {list_pointer}, ptr {value_pointer}, i8 {}, i32 {location})",
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_push_place_cont_{}", self.lines.len()),
+                );
+                if managed {
+                    self.emit_home_untrack(*value)?;
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*value)
                     ));
                 }
-                self.emit_instruction(&Instruction::ListPush {
-                    list: *list,
-                    value: *value,
-                    span: *span,
-                })?;
             }
             Instruction::ListRemove {
                 dst,
@@ -1574,60 +2062,43 @@ impl<'module> ScalarLowerer<'module> {
                 ));
                 self.emit_runtime_status(&status, format!("list_remove_cont_{}", self.lines.len()));
                 self.emit_value_result(*dst, &format!("{output}.slot"))?;
+                self.emit_home_track(*dst)?;
             }
             Instruction::ListRemovePlace {
                 dst,
-                list,
                 source,
                 index,
                 span,
+                ..
             } => {
-                if source.base != *list || !source.projections.is_empty() {
-                    return Err(BackendError::Unsupported(
-                        "projected List remove requires a runtime place lowering".to_owned(),
-                    ));
-                }
-                self.emit_instruction(&Instruction::ListRemove {
-                    dst: *dst,
-                    list: *list,
-                    index: *index,
-                    span: *span,
-                })?;
+                let list_pointer = self.emit_place_pointer(source, *span)?;
+                let output = format!("%list_remove_place_{}", self.lines.len());
+                let status = format!("%list_remove_place_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_remove(ptr %context, ptr {list_pointer}, i64 {}, ptr {output}.slot, i32 {location})",
+                    register_name(*index)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_remove_place_cont_{}", self.lines.len()),
+                );
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+                self.emit_home_track(*dst)?;
             }
             Instruction::ListGet {
                 dst,
                 receiver,
                 index,
                 span,
-            }
-            | Instruction::ListIndex {
+            } => self.emit_list_read(*dst, receiver, *index, *span, true)?,
+            Instruction::ListIndex {
                 dst,
                 receiver,
                 index,
                 span,
-            } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
-                let element = self.list_element_type(receiver.list)?;
-                let managed = is_managed_type(element);
-                let output = format!("%list_get_{}", self.lines.len());
-                let status = format!("%list_get_status_{}", self.lines.len());
-                let location = self.locations.id_for(*span);
-                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
-                self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_get(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i8 {}, i32 {location})",
-                    self.value_name(receiver.list),
-                    register_name(*index),
-                    u8::from(managed)
-                ));
-                self.emit_runtime_status(&status, format!("list_get_cont_{}", self.lines.len()));
-                self.emit_value_result(*dst, &format!("{output}.slot"))?;
-            }
+            } => self.emit_list_read(*dst, receiver, *index, *span, false)?,
             Instruction::ListReplace {
                 receiver,
                 index,
@@ -1635,23 +2106,16 @@ impl<'module> ScalarLowerer<'module> {
                 displaced,
                 span,
             } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
                 let element = self.list_element_type(receiver.list)?;
-                let managed = is_managed_type(element);
+                let managed = owns_native_payload(element);
+                let list_pointer = self.emit_receiver_list_pointer(receiver, *span)?;
                 let (value_pointer, _) = self.emit_value_argument(*value)?;
                 let output = format!("%list_replace_{}", self.lines.len());
                 let status = format!("%list_replace_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
                 self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
                 self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_replace(ptr %context, ptr {}, i64 {}, ptr {value_pointer}, ptr {output}.slot, i8 {}, i32 {location})",
-                    self.value_name(receiver.list),
+                    "{status} = call i32 @keld_rt_v1_list_replace(ptr %context, ptr {list_pointer}, i64 {}, ptr {value_pointer}, ptr {output}.slot, i8 {}, i32 {location})",
                     register_name(*index),
                     u8::from(managed)
                 ));
@@ -1661,6 +2125,7 @@ impl<'module> ScalarLowerer<'module> {
                 );
                 self.emit_value_result(*displaced, &format!("{output}.slot"))?;
                 if managed {
+                    self.emit_home_untrack(*value)?;
                     self.line(format!(
                         "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
                         self.value_name(*value)
@@ -1673,20 +2138,13 @@ impl<'module> ScalarLowerer<'module> {
                 index,
                 span,
             } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
+                let list_pointer = self.emit_receiver_list_pointer(receiver, *span)?;
                 let output = format!("%list_try_remove_{}", self.lines.len());
                 let status = format!("%list_try_remove_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
                 self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
                 self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_try_remove(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i32 {location})",
-                    self.value_name(receiver.list),
+                    "{status} = call i32 @keld_rt_v1_list_try_remove(ptr %context, ptr {list_pointer}, i64 {}, ptr {output}.slot, i32 {location})",
                     register_name(*index)
                 ));
                 self.emit_runtime_status(
@@ -1694,20 +2152,14 @@ impl<'module> ScalarLowerer<'module> {
                     format!("list_try_remove_cont_{}", self.lines.len()),
                 );
                 self.emit_value_result(*dst, &format!("{output}.slot"))?;
+                self.emit_home_track(*dst)?;
             }
             Instruction::ListClear { receiver, span } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
+                let list_pointer = self.emit_receiver_list_pointer(receiver, *span)?;
                 let status = format!("%list_clear_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
                 self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_clear(ptr %context, ptr {}, i32 {location})",
-                    self.value_name(receiver.list)
+                    "{status} = call i32 @keld_rt_v1_list_clear(ptr %context, ptr {list_pointer}, i32 {location})",
                 ));
                 self.emit_runtime_status(&status, format!("list_clear_cont_{}", self.lines.len()));
             }
@@ -1716,18 +2168,11 @@ impl<'module> ScalarLowerer<'module> {
                 additional,
                 span,
             } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
+                let list_pointer = self.emit_receiver_list_pointer(receiver, *span)?;
                 let status = format!("%list_reserve_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
                 self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_reserve(ptr %context, ptr {}, i64 {}, i32 {location})",
-                    self.value_name(receiver.list),
+                    "{status} = call i32 @keld_rt_v1_list_reserve(ptr %context, ptr {list_pointer}, i64 {}, i32 {location})",
                     register_name(*additional)
                 ));
                 self.emit_runtime_status(
@@ -1741,20 +2186,13 @@ impl<'module> ScalarLowerer<'module> {
                 additional,
                 span,
             } => {
-                if receiver.source.as_ref().is_some_and(|source| {
-                    source.base != receiver.list || !source.projections.is_empty()
-                }) {
-                    return Err(BackendError::Unsupported(
-                        "projected List receivers are not in direct lowering".to_owned(),
-                    ));
-                }
+                let list_pointer = self.emit_receiver_list_pointer(receiver, *span)?;
                 let output = format!("%list_try_reserve_{}", self.lines.len());
                 let status = format!("%list_try_reserve_status_{}", self.lines.len());
                 let location = self.locations.id_for(*span);
                 self.line(format!("{output}.slot = alloca i8"));
                 self.line(format!(
-                    "{status} = call i32 @keld_rt_v1_list_try_reserve(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i32 {location})",
-                    self.value_name(receiver.list),
+                    "{status} = call i32 @keld_rt_v1_list_try_reserve(ptr %context, ptr {list_pointer}, i64 {}, ptr {output}.slot, i32 {location})",
                     register_name(*additional)
                 ));
                 self.emit_runtime_status(
@@ -1771,13 +2209,14 @@ impl<'module> ScalarLowerer<'module> {
                 arguments,
                 argument_sources,
                 current_lifecycle,
-                ..
+                span,
             } => self.emit_call(
                 *dst,
                 *function,
                 arguments,
                 argument_sources,
                 *current_lifecycle,
+                *span,
             )?,
             Instruction::ReplacePlace {
                 destination,
@@ -1785,17 +2224,7 @@ impl<'module> ScalarLowerer<'module> {
                 displaced,
                 span,
             } => {
-                if !destination.projections.is_empty() {
-                    return Err(BackendError::Unsupported(
-                        "projected place replacement requires a runtime place lowering".to_owned(),
-                    ));
-                }
-                self.emit_instruction(&Instruction::InstallHome {
-                    destination: destination.base,
-                    source: *source,
-                    displaced: *displaced,
-                    span: *span,
-                })?;
+                self.emit_place_replace(destination, *source, *displaced, *span)?;
             }
         }
         Ok(())
@@ -1809,6 +2238,7 @@ impl<'module> ScalarLowerer<'module> {
         arguments: &[(ParameterIndex, Register)],
         argument_sources: &[(ParameterIndex, Option<keld_ir::ArgumentSource>)],
         current_lifecycle: Register,
+        span: Span,
     ) -> Result<(), BackendError> {
         let Some(callee) = self.module.functions.get(function_id.0 as usize) else {
             return Err(BackendError::Unsupported(format!(
@@ -1816,11 +2246,6 @@ impl<'module> ScalarLowerer<'module> {
                 function_id.0
             )));
         };
-        if argument_sources.iter().any(|(_, source)| source.is_some()) {
-            return Err(BackendError::Unsupported(
-                "scalar calls cannot lower projected argument sources".to_owned(),
-            ));
-        }
         let mut argument_map = BTreeMap::new();
         for (parameter, register) in arguments {
             if argument_map.insert(parameter.0, *register).is_some() {
@@ -1871,8 +2296,31 @@ impl<'module> ScalarLowerer<'module> {
                     "call argument type does not match callee".to_owned(),
                 ));
             }
+            let argument_source = argument_sources
+                .iter()
+                .find_map(|(parameter, source)| {
+                    (parameter.0 == parameter_index).then_some(source.as_ref())
+                })
+                .flatten();
+            let parameter_mode = callee.parameter_modes.get(index).copied().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "callee parameter mode table is shorter than its parameters".to_owned(),
+                )
+            })?;
             let argument_value = if is_managed_type(actual_ir) {
-                self.value_name(*argument)
+                if parameter_mode == keld_ir::ParameterMode::Loan {
+                    if let Some(source) = argument_source {
+                        self.emit_place_pointer(source, span)?
+                    } else {
+                        self.value_name(*argument)
+                    }
+                } else {
+                    // A consuming argument is already materialized in the
+                    // validated argument register (a `take` lowers to a
+                    // MoveHome before this call).  Passing the source place
+                    // here would observe the now-empty original Home.
+                    self.value_name(*argument)
+                }
             } else {
                 register_name(*argument)
             };
@@ -1936,11 +2384,34 @@ impl<'module> ScalarLowerer<'module> {
         self.label(fault_label);
         self.line("br label %fault_exit");
         self.label(ok_label);
+        for (index, _parameter) in callee.parameters.iter().enumerate() {
+            let parameter_mode = callee.parameter_modes.get(index).copied().ok_or_else(|| {
+                BackendError::Unsupported(
+                    "callee parameter mode table is shorter than its parameters".to_owned(),
+                )
+            })?;
+            if parameter_mode != keld_ir::ParameterMode::Take {
+                continue;
+            }
+            let parameter_index = u32::try_from(index).expect("callee parameter index checked");
+            let Some(argument) = argument_map.get(&parameter_index) else {
+                continue;
+            };
+            if self.is_managed_register(*argument) {
+                self.emit_home_untrack(*argument)?;
+                self.line(format!(
+                    "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                    self.value_name(*argument)
+                ));
+            }
+        }
         if let Some((slot, ty)) = result_slot
             && let Some(dst) = dst
             && !self.is_managed_register(dst)
         {
             self.line(format!("{} = load {ty}, ptr {slot}", register_name(dst)));
+        } else if let Some(dst) = dst {
+            self.emit_home_track(dst)?;
         }
         Ok(())
     }
@@ -2289,6 +2760,12 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         ));
     }
     for function in &module.functions {
+        if function.parameter_modes.len() != function.parameters.len() {
+            return Err(BackendError::Unsupported(format!(
+                "function {} parameter mode table does not match its parameters",
+                function.id.0
+            )));
+        }
         if function.return_type != IrType::Unit && value_type(&function.return_type).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "function {} has an unsupported return type",
@@ -2387,7 +2864,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let mut ir = format!(
         "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n{literal_ir}\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_destroy(ptr)\ndeclare i32 @keld_rt_v1_context_fault_parts(ptr, ptr, ptr)\ndeclare i32 @keld_rt_v1_value_copy(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_value_drop(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_new(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_text_byte_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_is_empty(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_equal(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_concat(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\n{functions_ir}\ndefine i32 @main() {{\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %context_ready, label %no_context\nno_context:\n  ret i32 70\ncontext_ready:\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %destroy_success, label %destroy_internal\ndestroy_success:\n  %destroy_success_status = call i32 @keld_rt_v1_context_destroy(ptr %context)\n  %destroy_success_ok = icmp eq i32 %destroy_success_status, 0\n  br i1 %destroy_success_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %destroy_internal\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
     );
-    let list_declarations = "declare i32 @keld_rt_v1_context_root_lifecycle(ptr, ptr)\ndeclare i32 @keld_rt_v1_begin_lifecycle(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_end_lifecycle(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_new(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_push(ptr, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_get(ptr, ptr, i64, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_replace(ptr, ptr, i64, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_try_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_clear(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_reserve(ptr, ptr, i64, i32)\ndeclare i32 @keld_rt_v1_list_try_reserve(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_new(ptr, i32, ptr, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_allocate_entity(ptr, i32, ptr, ptr, i32, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_to_link(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_resolve_link(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_replace_field(ptr, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_keep_entity(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_retire_entity(ptr, ptr, i32)\n";
+    let list_declarations = "declare i32 @keld_rt_v1_context_root_lifecycle(ptr, ptr)\ndeclare i32 @keld_rt_v1_begin_lifecycle(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_end_lifecycle(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_new(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_push(ptr, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_get(ptr, ptr, i64, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_replace(ptr, ptr, i64, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_try_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_clear(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_reserve(ptr, ptr, i64, i32)\ndeclare i32 @keld_rt_v1_list_try_reserve(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_new(ptr, i32, ptr, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_place_resolve(ptr, ptr, i8, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_place_replace(ptr, ptr, i8, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_home_track(ptr, ptr, i32, i32)\ndeclare i32 @keld_rt_v1_home_untrack(ptr, ptr, i32, i32)\ndeclare i32 @keld_rt_v1_cleanup_scope(ptr, ptr, ptr, ptr, i32, i32, i32)\ndeclare i32 @keld_rt_v1_allocate_entity(ptr, i32, ptr, ptr, i32, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_to_link(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_resolve_link(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_replace_field(ptr, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_keep_entity(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_retire_entity(ptr, ptr, i32)\n";
     ir = ir.replace(
         "declare i32 @keld_rt_v1_print_int(i64)\n",
         &format!("{list_declarations}declare i32 @keld_rt_v1_print_int(i64)\n"),

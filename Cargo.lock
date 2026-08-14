@@ -109,6 +109,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "keld-native-ffi-test"
+version = "0.1.0"
+dependencies = [
+ "keld-native-abi",
+ "keld-native-runtime",
+]
+
+[[package]]
 name = "keld-native-llvm"
 version = "0.1.0"
 dependencies = [

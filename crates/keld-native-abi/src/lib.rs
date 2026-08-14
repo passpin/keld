@@ -75,6 +75,18 @@ pub struct KeldFault {
     pub location: u32,
 }
 
+/// One stack-bounded projection in a generated call place.
+///
+/// `kind` is `0` for a field projection and `1` for a list index. The value is
+/// a field ordinal or a checked non-negative index respectively.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct KeldPlaceStep {
+    pub kind: u32,
+    pub reserved: u32,
+    pub value: u64,
+}
+
 /// Status returned by every fallible runtime operation.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

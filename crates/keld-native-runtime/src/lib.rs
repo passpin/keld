@@ -3,10 +3,17 @@
 #![forbid(unsafe_code)]
 
 use keld_native_abi::{
-    FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink, KeldValue, RuntimeStatus,
+    FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink, KeldPlaceStep,
+    KeldValue, RuntimeStatus,
 };
 use keld_runtime::{EntityId, Link, RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
+#[cfg(feature = "test-controls")]
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(feature = "test-controls")]
+use std::fmt::Write as _;
+#[cfg(feature = "test-controls")]
+use std::path::PathBuf;
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -81,6 +88,153 @@ pub struct RuntimeContext {
     reusable_handles: Vec<u32>,
     status: RuntimeStatus,
     first_failure: Option<KeldFault>,
+    #[cfg(feature = "test-controls")]
+    test_controls: TestControls,
+}
+
+#[cfg(feature = "test-controls")]
+#[derive(Clone, Debug, Default)]
+struct TestControls {
+    failures: BTreeSet<(u32, String, u64)>,
+    attempts: BTreeMap<(u32, String), u64>,
+    observations: Vec<TestAllocationObservation>,
+    observation_path: Option<PathBuf>,
+    current_site: u32,
+}
+
+#[cfg(feature = "test-controls")]
+#[derive(Clone, Debug)]
+struct TestAllocationObservation {
+    site_id: u32,
+    phase: String,
+    attempt: u64,
+    allowed: bool,
+}
+
+#[cfg(feature = "test-controls")]
+impl TestControls {
+    fn load() -> Self {
+        let mut controls = Self {
+            observation_path: std::env::var_os("KELD_TEST_OBSERVATION").map(PathBuf::from),
+            ..Self::default()
+        };
+        let Some(path) = std::env::var_os("KELD_TEST_CONTROL").map(PathBuf::from) else {
+            return controls;
+        };
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return controls;
+        };
+        for line in contents.lines() {
+            let Some(site_id) = parse_control_number(line, "site_id") else {
+                continue;
+            };
+            let Some(attempt) = parse_control_u64(line, "attempt") else {
+                continue;
+            };
+            let Some(phase) = parse_control_string(line, "phase") else {
+                continue;
+            };
+            controls.failures.insert((site_id, phase, attempt));
+        }
+        controls
+    }
+
+    fn set_site(&mut self, site_id: u32) {
+        self.current_site = site_id;
+    }
+
+    fn allow(&mut self, phase: &str) -> bool {
+        let key = (self.current_site, phase.to_owned());
+        let attempt = self
+            .attempts
+            .entry(key.clone())
+            .and_modify(|value| *value = value.saturating_add(1))
+            .or_insert(1);
+        let attempt = *attempt;
+        let allowed = !self.failures.contains(&(key.0, key.1.clone(), attempt));
+        self.observations.push(TestAllocationObservation {
+            site_id: key.0,
+            phase: key.1,
+            attempt,
+            allowed,
+        });
+        allowed
+    }
+
+    fn write_observation(&self, status: RuntimeStatus, fault: Option<KeldFault>) {
+        let Some(path) = &self.observation_path else {
+            return;
+        };
+        let mut output = String::from("version=1\n");
+        let _ = writeln!(output, "status={}", status as u32);
+        if let Some(fault) = fault {
+            let _ = writeln!(
+                output,
+                "fault_kind={} fault_location={}",
+                fault.kind, fault.location
+            );
+        }
+        for observation in &self.observations {
+            let _ = writeln!(
+                output,
+                "allocation site_id={} phase={} attempt={} allowed={}",
+                observation.site_id,
+                observation.phase,
+                observation.attempt,
+                u8::from(observation.allowed)
+            );
+        }
+        let _ = std::fs::write(path, output);
+    }
+}
+
+#[cfg(feature = "test-controls")]
+fn parse_control_number(line: &str, key: &str) -> Option<u32> {
+    parse_control_u64(line, key).and_then(|value| u32::try_from(value).ok())
+}
+
+#[cfg(feature = "test-controls")]
+fn parse_control_u64(line: &str, key: &str) -> Option<u64> {
+    let marker = format!("{key}=");
+    let json_marker = format!("\"{key}\":");
+    let start = line
+        .find(&marker)
+        .map(|index| index + marker.len())
+        .or_else(|| {
+            line.find(&json_marker)
+                .map(|index| index + json_marker.len())
+        })?;
+    let digits = line[start..]
+        .trim_start()
+        .trim_start_matches(':')
+        .trim_start()
+        .trim_start_matches('"')
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    digits.parse().ok()
+}
+
+#[cfg(feature = "test-controls")]
+fn parse_control_string(line: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=");
+    let json_marker = format!("\"{key}\":");
+    let start = line
+        .find(&marker)
+        .map(|index| index + marker.len())
+        .or_else(|| {
+            line.find(&json_marker)
+                .map(|index| index + json_marker.len())
+        })?;
+    let value = line[start..]
+        .trim_start()
+        .trim_start_matches(':')
+        .trim_start()
+        .trim_start_matches('"');
+    let end = value
+        .find(|character: char| character == '"' || character == ',' || character.is_whitespace())
+        .unwrap_or(value.len());
+    (!value[..end].is_empty()).then(|| value[..end].to_owned())
 }
 
 impl RuntimeContext {
@@ -97,7 +251,35 @@ impl RuntimeContext {
             reusable_handles: Vec::new(),
             status: RuntimeStatus::Ok,
             first_failure: None,
+            #[cfg(feature = "test-controls")]
+            test_controls: TestControls::load(),
         })
+    }
+
+    /// Selects the deterministic semantic-allocation site for the next
+    /// synchronous runtime operation. This exists only in the test runtime
+    /// and is deliberately absent from the production ABI.
+    #[cfg(feature = "test-controls")]
+    pub fn begin_test_operation(&mut self, site_id: u32) {
+        self.test_controls.set_site(site_id);
+    }
+
+    #[cfg(feature = "test-controls")]
+    fn allow_test_allocation(&mut self, phase: &str) -> bool {
+        self.test_controls.allow(phase)
+    }
+
+    #[cfg(not(feature = "test-controls"))]
+    fn allow_test_allocation(&mut self, _phase: &str) -> bool {
+        true
+    }
+
+    /// Writes the optional test observation record before the context is
+    /// dropped. Production contexts have no observation side effect.
+    #[cfg(feature = "test-controls")]
+    pub fn finish_test_observation(&self) {
+        self.test_controls
+            .write_observation(self.status, self.first_failure);
     }
 
     #[must_use]
@@ -120,8 +302,16 @@ impl RuntimeContext {
         }
     }
 
-    fn store_error(_error: StoreError) -> NativeValueError {
-        NativeValueError::InvalidHandle
+    fn store_error(error: StoreError) -> NativeValueError {
+        match error {
+            // Store growth is a semantic allocation point; preserve that
+            // distinction so the FFI maps it to AllocationFault instead of
+            // misclassifying it as a broken identity.
+            StoreError::Allocation => NativeValueError::Allocation,
+            StoreError::BrandExhausted | StoreError::InvalidOperation(_) => {
+                NativeValueError::InvalidHandle
+            }
+        }
     }
 
     fn lifecycle_id(value: KeldLifecycle) -> RuntimeLifecycleId {
@@ -168,6 +358,9 @@ impl RuntimeContext {
         &mut self,
         parent: KeldLifecycle,
     ) -> Result<KeldLifecycle, NativeValueError> {
+        if !self.allow_test_allocation("lifecycle") {
+            return Err(NativeValueError::Allocation);
+        }
         let lifecycle = self
             .store
             .begin_lifecycle(Self::lifecycle_id(parent))
@@ -220,6 +413,9 @@ impl RuntimeContext {
             if is_managed {
                 self.validate_handle(field)?;
             }
+        }
+        if !self.allow_test_allocation("entity") {
+            return Err(NativeValueError::Allocation);
         }
         let entity = self
             .store
@@ -403,6 +599,9 @@ impl RuntimeContext {
         if std::str::from_utf8(bytes).is_err() {
             return Err(NativeValueError::TypeMismatch);
         }
+        if !self.allow_test_allocation("text") {
+            return Err(NativeValueError::Allocation);
+        }
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(bytes.len())
@@ -423,17 +622,20 @@ impl RuntimeContext {
         rhs: KeldValue,
     ) -> Result<KeldValue, NativeValueError> {
         let left = self.text_bytes(lhs)?.to_vec();
-        let right = self.text_bytes(rhs)?;
+        let right = self.text_bytes(rhs)?.to_vec();
         let length = left
             .len()
             .checked_add(right.len())
             .ok_or(NativeValueError::Allocation)?;
+        if !self.allow_test_allocation("concat") {
+            return Err(NativeValueError::Allocation);
+        }
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(length)
             .map_err(|_| NativeValueError::Allocation)?;
         bytes.extend_from_slice(&left);
-        bytes.extend_from_slice(right);
+        bytes.extend_from_slice(&right);
         self.allocate(NativePayload::Text(bytes))
     }
 
@@ -495,6 +697,9 @@ impl RuntimeContext {
         if fields.len() != managed.len() {
             return Err(NativeValueError::TypeMismatch);
         }
+        if !self.allow_test_allocation("struct") {
+            return Err(NativeValueError::Allocation);
+        }
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(fields.len())
@@ -528,6 +733,146 @@ impl RuntimeContext {
             .get(field as usize)
             .copied()
             .ok_or(NativeValueError::Bounds)
+    }
+
+    /// Resolves a stack-bounded field/index projection synchronously.
+    ///
+    /// Entity-rooted places consume a leading field step. The returned value
+    /// is an envelope copy; no runtime pointer or projection slice is retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale handle, invalid projection kind, type mismatch, or
+    /// bounds failure.
+    pub fn place_resolve(
+        &self,
+        root: KeldValue,
+        entity: Option<KeldEntity>,
+        steps: &[KeldPlaceStep],
+    ) -> Result<KeldValue, NativeValueError> {
+        let (mut current, remaining) = if let Some(entity) = entity {
+            let Some(first) = steps.first() else {
+                return Err(NativeValueError::TypeMismatch);
+            };
+            if first.kind != 0 {
+                return Err(NativeValueError::TypeMismatch);
+            }
+            let field = u32::try_from(first.value).map_err(|_| NativeValueError::Bounds)?;
+            (self.entity_field(entity, field)?.0, &steps[1..])
+        } else {
+            (root, steps)
+        };
+        for step in remaining {
+            current = match step.kind {
+                0 => {
+                    let field = u32::try_from(step.value).map_err(|_| NativeValueError::Bounds)?;
+                    self.struct_field(current, field)?.0
+                }
+                1 => self.list_get(current, step.value)?.0,
+                _ => return Err(NativeValueError::TypeMismatch),
+            };
+        }
+        Ok(current)
+    }
+
+    /// Replaces a projected field or list element and returns its displaced
+    /// envelope. The projection is resolved and mutated during this call only.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale handle, invalid projection kind, type mismatch, or
+    /// bounds failure. The destination is unchanged on any error.
+    pub fn place_replace(
+        &mut self,
+        root: KeldValue,
+        entity: Option<KeldEntity>,
+        steps: &[KeldPlaceStep],
+        value: KeldValue,
+        managed: bool,
+    ) -> Result<(KeldValue, bool), NativeValueError> {
+        if managed {
+            self.validate_handle(value)?;
+        }
+        if let Some(entity) = entity {
+            let Some(first) = steps.first() else {
+                return Err(NativeValueError::TypeMismatch);
+            };
+            if first.kind != 0 {
+                return Err(NativeValueError::TypeMismatch);
+            }
+            if steps.len() == 1 {
+                let field = u32::try_from(first.value).map_err(|_| NativeValueError::Bounds)?;
+                return self.replace_entity_field(entity, field, value, managed);
+            }
+            let field = u32::try_from(first.value).map_err(|_| NativeValueError::Bounds)?;
+            let child = self.entity_field(entity, field)?.0;
+            return self.replace_nested(child, &steps[1..], value, managed);
+        }
+        self.replace_nested(root, steps, value, managed)
+    }
+
+    fn replace_nested(
+        &mut self,
+        current: KeldValue,
+        steps: &[KeldPlaceStep],
+        value: KeldValue,
+        managed: bool,
+    ) -> Result<(KeldValue, bool), NativeValueError> {
+        let Some(first) = steps.first() else {
+            return Err(NativeValueError::TypeMismatch);
+        };
+        match first.kind {
+            0 => {
+                if steps.len() == 1 {
+                    let field = u32::try_from(first.value).map_err(|_| NativeValueError::Bounds)?;
+                    self.replace_struct_field(current, field, value, managed)
+                } else {
+                    let field = u32::try_from(first.value).map_err(|_| NativeValueError::Bounds)?;
+                    let child = self.struct_field(current, field)?.0;
+                    self.replace_nested(child, &steps[1..], value, managed)
+                }
+            }
+            1 => {
+                if steps.len() == 1 {
+                    self.list_replace(current, first.value, value, managed)
+                } else {
+                    let child = self.list_get(current, first.value)?.0;
+                    self.replace_nested(child, &steps[1..], value, managed)
+                }
+            }
+            _ => Err(NativeValueError::TypeMismatch),
+        }
+    }
+
+    fn replace_struct_field(
+        &mut self,
+        value: KeldValue,
+        field: u32,
+        incoming: KeldValue,
+        managed: bool,
+    ) -> Result<(KeldValue, bool), NativeValueError> {
+        if managed {
+            self.validate_handle(incoming)?;
+        }
+        let (index, generation) = decode_handle(value)?;
+        let slot = self
+            .handles
+            .get_mut(index as usize)
+            .ok_or(NativeValueError::InvalidHandle)?;
+        if slot.generation != generation {
+            return Err(NativeValueError::InvalidHandle);
+        }
+        let NativePayload::Struct { fields, .. } = slot
+            .payload
+            .as_mut()
+            .ok_or(NativeValueError::InvalidHandle)?
+        else {
+            return Err(NativeValueError::TypeMismatch);
+        };
+        let destination = fields
+            .get_mut(field as usize)
+            .ok_or(NativeValueError::Bounds)?;
+        Ok(std::mem::replace(destination, (incoming, managed)))
     }
 
     /// Allocates an empty List handle.
@@ -568,13 +913,56 @@ impl RuntimeContext {
             self.validate_handle(element)?;
         }
         let (index, generation) = decode_handle(list)?;
+        let (length, capacity) = self.list_len_capacity(index, generation)?;
+        if length == capacity {
+            let required = length.checked_add(1).ok_or(NativeValueError::Capacity)?;
+            let preferred = required.max(capacity.saturating_mul(2).max(4));
+            let mut reserved = false;
+            if self.allow_test_allocation("list_growth_preferred") {
+                let slot = self
+                    .handles
+                    .get_mut(index as usize)
+                    .ok_or(NativeValueError::InvalidHandle)?;
+                let NativePayload::List { elements } = slot
+                    .payload
+                    .as_mut()
+                    .ok_or(NativeValueError::InvalidHandle)?
+                else {
+                    return Err(NativeValueError::TypeMismatch);
+                };
+                reserved = elements
+                    .try_reserve(preferred.saturating_sub(elements.len()))
+                    .is_ok();
+            }
+            if !reserved
+                && (preferred == required || !self.allow_test_allocation("list_growth_exact"))
+            {
+                return Err(NativeValueError::Allocation);
+            }
+            if !reserved {
+                let slot = self
+                    .handles
+                    .get_mut(index as usize)
+                    .ok_or(NativeValueError::InvalidHandle)?;
+                let NativePayload::List { elements } = slot
+                    .payload
+                    .as_mut()
+                    .ok_or(NativeValueError::InvalidHandle)?
+                else {
+                    return Err(NativeValueError::TypeMismatch);
+                };
+                if elements
+                    .try_reserve(required.saturating_sub(elements.len()))
+                    .is_err()
+                {
+                    return Err(NativeValueError::Allocation);
+                }
+            }
+        }
         let slot = self
             .handles
             .get_mut(index as usize)
             .ok_or(NativeValueError::InvalidHandle)?;
-        if slot.generation != generation {
-            return Err(NativeValueError::InvalidHandle);
-        }
         let NativePayload::List { elements } = slot
             .payload
             .as_mut()
@@ -582,9 +970,6 @@ impl RuntimeContext {
         else {
             return Err(NativeValueError::TypeMismatch);
         };
-        elements
-            .try_reserve(1)
-            .map_err(|_| NativeValueError::Allocation)?;
         elements.push((element, managed));
         Ok(())
     }
@@ -688,16 +1073,44 @@ impl RuntimeContext {
     pub fn list_reserve(
         &mut self,
         list: KeldValue,
-        additional: u64,
+        additional: i64,
     ) -> Result<(), NativeValueError> {
         let (slot_index, generation) = decode_handle(list)?;
+        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
+        let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
+        let required = length
+            .checked_add(additional)
+            .ok_or(NativeValueError::Capacity)?;
+        if required <= capacity {
+            return Ok(());
+        }
+        let preferred = required.max(capacity.saturating_mul(2).max(4));
+        if self.allow_test_allocation("list_growth_preferred") {
+            let slot = self
+                .handles
+                .get_mut(slot_index as usize)
+                .ok_or(NativeValueError::InvalidHandle)?;
+            let NativePayload::List { elements } = slot
+                .payload
+                .as_mut()
+                .ok_or(NativeValueError::InvalidHandle)?
+            else {
+                return Err(NativeValueError::TypeMismatch);
+            };
+            if elements
+                .try_reserve(preferred.saturating_sub(elements.len()))
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        if preferred == required || !self.allow_test_allocation("list_growth_exact") {
+            return Err(NativeValueError::Allocation);
+        }
         let slot = self
             .handles
             .get_mut(slot_index as usize)
             .ok_or(NativeValueError::InvalidHandle)?;
-        if slot.generation != generation {
-            return Err(NativeValueError::InvalidHandle);
-        }
         let NativePayload::List { elements } = slot
             .payload
             .as_mut()
@@ -705,17 +1118,13 @@ impl RuntimeContext {
         else {
             return Err(NativeValueError::TypeMismatch);
         };
-        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
-        let required = elements
-            .len()
-            .checked_add(additional)
-            .ok_or(NativeValueError::Capacity)?;
-        if required <= elements.capacity() {
+        if elements
+            .try_reserve(required.saturating_sub(elements.len()))
+            .is_ok()
+        {
             return Ok(());
         }
-        elements
-            .try_reserve(required.saturating_sub(elements.len()))
-            .map_err(|_| NativeValueError::Allocation)
+        Err(NativeValueError::Allocation)
     }
 
     /// Tries preferred then exact List growth without recording a fault.
@@ -727,47 +1136,67 @@ impl RuntimeContext {
     pub fn list_try_reserve(
         &mut self,
         list: KeldValue,
-        additional: u64,
+        additional: i64,
     ) -> Result<bool, NativeValueError> {
         let (slot_index, generation) = decode_handle(list)?;
-        let slot = self
-            .handles
-            .get_mut(slot_index as usize)
-            .ok_or(NativeValueError::InvalidHandle)?;
-        if slot.generation != generation {
-            return Err(NativeValueError::InvalidHandle);
-        }
-        let NativePayload::List { elements } = slot
-            .payload
-            .as_mut()
-            .ok_or(NativeValueError::InvalidHandle)?
-        else {
-            return Err(NativeValueError::TypeMismatch);
+        // `try_reserve` is the non-faulting form: the interpreter returns
+        // `false` for a negative or otherwise unrepresentable request rather
+        // than turning the capacity check into a language fault. Handle and
+        // type errors remain hard runtime failures and are returned below.
+        let Ok(additional) = usize::try_from(additional) else {
+            return Ok(false);
         };
-        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
-        let required = elements
-            .len()
-            .checked_add(additional)
-            .ok_or(NativeValueError::Capacity)?;
-        if required <= elements.capacity() {
+        let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
+        let Some(required) = length.checked_add(additional) else {
+            return Ok(false);
+        };
+        let Some(bytes) = required.checked_mul(std::mem::size_of::<(KeldValue, bool)>()) else {
+            return Ok(false);
+        };
+        if bytes > isize::MAX as usize {
+            return Ok(false);
+        }
+        if required <= capacity {
             return Ok(true);
         }
-        let preferred = elements
-            .len()
-            .checked_mul(2)
-            .map_or(required, |double| double.max(required));
-        if elements
-            .try_reserve(preferred.saturating_sub(elements.len()))
-            .is_ok()
-        {
-            return Ok(true);
+        let preferred = required.max(capacity.saturating_mul(2).max(4));
+        if self.allow_test_allocation("list_growth_preferred") {
+            let slot = self
+                .handles
+                .get_mut(slot_index as usize)
+                .ok_or(NativeValueError::InvalidHandle)?;
+            let NativePayload::List { elements } = slot
+                .payload
+                .as_mut()
+                .ok_or(NativeValueError::InvalidHandle)?
+            else {
+                return Err(NativeValueError::TypeMismatch);
+            };
+            if elements
+                .try_reserve(preferred.saturating_sub(elements.len()))
+                .is_ok()
+            {
+                return Ok(true);
+            }
         }
-        if preferred != required
-            && elements
+        if preferred != required && self.allow_test_allocation("list_growth_exact") {
+            let slot = self
+                .handles
+                .get_mut(slot_index as usize)
+                .ok_or(NativeValueError::InvalidHandle)?;
+            let NativePayload::List { elements } = slot
+                .payload
+                .as_mut()
+                .ok_or(NativeValueError::InvalidHandle)?
+            else {
+                return Err(NativeValueError::TypeMismatch);
+            };
+            if elements
                 .try_reserve(required.saturating_sub(elements.len()))
                 .is_ok()
-        {
-            return Ok(true);
+            {
+                return Ok(true);
+            }
         }
         Ok(false)
     }
@@ -811,6 +1240,9 @@ impl RuntimeContext {
         if value.words[0] == 0 {
             return Ok(value);
         }
+        if !self.allow_test_allocation("copy") {
+            return Err(NativeValueError::Allocation);
+        }
         let payload = self.payload(value)?.clone();
         let copied = match payload {
             NativePayload::Text(bytes) => NativePayload::Text(bytes),
@@ -821,7 +1253,17 @@ impl RuntimeContext {
                     .map_err(|_| NativeValueError::Allocation)?;
                 for (field, managed) in fields {
                     let field = if managed {
-                        self.copy_managed(field)?
+                        match self.copy_managed(field) {
+                            Ok(field) => field,
+                            Err(error) => {
+                                for (copied, copied_managed) in copied_fields {
+                                    if copied_managed {
+                                        let _ = self.drop_managed(copied);
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        }
                     } else {
                         field
                     };
@@ -839,7 +1281,17 @@ impl RuntimeContext {
                     .map_err(|_| NativeValueError::Allocation)?;
                 for (element, managed) in elements {
                     let element = if managed {
-                        self.copy_managed(element)?
+                        match self.copy_managed(element) {
+                            Ok(element) => element,
+                            Err(error) => {
+                                for (copied, copied_managed) in copied_elements {
+                                    if copied_managed {
+                                        let _ = self.drop_managed(copied);
+                                    }
+                                }
+                                return Err(error);
+                            }
+                        }
                     } else {
                         element
                     };
@@ -850,7 +1302,13 @@ impl RuntimeContext {
                 }
             }
         };
-        self.allocate(copied)
+        if !self.allow_test_allocation("handle") {
+            let _ = self.drop_payload(copied);
+            return Err(NativeValueError::Allocation);
+        }
+        let mut result = self.allocate_payload(copied)?;
+        result.optional_some_layers = value.optional_some_layers;
+        Ok(result)
     }
 
     /// Drops one managed handle and recursively releases owned children.
@@ -872,17 +1330,7 @@ impl RuntimeContext {
         }
         let payload = slot.payload.take().ok_or(NativeValueError::InvalidHandle)?;
         self.reusable_handles.push(index);
-        match payload {
-            NativePayload::Text(_) => {}
-            NativePayload::Struct { fields, .. } | NativePayload::List { elements: fields } => {
-                for (field, managed) in fields {
-                    if managed {
-                        self.drop_managed(field)?;
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.drop_payload(payload)
     }
 
     /// Moves one managed envelope and clears the source representation.
@@ -894,6 +1342,13 @@ impl RuntimeContext {
     }
 
     fn allocate(&mut self, payload: NativePayload) -> Result<KeldValue, NativeValueError> {
+        if !self.allow_test_allocation("handle") {
+            return Err(NativeValueError::Allocation);
+        }
+        self.allocate_payload(payload)
+    }
+
+    fn allocate_payload(&mut self, payload: NativePayload) -> Result<KeldValue, NativeValueError> {
         if let Some(index) = self.reusable_handles.pop() {
             let slot = self
                 .handles
@@ -917,6 +1372,20 @@ impl RuntimeContext {
         Ok(encode_handle(index, 1))
     }
 
+    fn drop_payload(&mut self, payload: NativePayload) -> Result<(), NativeValueError> {
+        match payload {
+            NativePayload::Text(_) => Ok(()),
+            NativePayload::Struct { fields, .. } | NativePayload::List { elements: fields } => {
+                for (field, managed) in fields {
+                    if managed {
+                        self.drop_managed(field)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn payload(&self, value: KeldValue) -> Result<&NativePayload, NativeValueError> {
         let (index, generation) = decode_handle(value)?;
         let slot = self
@@ -929,8 +1398,34 @@ impl RuntimeContext {
         slot.payload.as_ref().ok_or(NativeValueError::InvalidHandle)
     }
 
+    fn list_len_capacity(
+        &self,
+        index: u32,
+        generation: u32,
+    ) -> Result<(usize, usize), NativeValueError> {
+        let slot = self
+            .handles
+            .get(index as usize)
+            .ok_or(NativeValueError::InvalidHandle)?;
+        if slot.generation != generation {
+            return Err(NativeValueError::InvalidHandle);
+        }
+        let NativePayload::List { elements } = slot
+            .payload
+            .as_ref()
+            .ok_or(NativeValueError::InvalidHandle)?
+        else {
+            return Err(NativeValueError::TypeMismatch);
+        };
+        Ok((elements.len(), elements.capacity()))
+    }
+
     fn validate_handle(&self, value: KeldValue) -> Result<(), NativeValueError> {
-        self.payload(value).map(|_| ())
+        if value.words[0] == 0 {
+            Ok(())
+        } else {
+            self.payload(value).map(|_| ())
+        }
     }
 }
 

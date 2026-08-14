@@ -14,7 +14,7 @@ bytes
   -> VerifiedStorageModule
   -> executable Module
   -> IR validation
-  -> Interpreter
+  -> Interpreter or Native-1 LLVM lowering
 ```
 
 `keld-cli::compile_source` owns orchestration. Each stage receives only the
@@ -22,6 +22,23 @@ successful output of the previous stage. Diagnostics are sorted, the pipeline
 stops after the first stage that reports an error, and no invalid input is
 lowered or executed. `check` runs every static stage through IR validation.
 `run` constructs an interpreter only from validated IR.
+
+The native path starts at the same validated `keld_ir::Module`:
+
+```text
+validated Module + SourceMetadata
+  -> keld-native-backend::build_executable
+  -> keld-native-llvm (LLVM C API adapter)
+  -> COFF object
+  -> MinGW GCC
+  -> program.exe + keld_runtime_v1.dll
+```
+
+The backend re-validates the module before creating LLVM state. It may lower
+registers, blocks, and explicit runtime instructions, but it does not inspect
+flow, lifecycle, storage, or interpreter state to infer policy. Raw pointers
+and LLVM C API calls are confined to `keld-native-ffi` and `keld-native-llvm`;
+the ABI records and runtime core are safe Rust boundaries.
 
 ## Crate ownership
 
@@ -37,6 +54,12 @@ lowered or executed. `check` runs every static stage through IR validation.
 | `keld-ir` | `VerifiedStorageModule` | executable IR with explicit move/loan/install/drop, transactional entity-field replacement, checked List operations, stable textual dump, and exhaustive role/liveness validation | source recovery, runtime policy, or executing unvalidated modules |
 | `keld-runtime` | opaque branded identities, lifecycle IDs, type IDs, payloads | segmented entity store, weak links, deterministic cleanup | source-language types, IR, diagnostics, or user-visible control flow |
 | `keld-interpreter` | validated executable `Module` | explicit-frame execution result or classified fault | parsing, static recovery, accepting invalid IR, or language extensions |
+| `keld-native-abi` | fixed C-layout records | versioned value/entity/lifecycle ABI | Rust layout or unwinding across the DLL |
+| `keld-native-runtime` | ABI values and fallible operations | generational handles, Text/List/struct/entity storage | source-language policy or IR reconstruction |
+| `keld-native-ffi` | raw C ABI calls | `keld_runtime_v1.dll` exports and status/fault protocol | LLVM lowering or lifecycle analysis |
+| `keld-native-ffi-test` | the same adapter with the test-controls feature | `keld_runtime_v1_test.dll` allocation observations | production failure injection or semantic behavior |
+| `keld-native-llvm` | safe lowering requests | verified LLVM module/object emission | runtime ownership or source recovery |
+| `keld-native-backend` | validated `keld_ir::Module` and source metadata | linked Windows executable | querying verifier/interpreter internals or inventing cleanup |
 | `keld-cli` | OS arguments, selected file bytes | `Compilation`, CLI output, documented exit status | new syntax, type, lifecycle, numeric, or runtime semantics |
 
 The dependency graph is acyclic. `keld-source` and `keld-numeric` are semantic
@@ -85,8 +108,9 @@ The interpreter milestone verifies nested `List[List[Int]]` and
 `List[List[Text]]` transfer, copy, projected loans and replacements, removal,
 clearing, bounds, reservation retry, and cleanup. `Map`, `Set`, `Slice`,
 iterators, `for`, substrings, and Text integer indexing remain outside the
-bootstrap surface. Native and WebAssembly differential execution is a later
-LLVM backend gate and is not claimed by this interpreter milestone.
+bootstrap surface. Native-1 executes the covered Windows GNU fixtures through
+the same validated IR; broader cross-engine allocation schedules remain a
+separate acceptance gate. WebAssembly and other targets remain deferred.
 
 ## Diagnostic ownership
 

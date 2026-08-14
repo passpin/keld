@@ -1,6 +1,6 @@
 use keld_native_abi::{
-    ABI_VERSION, FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink, KeldValue,
-    RuntimeStatus,
+    ABI_VERSION, FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink,
+    KeldPlaceStep, KeldValue, RuntimeStatus,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -23,6 +23,8 @@ fn versioned_records_have_the_frozen_windows_layout() {
     assert_eq!(size_of::<KeldValue>(), 32);
     assert_eq!(offset_of!(KeldValue, words), 8);
     assert_eq!(size_of::<KeldFault>(), 8);
+    assert_eq!(size_of::<KeldPlaceStep>(), 16);
+    assert_eq!(offset_of!(KeldPlaceStep, value), 8);
 }
 
 #[test]

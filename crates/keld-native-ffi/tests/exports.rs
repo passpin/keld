@@ -1,5 +1,5 @@
 use keld_native_abi::KeldFault;
-use keld_native_ffi::{
+use keld_runtime_v1::{
     keld_rt_v1_abi_version, keld_rt_v1_context_destroy, keld_rt_v1_context_fault,
     keld_rt_v1_context_new, keld_rt_v1_context_status, keld_rt_v1_print_int,
 };
