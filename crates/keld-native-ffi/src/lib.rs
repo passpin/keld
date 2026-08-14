@@ -17,6 +17,13 @@ static PENDING_CONTEXT_SITE: AtomicU32 = AtomicU32::new(0);
 /// Returns the runtime ABI version without exposing Rust layout or panics.
 #[unsafe(no_mangle)]
 pub extern "C" fn keld_rt_v1_abi_version() -> u32 {
+    #[cfg(feature = "test-controls")]
+    if let Some(version) = std::env::var("KELD_TEST_ABI_VERSION")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    {
+        return version;
+    }
     ABI_VERSION
 }
 

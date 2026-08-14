@@ -7,7 +7,7 @@ use keld_ir::{
     IntUnaryOp, IrBlockId, IrType, Module, ParameterIndex, Register, RegisterStorage, Terminator,
     validate,
 };
-use keld_native_abi::{RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
+use keld_native_abi::{ABI_VERSION, RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
 use keld_native_llvm::{self, OptimizationLevel as LlvmOptimizationLevel};
 use keld_source::{BytePos, Diagnostic, SourceText, Span};
 use std::collections::{BTreeMap, BTreeSet};
@@ -314,6 +314,150 @@ fn resolve_gcc(explicit: Option<&Path>) -> Result<PathBuf, BackendError> {
     Ok(candidate)
 }
 
+fn runtime_dll_error(path: &Path) -> BackendError {
+    BackendError::Toolchain(format!(
+        "runtime DLL must be a valid x86-64 PE exporting keld_rt_v1_abi_version: {}",
+        path.display()
+    ))
+}
+
+fn read_pe_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let value = bytes.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn read_pe_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let value = bytes.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+fn pe_rva_to_file_offset(
+    bytes: &[u8],
+    section_table: usize,
+    section_count: u16,
+    rva: u32,
+) -> Option<usize> {
+    for index in 0..usize::from(section_count) {
+        let section = section_table.checked_add(index.checked_mul(40)?)?;
+        let virtual_size = read_pe_u32(bytes, section.checked_add(8)?)?;
+        let virtual_address = read_pe_u32(bytes, section.checked_add(12)?)?;
+        let raw_size = read_pe_u32(bytes, section.checked_add(16)?)?;
+        let raw_pointer = read_pe_u32(bytes, section.checked_add(20)?)?;
+        let Some(delta) = rva.checked_sub(virtual_address) else {
+            continue;
+        };
+        if delta >= virtual_size.max(raw_size) {
+            continue;
+        }
+        let file_offset = raw_pointer.checked_add(delta)?;
+        let file_offset = usize::try_from(file_offset).ok()?;
+        if file_offset < bytes.len() {
+            return Some(file_offset);
+        }
+    }
+    None
+}
+
+fn validate_runtime_dll(path: &Path) -> Result<(), BackendError> {
+    let bytes = std::fs::read(path)?;
+    let valid_dos = bytes.get(0..2) == Some(b"MZ");
+    let Some(pe_offset) = read_pe_u32(&bytes, 0x3c).and_then(|value| usize::try_from(value).ok())
+    else {
+        return Err(runtime_dll_error(path));
+    };
+    let valid_signature = bytes.get(pe_offset..pe_offset.saturating_add(4)) == Some(b"PE\0\0");
+    let Some(coff) = pe_offset.checked_add(4) else {
+        return Err(runtime_dll_error(path));
+    };
+    let valid_machine = read_pe_u16(&bytes, coff) == Some(0x8664);
+    let Some(section_count) = read_pe_u16(&bytes, coff.saturating_add(2)) else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(optional_size) = read_pe_u16(&bytes, coff.saturating_add(16)) else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(optional) = coff.checked_add(20) else {
+        return Err(runtime_dll_error(path));
+    };
+    let valid_optional = optional_size >= 120 && read_pe_u16(&bytes, optional) == Some(0x20b);
+    let Some(export_rva) = read_pe_u32(&bytes, optional.saturating_add(112)) else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(section_table) = optional.checked_add(usize::from(optional_size)) else {
+        return Err(runtime_dll_error(path));
+    };
+    if !valid_dos || !valid_signature || !valid_machine || !valid_optional || export_rva == 0 {
+        return Err(runtime_dll_error(path));
+    }
+    let Some(export_directory) =
+        pe_rva_to_file_offset(&bytes, section_table, section_count, export_rva)
+    else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(names_rva) = read_pe_u32(&bytes, export_directory.saturating_add(32)) else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(name_count) = read_pe_u32(&bytes, export_directory.saturating_add(24)) else {
+        return Err(runtime_dll_error(path));
+    };
+    let Some(name_count) = usize::try_from(name_count).ok() else {
+        return Err(runtime_dll_error(path));
+    };
+    if name_count > bytes.len() / 4 {
+        return Err(runtime_dll_error(path));
+    }
+    let Some(names) = pe_rva_to_file_offset(&bytes, section_table, section_count, names_rva) else {
+        return Err(runtime_dll_error(path));
+    };
+    for index in 0..name_count {
+        let Some(name_entry) = names.checked_add(index.saturating_mul(4)) else {
+            return Err(runtime_dll_error(path));
+        };
+        let Some(export_name_rva) = read_pe_u32(&bytes, name_entry) else {
+            return Err(runtime_dll_error(path));
+        };
+        let Some(export_name_offset) =
+            pe_rva_to_file_offset(&bytes, section_table, section_count, export_name_rva)
+        else {
+            return Err(runtime_dll_error(path));
+        };
+        let Some(end) = bytes.get(export_name_offset..).and_then(|tail| {
+            tail.iter()
+                .position(|byte| *byte == 0)
+                .map(|offset| export_name_offset + offset)
+        }) else {
+            return Err(runtime_dll_error(path));
+        };
+        if bytes.get(export_name_offset..end) == Some(b"keld_rt_v1_abi_version") {
+            return Ok(());
+        }
+    }
+    Err(runtime_dll_error(path))
+}
+
+fn contains_ascii_case_insensitive(bytes: &[u8], needle: &[u8]) -> bool {
+    bytes.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
+    let bytes = std::fs::read(path)?;
+    if !bytes.starts_with(b"!<arch>\n")
+        || !contains_ascii_case_insensitive(bytes.as_slice(), RUNTIME_DLL_NAME.as_bytes())
+        || !contains_ascii_case_insensitive(&bytes, b"keld_rt_v1_abi_version")
+    {
+        return Err(BackendError::Toolchain(format!(
+            "runtime import library must be a GNU archive for {RUNTIME_DLL_NAME} exporting keld_rt_v1_abi_version: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn require_runtime_artifacts(request: &BuildRequest) -> Result<(), BackendError> {
     let dll_name = request
         .runtime_dll
@@ -326,6 +470,7 @@ fn require_runtime_artifacts(request: &BuildRequest) -> Result<(), BackendError>
             request.runtime_dll.display()
         )));
     }
+    validate_runtime_dll(&request.runtime_dll)?;
     let import_name = request
         .runtime_import_library
         .file_name()
@@ -339,6 +484,7 @@ fn require_runtime_artifacts(request: &BuildRequest) -> Result<(), BackendError>
             request.runtime_import_library.display()
         )));
     }
+    validate_runtime_import_library(&request.runtime_import_library)?;
     Ok(())
 }
 
@@ -496,7 +642,11 @@ impl<'module> ScalarLowerer<'module> {
             faults: BTreeSet::new(),
             text_literals: BTreeMap::new(),
             view_entities: BTreeMap::new(),
-            block_exit_labels: BTreeMap::new(),
+            block_exit_labels: function
+                .blocks
+                .iter()
+                .map(|block| (block.id, format!("exit_bb{}", block.id.0)))
+                .collect(),
             home_trackers: BTreeMap::new(),
             slots_emitted: false,
         }
@@ -1027,12 +1177,14 @@ impl<'module> ScalarLowerer<'module> {
                 })?,
             )?;
         }
-        let result = self.emit_terminator(&block.terminator);
-        if result.is_ok() {
-            self.block_exit_labels
-                .insert(block.id, self.current_label.clone());
-        }
-        result
+        let exit_label = self
+            .block_exit_labels
+            .get(&block.id)
+            .cloned()
+            .expect("every lowered block has a stable exit label");
+        self.line(format!("br label %{exit_label}"));
+        self.label(exit_label);
+        self.emit_terminator(&block.terminator)
     }
 
     fn emit_managed_slots(&mut self) {
@@ -2956,6 +3108,16 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let mut ir = format!(
         "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n{literal_ir}\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_destroy(ptr)\ndeclare i32 @keld_rt_v1_context_fault_parts(ptr, ptr, ptr)\ndeclare i32 @keld_rt_v1_value_copy(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_value_drop(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_new(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_text_byte_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_is_empty(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_equal(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_concat(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\n{functions_ir}\ndefine i32 @main() {{\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %context_ready, label %no_context\nno_context:\n  ret i32 70\ncontext_ready:\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %destroy_success, label %destroy_internal\ndestroy_success:\n  %destroy_success_status = call i32 @keld_rt_v1_context_destroy(ptr %context)\n  %destroy_success_ok = icmp eq i32 %destroy_success_status, 0\n  br i1 %destroy_success_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %destroy_internal\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
     );
+    ir = ir.replace(
+        "declare ptr @keld_rt_v1_context_new()\n",
+        "declare i32 @keld_rt_v1_abi_version()\ndeclare ptr @keld_rt_v1_context_new()\n",
+    );
+    let old_abi_bootstrap =
+        "  %out_location = alloca i32\n  %context = call ptr @keld_rt_v1_context_new()\n";
+    let new_abi_bootstrap = format!(
+        "  %out_location = alloca i32\n  %runtime_abi_version = call i32 @keld_rt_v1_abi_version()\n  %runtime_abi_ok = icmp eq i32 %runtime_abi_version, {ABI_VERSION}\n  br i1 %runtime_abi_ok, label %context_bootstrap, label %internal_main\ncontext_bootstrap:\n  %context = call ptr @keld_rt_v1_context_new()\n"
+    );
+    ir = ir.replace(old_abi_bootstrap, &new_abi_bootstrap);
     let list_declarations = "declare i32 @keld_rt_v1_context_root_lifecycle(ptr, ptr)\ndeclare i32 @keld_rt_v1_begin_lifecycle(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_end_lifecycle(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_new(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_push(ptr, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_get(ptr, ptr, i64, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_replace(ptr, ptr, i64, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_try_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_clear(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_reserve(ptr, ptr, i64, i32)\ndeclare i32 @keld_rt_v1_list_try_reserve(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_new(ptr, i32, ptr, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_place_resolve(ptr, ptr, i8, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_place_replace(ptr, ptr, i8, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_home_track(ptr, ptr, i32, i32)\ndeclare i32 @keld_rt_v1_home_untrack(ptr, ptr, i32, i32)\ndeclare i32 @keld_rt_v1_cleanup_scope(ptr, ptr, ptr, ptr, i32, i32, i32)\ndeclare i32 @keld_rt_v1_allocate_entity(ptr, i32, ptr, ptr, i32, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_to_link(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_resolve_link(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_replace_field(ptr, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_keep_entity(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_retire_entity(ptr, ptr, i32)\n";
     ir = ir.replace(
         "declare i32 @keld_rt_v1_print_int(i64)\n",

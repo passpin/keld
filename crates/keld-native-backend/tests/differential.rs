@@ -818,6 +818,10 @@ fn source_surface_cases() -> &'static [(&'static str, &'static str)] {
             "fn main() -> Int { let items: List[Int] = List(); items.reserve(3); items.push(7); let copied = items[0]; let _optional = items.get(0); items[0] = 8; let removed = items.remove(0); items.push(9); let ok = items.try_reserve(1); let _maybe_removed = items.try_remove(0); items.clear(); if ok { return copied + removed } else { return copied + removed } }\n",
         ),
         (
+            "capacity_overflow_surface",
+            "fn main() -> Int { let items: List[Int] = List(); items.reserve(9223372036854775807); return 0 }\n",
+        ),
+        (
             "nested_projected_surface",
             "fn main() -> Int { let inner: List[Int] = List(); inner.push(1); let outer: List[List[Int]] = List(); outer.push(take inner); outer[0][0] = 7; outer[0].push(8); let removed = outer[0].remove(0); return removed + outer[0][0] }\n",
         ),

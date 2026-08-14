@@ -1011,7 +1011,7 @@ impl RuntimeContext {
         let (index, generation) = decode_handle(list)?;
         let (length, capacity) = self.list_len_capacity(index, generation)?;
         if length == capacity {
-            let required = length.checked_add(1).ok_or(NativeValueError::Capacity)?;
+            let required = Self::required_list_capacity(length, 1)?;
             let preferred = required.max(capacity.saturating_mul(2).max(4));
             let mut reserved = false;
             if self.allow_test_allocation(AllocationPhase::ListGrowthPreferred) {
@@ -1174,10 +1174,7 @@ impl RuntimeContext {
     ) -> Result<(), NativeValueError> {
         let (slot_index, generation) = decode_handle(list)?;
         let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
-        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
-        let required = length
-            .checked_add(additional)
-            .ok_or(NativeValueError::Capacity)?;
+        let required = Self::required_list_capacity(length, additional)?;
         if required <= capacity {
             return Ok(());
         }
@@ -1241,18 +1238,9 @@ impl RuntimeContext {
         // than turning the capacity check into a language fault. Handle and
         // type errors remain hard runtime failures and are returned below.
         let (length, capacity) = self.list_len_capacity(slot_index, generation)?;
-        let Ok(additional) = usize::try_from(additional) else {
+        let Ok(required) = Self::required_list_capacity(length, additional) else {
             return Ok(false);
         };
-        let Some(required) = length.checked_add(additional) else {
-            return Ok(false);
-        };
-        let Some(bytes) = required.checked_mul(std::mem::size_of::<(KeldValue, bool)>()) else {
-            return Ok(false);
-        };
-        if bytes > isize::MAX as usize {
-            return Ok(false);
-        }
         if required <= capacity {
             return Ok(true);
         }
@@ -1544,6 +1532,21 @@ impl RuntimeContext {
             return Err(NativeValueError::TypeMismatch);
         };
         Ok((elements.len(), elements.capacity()))
+    }
+
+    fn required_list_capacity(length: usize, additional: i64) -> Result<usize, NativeValueError> {
+        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
+        let required = length
+            .checked_add(additional)
+            .ok_or(NativeValueError::Capacity)?;
+        let _source_length = i64::try_from(required).map_err(|_| NativeValueError::Capacity)?;
+        let bytes = required
+            .checked_mul(std::mem::size_of::<(KeldValue, bool)>())
+            .ok_or(NativeValueError::Capacity)?;
+        if bytes > isize::MAX as usize {
+            return Err(NativeValueError::Capacity);
+        }
+        Ok(required)
     }
 
     fn validate_handle(&self, value: KeldValue) -> Result<(), NativeValueError> {

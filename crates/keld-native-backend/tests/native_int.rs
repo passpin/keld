@@ -3,7 +3,7 @@ use keld_ir::{
     IrType, Module, Register, RegisterStorage, Terminator,
 };
 use keld_native_backend::{
-    BuildRequest, NativeArtifact, OptimizationLevel, SourceMetadata, build_executable,
+    BackendError, BuildRequest, NativeArtifact, OptimizationLevel, SourceMetadata, build_executable,
 };
 use keld_source::{SourceId, SourceText, Span};
 use std::path::{Path, PathBuf};
@@ -1287,6 +1287,185 @@ fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
         assert!(child.status.success(), "native status: {}", child.status);
         assert_eq!(child.stdout, b"7\n");
         assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn reverse_order_phi_after_checked_predecessor_runs_at_both_optimization_levels() {
+    let (runtime_dll, import_library) = runtime_artifacts("reverse-phi");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("reverse-phi.keld"),
+        source: SourceText::from_str(SourceId(0), "reverse phi\n").expect("source"),
+    };
+    let module = scalar_module(
+        vec![
+            IrType::Lifecycle,
+            IrType::Bool,
+            IrType::Int,
+            IrType::Int,
+            IrType::Int,
+        ],
+        vec![
+            block(
+                0,
+                vec![
+                    Instruction::ConstBool {
+                        dst: Register(1),
+                        value: true,
+                        span: span(),
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(2),
+                        value: 4,
+                        span: span(),
+                    },
+                ],
+                Terminator::Branch {
+                    condition: Register(1),
+                    then_block: IrBlockId(1),
+                    else_block: IrBlockId(2),
+                },
+            ),
+            block(
+                1,
+                vec![Instruction::Phi {
+                    dst: Register(4),
+                    inputs: vec![(IrBlockId(0), Register(2)), (IrBlockId(2), Register(3))],
+                    span: span(),
+                }],
+                Terminator::Return(Some(Register(4))),
+            ),
+            block(
+                2,
+                vec![Instruction::CheckedBinaryInt {
+                    dst: Register(3),
+                    op: IntBinaryOp::Add,
+                    lhs: Register(2),
+                    rhs: Register(2),
+                    span: span(),
+                }],
+                Terminator::Goto(IrBlockId(1)),
+            ),
+        ],
+    );
+    let directory = runtime_dll.parent().expect("runtime directory");
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = directory.join(format!("reverse-phi-{index}.exe"));
+        let artifact = build_executable(
+            &module,
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("reverse-order Phi native build");
+        let child = Command::new(&artifact.executable)
+            .env("PATH", "C:\\Windows\\System32;C:\\Windows")
+            .output()
+            .expect("reverse-order Phi native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"4\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn invalid_runtime_dll_is_rejected_before_link() {
+    let (runtime_dll, import_library) = runtime_artifacts("invalid-runtime");
+    std::fs::write(&runtime_dll, b"not a PE and not ABI version 1").expect("invalid DLL");
+    let output = runtime_dll
+        .parent()
+        .expect("runtime directory")
+        .join("invalid-runtime.exe");
+    let error = build_executable(
+        &const_module(7),
+        &metadata(),
+        &request(
+            &output,
+            &runtime_dll,
+            &import_library,
+            OptimizationLevel::O0,
+        ),
+    )
+    .expect_err("same-named non-PE runtime must be rejected");
+    assert!(matches!(error, BackendError::Toolchain(_)));
+    assert!(error.to_string().contains("x86-64 PE"));
+    assert!(!output.exists());
+}
+
+#[test]
+fn import_library_with_wrong_dll_name_is_rejected() {
+    let (runtime_dll, import_library) = runtime_artifacts("wrong-import");
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let definition = directory.join("runtime.def");
+    let contents = std::fs::read_to_string(&definition)
+        .expect("runtime export definition")
+        .replace("LIBRARY keld_runtime_v1.dll", "LIBRARY other_runtime.dll");
+    std::fs::write(&definition, contents).expect("wrong runtime export definition");
+    let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
+    let status = Command::new(dlltool)
+        .args([
+            "--input-def",
+            definition.to_str().expect("definition path"),
+            "--dllname",
+            "other_runtime.dll",
+            "--output-lib",
+        ])
+        .arg(&import_library)
+        .arg(&runtime_dll)
+        .status()
+        .expect("dlltool");
+    assert!(status.success(), "dlltool failed: {status}");
+    let output = directory.join("wrong-import.exe");
+    let error = build_executable(
+        &const_module(7),
+        &metadata(),
+        &request(
+            &output,
+            &runtime_dll,
+            &import_library,
+            OptimizationLevel::O0,
+        ),
+    )
+    .expect_err("wrong import-library DLL must be rejected");
+    assert!(matches!(error, BackendError::Toolchain(_)));
+    assert!(error.to_string().contains("keld_runtime_v1.dll"));
+    assert!(!output.exists());
+}
+
+#[test]
+fn native_program_rejects_runtime_abi_version_mismatch() {
+    let (runtime_dll, import_library) = test_runtime_artifacts("abi-mismatch");
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("abi-mismatch.keld"),
+        source: SourceText::from_str(SourceId(0), "abi mismatch\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = directory.join(format!("abi-mismatch-{index}.exe"));
+        let observation = directory.join(format!("abi-mismatch-{index}.observation"));
+        let artifact = build_executable(
+            &const_module(7),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("ABI mismatch native build");
+        let child = Command::new(&artifact.executable)
+            .env("KELD_TEST_ABI_VERSION", "2")
+            .env("KELD_TEST_OBSERVATION", &observation)
+            .output()
+            .expect("ABI mismatch native executable");
+        assert_eq!(child.status.code(), Some(70));
+        assert!(child.stdout.is_empty());
+        assert!(child.stderr.is_empty());
+        assert!(
+            !observation.exists(),
+            "ABI mismatch must precede context setup"
+        );
     }
 }
 
