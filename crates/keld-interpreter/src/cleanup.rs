@@ -149,10 +149,10 @@ pub(crate) fn cleanup_value(
     path: CleanupPath,
     scratch: &mut CleanupScratch,
     trace: Option<&mut CleanupTrace>,
-) {
+) -> Result<(), ()> {
     scratch.work.clear();
-    scratch.work.push(CleanupTask::Value { value, path });
-    cleanup_work(module, &mut scratch.work, trace);
+    push_cleanup_task(&mut scratch.work, CleanupTask::Value { value, path })?;
+    cleanup_work(module, &mut scratch.work, trace)
 }
 
 pub(crate) fn cleanup_payload(
@@ -160,36 +160,45 @@ pub(crate) fn cleanup_payload(
     payload: EntityPayload,
     scratch: &mut CleanupScratch,
     trace: Option<&mut CleanupTrace>,
-) {
+) -> Result<(), ()> {
     let EntityPayload { definition, fields } = payload;
     scratch.work.clear();
-    scratch.work.push(CleanupTask::EntityFields {
-        definition,
-        fields: fields.into_iter(),
-    });
-    cleanup_work(module, &mut scratch.work, trace);
+    push_cleanup_task(
+        &mut scratch.work,
+        CleanupTask::EntityFields {
+            definition,
+            fields: fields.into_iter(),
+        },
+    )?;
+    cleanup_work(module, &mut scratch.work, trace)
 }
 
 fn cleanup_work(
     module: &Module,
     work: &mut Vec<CleanupTask>,
     mut trace: Option<&mut CleanupTrace>,
-) {
+) -> Result<(), ()> {
     while let Some(task) = work.pop() {
         match task {
             CleanupTask::Value { value, path } => {
                 record_path(path, trace.as_deref_mut());
                 match value.into_kind() {
                     ValueKind::Struct { definition, fields } => {
-                        work.push(CleanupTask::StructFields {
-                            definition,
-                            fields: fields.into_iter(),
-                        });
+                        push_cleanup_task(
+                            work,
+                            CleanupTask::StructFields {
+                                definition,
+                                fields: fields.into_iter(),
+                            },
+                        )?;
                     }
                     ValueKind::List(elements) => {
-                        work.push(CleanupTask::ListElements {
-                            elements: elements.into_elements(),
-                        });
+                        push_cleanup_task(
+                            work,
+                            CleanupTask::ListElements {
+                                elements: elements.into_elements(),
+                            },
+                        )?;
                     }
                     ValueKind::Text(text) => record(
                         trace.as_deref_mut(),
@@ -215,6 +224,7 @@ fn cleanup_work(
                     let field = fields
                         .next_back()
                         .expect("cleanup field iterator length is exact");
+                    work.try_reserve(2).map_err(|_| ())?;
                     work.push(CleanupTask::StructFields { definition, fields });
                     work.push(CleanupTask::Value {
                         value: field,
@@ -233,6 +243,7 @@ fn cleanup_work(
                     let field = fields
                         .next_back()
                         .expect("cleanup entity field iterator length is exact");
+                    work.try_reserve(2).map_err(|_| ())?;
                     work.push(CleanupTask::EntityFields { definition, fields });
                     work.push(CleanupTask::Value {
                         value: field,
@@ -248,6 +259,7 @@ fn cleanup_work(
                     let element = elements
                         .next_back()
                         .expect("cleanup list iterator length is exact");
+                    work.try_reserve(2).map_err(|_| ())?;
                     work.push(CleanupTask::ListElements { elements });
                     work.push(CleanupTask::Value {
                         value: element,
@@ -257,6 +269,13 @@ fn cleanup_work(
             }
         }
     }
+    Ok(())
+}
+
+fn push_cleanup_task(work: &mut Vec<CleanupTask>, task: CleanupTask) -> Result<(), ()> {
+    work.try_reserve(1).map_err(|_| ())?;
+    work.push(task);
+    Ok(())
 }
 
 fn record_path(path: CleanupPath, trace: Option<&mut CleanupTrace>) {
@@ -314,9 +333,35 @@ mod tests {
         });
         let capacity = scratch.work.capacity();
 
-        cleanup_work(&module, &mut scratch.work, None);
+        cleanup_work(&module, &mut scratch.work, None).expect("reserved scratch is sufficient");
 
         assert_eq!(scratch.work.capacity(), capacity);
+    }
+
+    #[test]
+    fn cleanup_scratch_growth_uses_the_fallible_path() {
+        let module = Module {
+            definitions: Vec::new(),
+            functions: Vec::new(),
+            main: FunctionId(0),
+        };
+        let mut value = Value::Int(0);
+        for _ in 0..4 {
+            value = Value::List(RuntimeList::from_values(vec![value]));
+        }
+        let mut scratch = CleanupScratch {
+            work: Vec::with_capacity(2),
+        };
+        scratch.work.push(CleanupTask::Value {
+            value,
+            path: CleanupPath::Home(Register(0)),
+        });
+        let capacity = scratch.work.capacity();
+
+        let result = cleanup_work(&module, &mut scratch.work, None);
+
+        assert_eq!(result, Ok(()));
+        assert!(scratch.work.capacity() > capacity);
     }
 
     #[test]
@@ -338,7 +383,8 @@ mod tests {
             path: CleanupPath::Home(Register(0)),
         });
 
-        cleanup_work(&module, &mut scratch.work, Some(&mut trace));
+        cleanup_work(&module, &mut scratch.work, Some(&mut trace))
+            .expect("reserved scratch is sufficient");
 
         assert_eq!(scratch.work.capacity(), capacity);
         assert_eq!(trace.list_indices().len(), 256);
@@ -365,7 +411,8 @@ mod tests {
             path: CleanupPath::Home(Register(0)),
         });
 
-        cleanup_work(&module, &mut scratch.work, Some(&mut trace));
+        cleanup_work(&module, &mut scratch.work, Some(&mut trace))
+            .expect("reserved scratch is sufficient");
 
         assert_eq!(trace.text_markers(), vec![(7, b'm')]);
     }

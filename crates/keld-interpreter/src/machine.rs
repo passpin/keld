@@ -5,7 +5,9 @@ use crate::fault::{InterpreterError, InterpreterFailure, RuntimeFault, RuntimeFa
 use crate::frame::{ActiveView, Frame};
 use crate::place::{FrameId, RuntimePlace, RuntimePlaceRoot, RuntimeProjection};
 use crate::value::RuntimeText;
-use crate::value::{CopyAllocation, EntityPayload, Value, ValueKind, try_copy_value};
+use crate::value::{
+    CopyAllocation, EntityPayload, Value, ValueKind, try_copy_value_with_text_allocations,
+};
 use crate::{AllocationController, ReserveFailure};
 use keld_ir::{
     ArgumentProjection, ArgumentSource, FaultKind, Function, Instruction, IrBlockId, IrType,
@@ -15,7 +17,7 @@ use keld_numeric::{NumericFault, eval_binary, eval_unary};
 use keld_runtime::{RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
 use keld_semantics::{CompareOp, DefId, FieldId, ParameterIndex};
 use keld_source::Span;
-use std::borrow::Cow;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
@@ -25,6 +27,10 @@ pub struct ExecutionResult {
 #[derive(Clone, Debug, Default)]
 pub struct TestControls {
     fail_structural_copies: usize,
+    text_attempt: u64,
+    fail_text_attempts: BTreeSet<u64>,
+    place_attempt: u64,
+    fail_place_attempts: BTreeSet<u64>,
     allocations: AllocationController,
 }
 
@@ -33,16 +39,42 @@ impl TestControls {
     pub fn fail_structural_copy(count: usize) -> Self {
         Self {
             fail_structural_copies: count,
-            allocations: AllocationController::default(),
+            ..Self::default()
         }
     }
 
     #[must_use]
     pub fn fail_list_attempts(attempts: impl IntoIterator<Item = u64>) -> Self {
         Self {
-            fail_structural_copies: 0,
             allocations: AllocationController::fail_list_attempts(attempts),
+            ..Self::default()
         }
+    }
+
+    #[must_use]
+    pub fn fail_text_attempts(attempts: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            fail_text_attempts: attempts.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn fail_place_attempts(attempts: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            fail_place_attempts: attempts.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    fn allow_text_attempt(&mut self) -> bool {
+        self.text_attempt = self.text_attempt.saturating_add(1);
+        !self.fail_text_attempts.contains(&self.text_attempt)
+    }
+
+    fn allow_place_attempt(&mut self) -> bool {
+        self.place_attempt = self.place_attempt.saturating_add(1);
+        !self.fail_place_attempts.contains(&self.place_attempt)
     }
 }
 
@@ -65,6 +97,14 @@ impl<'module> Interpreter<'module> {
     /// fault associated with the main function span.
     pub fn new(module: &'module Module) -> Result<Self, InterpreterFailure> {
         Self::with_options(module, TestControls::default(), false)
+    }
+
+    #[doc(hidden)]
+    pub fn with_controls_for_test(
+        module: &'module Module,
+        controls: TestControls,
+    ) -> Result<Self, InterpreterFailure> {
+        Self::with_controls(module, controls)
     }
 
     fn with_controls(
@@ -170,11 +210,21 @@ impl<'module> Interpreter<'module> {
                 let module = self.module;
                 let cleanup_trace = &mut self.cleanup_trace;
                 let cleanup_scratch = &mut self.cleanup_scratch;
+                let mut cleanup_failed = false;
                 self.store
                     .finish_with(|payload| {
-                        cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
+                        cleanup_failed |= cleanup_payload(
+                            module,
+                            payload,
+                            cleanup_scratch,
+                            cleanup_trace.as_mut(),
+                        )
+                        .is_err();
                     })
                     .map_err(|error| store_failure(error, main.span))?;
+                if cleanup_failed {
+                    return Err(allocation_failure(main.span));
+                }
                 return Ok(ExecutionResult { value });
             }
         }
@@ -341,19 +391,16 @@ fn execute_instruction(
             set_register(module, frames, *dst, Value::Bool(*value))?;
         }
         Instruction::ConstText { dst, value, .. } => {
-            set_register(
-                module,
-                frames,
-                *dst,
-                Value::Text(RuntimeText::from_string(value.clone())),
-            )?;
+            let text = RuntimeText::try_from_str(value, || controls.allow_text_attempt())
+                .map_err(|CopyAllocation| allocation_failure(span))?;
+            set_register(module, frames, *dst, Value::Text(text))?;
         }
         Instruction::ConstNoneLink { dst, .. } => {
             set_register(module, frames, *dst, Value::Link(None))?;
         }
         Instruction::Copy { dst, src, .. } => {
             if is_loan_register(module, frames, *dst) {
-                let place = runtime_place_for_register(frames, *src);
+                let place = runtime_place_for_register(frames, *src, span, controls)?;
                 frames
                     .last_mut()
                     .ok_or_else(|| internal("loan copy has no active frame"))?
@@ -397,7 +444,7 @@ fn execute_instruction(
         }
         Instruction::ListPushPlace { source, value, .. } => {
             let value = take_argument(module, store, frames, *value, span, controls)?;
-            let place = runtime_place_for_source(frames, source, span)?;
+            let place = runtime_place_for_source(frames, source, span, controls)?;
             with_place_mut(module, store, frames, &place, span, |list_value| {
                 let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list push received a non-list"));
@@ -431,7 +478,7 @@ fn execute_instruction(
             let index = with_register_value(module, store, frames, *index, span, |value| {
                 usize::try_from(expect_int(value)?).map_err(|_| bounds_failure(span))
             })?;
-            let place = runtime_place_for_source(frames, source, span)?;
+            let place = runtime_place_for_source(frames, source, span, controls)?;
             let removed = with_place_mut(module, store, frames, &place, span, |list_value| {
                 let ValueKind::List(elements) = list_value.kind_mut() else {
                     return Err(internal("validated list remove received a non-list"));
@@ -449,14 +496,14 @@ fn execute_instruction(
             index,
             ..
         } => {
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let place = runtime_place_for_receiver(frames, receiver, span, controls)?;
             let Some(index) =
                 checked_receiver_index(module, store, frames, place.as_ref(), *index, span)?
             else {
                 return Err(bounds_failure(span));
             };
             if is_loan_register(module, frames, *dst) {
-                let loan = place.into_owned().project(RuntimeProjection::Index(index));
+                let loan = place.into_projected(RuntimeProjection::Index(index), span, controls)?;
                 frames
                     .last_mut()
                     .ok_or_else(|| internal("indexed loan has no active frame"))?
@@ -480,7 +527,7 @@ fn execute_instruction(
             index,
             ..
         } => {
-            let place = runtime_place_for_receiver(frames, receiver, span)?;
+            let place = runtime_place_for_receiver(frames, receiver, span, controls)?;
             let value = match checked_receiver_index(
                 module,
                 store,
@@ -497,7 +544,7 @@ fn execute_instruction(
                         let element = elements.get(index).ok_or_else(|| {
                             internal("validated list get index changed during access")
                         })?;
-                        structural_copy(element, span, controls).map(|value| Some(Box::new(value)))
+                        structural_copy(element, span, controls).map(Some)
                     })?
                 }
                 None => None,
@@ -519,8 +566,13 @@ fn execute_instruction(
             displaced,
             ..
         } => {
-            let previous =
-                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+            let previous = with_receiver_place_mut(
+                store,
+                frames,
+                receiver,
+                span,
+                controls,
+                |place, store, frames, controls| {
                     let Some(index) =
                         checked_receiver_index(module, store, frames, place, *index, span)?
                     else {
@@ -536,7 +588,8 @@ fn execute_instruction(
                             .ok_or_else(|| bounds_failure(span))?;
                         Ok(std::mem::replace(destination, incoming))
                     })
-                })?;
+                },
+            )?;
             set_register(module, frames, *displaced, previous)?;
         }
         Instruction::ListTryRemove {
@@ -545,23 +598,29 @@ fn execute_instruction(
             index,
             ..
         } => {
-            let value =
-                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
-                    match checked_receiver_index(module, store, frames, place, *index, span)? {
-                        Some(index) => with_place_mut(module, store, frames, place, span, |list| {
-                            let ValueKind::List(elements) = list.kind_mut() else {
-                                return Err(internal("validated try_remove received a non-list"));
-                            };
-                            elements
-                                .try_remove(index)
-                                .ok_or_else(|| {
-                                    internal("validated try_remove index changed during access")
-                                })
-                                .map(Some)
-                        }),
-                        None => Ok(None),
-                    }
-                })?;
+            let value = with_receiver_place_mut(
+                store,
+                frames,
+                receiver,
+                span,
+                controls,
+                |place, store, frames, _controls| match checked_receiver_index(
+                    module, store, frames, place, *index, span,
+                )? {
+                    Some(index) => with_place_mut(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind_mut() else {
+                            return Err(internal("validated try_remove received a non-list"));
+                        };
+                        elements
+                            .try_remove(index)
+                            .ok_or_else(|| {
+                                internal("validated try_remove index changed during access")
+                            })
+                            .map(Some)
+                    }),
+                    None => Ok(None),
+                },
+            )?;
             let expected = register_type(module, frames, *dst)?;
             let value = match value {
                 Some(value) => value
@@ -573,34 +632,42 @@ fn execute_instruction(
             set_register(module, frames, *dst, value)?;
         }
         Instruction::ListClear { receiver, .. } => {
-            with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
-                let length = with_place_value(module, store, frames, place, span, |list| {
-                    let ValueKind::List(elements) = list.kind() else {
-                        return Err(internal("validated clear received a non-list"));
-                    };
-                    Ok(elements.length())
-                })?;
-                let mut index = length;
-                while index > 0 {
-                    index -= 1;
-                    let value = with_place_mut(module, store, frames, place, span, |list| {
-                        let ValueKind::List(elements) = list.kind_mut() else {
+            with_receiver_place_mut(
+                store,
+                frames,
+                receiver,
+                span,
+                controls,
+                |place, store, frames, _controls| {
+                    let length = with_place_value(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind() else {
                             return Err(internal("validated clear received a non-list"));
                         };
-                        elements
-                            .pop()
-                            .ok_or_else(|| internal("validated clear length changed during access"))
+                        Ok(elements.length())
                     })?;
-                    cleanup_value(
-                        module,
-                        value,
-                        CleanupPath::ListElement { index },
-                        cleanup_scratch,
-                        cleanup_trace.as_mut(),
-                    );
-                }
-                Ok(())
-            })?;
+                    let mut index = length;
+                    while index > 0 {
+                        index -= 1;
+                        let value = with_place_mut(module, store, frames, place, span, |list| {
+                            let ValueKind::List(elements) = list.kind_mut() else {
+                                return Err(internal("validated clear received a non-list"));
+                            };
+                            elements.pop().ok_or_else(|| {
+                                internal("validated clear length changed during access")
+                            })
+                        })?;
+                        cleanup_value(
+                            module,
+                            value,
+                            CleanupPath::ListElement { index },
+                            cleanup_scratch,
+                            cleanup_trace.as_mut(),
+                        )
+                        .map_err(|()| allocation_failure(span))?;
+                    }
+                    Ok(())
+                },
+            )?;
         }
         Instruction::ListReserve {
             receiver,
@@ -611,16 +678,23 @@ fn execute_instruction(
                 with_register_value(module, store, frames, *additional, span, |value| {
                     expect_int(value)
                 })?;
-            with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
-                with_place_mut(module, store, frames, place, span, |list| {
-                    let ValueKind::List(elements) = list.kind_mut() else {
-                        return Err(internal("validated reserve received a non-list"));
-                    };
-                    elements
-                        .reserve(additional, &mut controls.allocations)
-                        .map_err(|failure| reserve_failure(failure, span))
-                })
-            })?;
+            with_receiver_place_mut(
+                store,
+                frames,
+                receiver,
+                span,
+                controls,
+                |place, store, frames, controls| {
+                    with_place_mut(module, store, frames, place, span, |list| {
+                        let ValueKind::List(elements) = list.kind_mut() else {
+                            return Err(internal("validated reserve received a non-list"));
+                        };
+                        elements
+                            .reserve(additional, &mut controls.allocations)
+                            .map_err(|failure| reserve_failure(failure, span))
+                    })
+                },
+            )?;
         }
         Instruction::ListTryReserve {
             dst,
@@ -632,15 +706,21 @@ fn execute_instruction(
                 with_register_value(module, store, frames, *additional, span, |value| {
                     expect_int(value)
                 })?;
-            let success =
-                with_receiver_place_mut(store, frames, receiver, span, |place, store, frames| {
+            let success = with_receiver_place_mut(
+                store,
+                frames,
+                receiver,
+                span,
+                controls,
+                |place, store, frames, controls| {
                     with_place_mut(module, store, frames, place, span, |list| {
                         let ValueKind::List(elements) = list.kind_mut() else {
                             return Err(internal("validated try_reserve received a non-list"));
                         };
                         Ok(elements.try_reserve(additional, &mut controls.allocations))
                     })
-                })?;
+                },
+            )?;
             set_register(module, frames, *dst, Value::Bool(success))?;
         }
         Instruction::TextByteLength { dst, text, .. } => {
@@ -728,8 +808,11 @@ fn execute_instruction(
             dst, base, field, ..
         } => {
             if is_loan_register(module, frames, *dst) {
-                let place = runtime_place_for_register(frames, *base)
-                    .project(RuntimeProjection::Field(*field));
+                let mut place =
+                    runtime_place_for_register_with_capacity(frames, *base, 1, span, controls)?;
+                place
+                    .push_reserved(RuntimeProjection::Field(*field))
+                    .map_err(|CopyAllocation| allocation_failure(span))?;
                 frames
                     .last_mut()
                     .ok_or_else(|| internal("struct loan has no active frame"))?
@@ -778,7 +861,8 @@ fn execute_instruction(
                 CleanupPath::Home(*home),
                 cleanup_scratch,
                 cleanup_trace.as_mut(),
-            );
+            )
+            .map_err(|()| allocation_failure(span))?;
         }
         Instruction::DropIfLive { home, .. } => {
             if let Some(value) = frames.last_mut().and_then(|frame| frame.take(*home)) {
@@ -788,7 +872,8 @@ fn execute_instruction(
                     CleanupPath::Home(*home),
                     cleanup_scratch,
                     cleanup_trace.as_mut(),
-                );
+                )
+                .map_err(|()| allocation_failure(span))?;
             }
         }
         Instruction::DropSlot { slot, .. } => {
@@ -799,7 +884,8 @@ fn execute_instruction(
                     CleanupPath::Home(*slot),
                     cleanup_scratch,
                     cleanup_trace.as_mut(),
-                );
+                )
+                .map_err(|()| allocation_failure(span))?;
             }
         }
         Instruction::CleanupTrackedScope { scope, .. } => {
@@ -814,7 +900,8 @@ fn execute_instruction(
                         CleanupPath::Home(home),
                         cleanup_scratch,
                         cleanup_trace.as_mut(),
-                    );
+                    )
+                    .map_err(|()| allocation_failure(span))?;
                 }
             }
         }
@@ -824,12 +911,12 @@ fn execute_instruction(
             displaced,
             ..
         } => {
+            let place = runtime_place_for_source(frames, destination, span, controls)?;
             let incoming = take_register(frames, *source)?;
-            let previous = take_source(module, store, frames, destination, span).ok();
-            write_source(module, store, frames, destination, incoming, span)?;
-            if let Some(previous) = previous {
-                set_register(module, frames, *displaced, previous)?;
-            }
+            let previous = with_place_mut(module, store, frames, &place, span, |destination| {
+                Ok(std::mem::replace(destination, incoming))
+            })?;
+            set_register(module, frames, *displaced, previous)?;
         }
         Instruction::ReplaceField {
             view,
@@ -891,11 +978,17 @@ fn execute_effect_instruction(
         }
         Instruction::EndLifecycle { lifecycle, .. } => {
             let lifecycle = expect_lifecycle(frame_value(frames, *lifecycle)?)?;
+            let mut cleanup_failed = false;
             store
                 .end_lifecycle_with(lifecycle, |payload| {
-                    cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
+                    cleanup_failed |=
+                        cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut())
+                            .is_err();
                 })
                 .map_err(|error| store_failure(error, span))?;
+            if cleanup_failed {
+                return Err(allocation_failure(span));
+            }
         }
         Instruction::AllocateEntity {
             dst,
@@ -977,12 +1070,13 @@ fn execute_view_instruction(
         } => {
             let active = active_view(frames, *view)?;
             if is_loan_register(module, frames, *dst) {
-                let place = RuntimePlace {
-                    root: RuntimePlaceRoot::Entity {
-                        entity: active.entity,
-                    },
-                    projections: vec![RuntimeProjection::Field(*field)],
-                };
+                let mut place = RuntimePlace::entity(active.entity);
+                place
+                    .try_reserve_projections(1, || controls.allow_place_attempt())
+                    .map_err(|CopyAllocation| allocation_failure(span))?;
+                place
+                    .push_reserved(RuntimeProjection::Field(*field))
+                    .map_err(|CopyAllocation| allocation_failure(span))?;
                 frames
                     .last_mut()
                     .ok_or_else(|| internal("entity loan has no active frame"))?
@@ -1072,11 +1166,17 @@ fn execute_call_or_retirement(
         }
         Instruction::RetireEntity { entity, .. } => {
             let entity = expect_entity(frame_value(frames, *entity)?)?;
+            let mut cleanup_failed = false;
             store
                 .retire_with(entity, |payload| {
-                    cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut());
+                    cleanup_failed =
+                        cleanup_payload(module, payload, cleanup_scratch, cleanup_trace.as_mut())
+                            .is_err();
                 })
                 .map_err(|error| store_failure(error, span))?;
+            if cleanup_failed {
+                return Err(allocation_failure(span));
+            }
         }
         Instruction::Call {
             dst,
@@ -1189,7 +1289,7 @@ fn execute_call(
             .copied()
             .ok_or_else(|| internal("validated call parameter is missing"))?;
         if mode == keld_semantics::ParameterMode::Loan {
-            let place = runtime_place_for_register(frames, *register);
+            let place = runtime_place_for_register(frames, *register, span, controls)?;
             loans.push((callee_register, place));
             continue;
         }
@@ -1426,7 +1526,10 @@ fn enter_block(
             .find_map(|(block, register)| (*block == predecessor).then_some(*register))
             .ok_or_else(|| internal("Phi has no input for the predecessor"))?;
         if is_loan_register(module, frames, *dst) {
-            pending_loans.push((*dst, runtime_place_for_register(frames, source)));
+            pending_loans.push((
+                *dst,
+                runtime_place_for_register(frames, source, span, controls)?,
+            ));
         } else if is_home_register(module, frames, *dst) && is_home_register(module, frames, source)
         {
             pending_values.push((*dst, take_register(frames, source)?));
@@ -1524,31 +1627,100 @@ fn frame_value(frames: &[Frame], register: Register) -> Result<&Value, Interpret
         .ok_or_else(|| internal("validated register is undefined"))
 }
 
-fn runtime_place_for_register(frames: &[Frame], register: Register) -> RuntimePlace {
+fn runtime_place_for_register(
+    frames: &[Frame],
+    register: Register,
+    span: Span,
+    controls: &mut TestControls,
+) -> Result<RuntimePlace, InterpreterFailure> {
+    runtime_place_for_register_with_capacity(frames, register, 0, span, controls)
+}
+
+fn runtime_place_for_register_with_capacity(
+    frames: &[Frame],
+    register: Register,
+    additional: usize,
+    span: Span,
+    controls: &mut TestControls,
+) -> Result<RuntimePlace, InterpreterFailure> {
     let frame = FrameId(frames.len().saturating_sub(1));
     if let Some(place) = frames.last().and_then(|frame| frame.loan(register)) {
-        return place.clone();
+        return place
+            .try_clone_with_capacity(additional, || controls.allow_place_attempt())
+            .map_err(|CopyAllocation| allocation_failure(span));
     }
-    RuntimePlace::frame(frame, register)
+    let mut place = RuntimePlace::frame(frame, register);
+    place
+        .try_reserve_projections(additional, || controls.allow_place_attempt())
+        .map_err(|CopyAllocation| allocation_failure(span))?;
+    Ok(place)
+}
+
+enum RuntimePlaceRef<'place> {
+    Borrowed(&'place RuntimePlace),
+    Owned(RuntimePlace),
+}
+
+impl RuntimePlaceRef<'_> {
+    fn as_ref(&self) -> &RuntimePlace {
+        match self {
+            Self::Borrowed(place) => place,
+            Self::Owned(place) => place,
+        }
+    }
+
+    fn into_owned(
+        self,
+        span: Span,
+        controls: &mut TestControls,
+    ) -> Result<RuntimePlace, InterpreterFailure> {
+        match self {
+            Self::Borrowed(place) => place
+                .try_clone_with_capacity(0, || controls.allow_place_attempt())
+                .map_err(|CopyAllocation| allocation_failure(span)),
+            Self::Owned(place) => Ok(place),
+        }
+    }
+
+    fn into_projected(
+        self,
+        projection: RuntimeProjection,
+        span: Span,
+        controls: &mut TestControls,
+    ) -> Result<RuntimePlace, InterpreterFailure> {
+        let mut place = match self {
+            Self::Borrowed(place) => place
+                .try_clone_with_capacity(1, || controls.allow_place_attempt())
+                .map_err(|CopyAllocation| allocation_failure(span))?,
+            Self::Owned(mut place) => {
+                place
+                    .try_reserve_projections(1, || controls.allow_place_attempt())
+                    .map_err(|CopyAllocation| allocation_failure(span))?;
+                place
+            }
+        };
+        place
+            .push_reserved(projection)
+            .map_err(|CopyAllocation| allocation_failure(span))?;
+        Ok(place)
+    }
 }
 
 fn runtime_place_for_receiver<'a>(
     frames: &'a [Frame],
     receiver: &Receiver,
     span: Span,
-) -> Result<Cow<'a, RuntimePlace>, InterpreterFailure> {
+    controls: &mut TestControls,
+) -> Result<RuntimePlaceRef<'a>, InterpreterFailure> {
     if let Some(place) = frames.last().and_then(|frame| frame.loan(receiver.list)) {
-        return Ok(Cow::Borrowed(place));
+        return Ok(RuntimePlaceRef::Borrowed(place));
     }
-    receiver.source.as_ref().map_or_else(
-        || {
-            Ok(Cow::Owned(runtime_place_for_register(
-                frames,
-                receiver.list,
-            )))
-        },
-        |source| runtime_place_for_source(frames, source, span).map(Cow::Owned),
-    )
+    if let Some(source) = &receiver.source {
+        runtime_place_for_source(frames, source, span, controls).map(RuntimePlaceRef::Owned)
+    } else {
+        runtime_place_for_register(frames, receiver.list, span, controls)
+            .map(RuntimePlaceRef::Owned)
+    }
 }
 
 fn with_receiver_place_mut<R>(
@@ -1556,17 +1728,19 @@ fn with_receiver_place_mut<R>(
     frames: &mut Vec<Frame>,
     receiver: &Receiver,
     span: Span,
+    controls: &mut TestControls,
     access: impl FnOnce(
         &RuntimePlace,
         &mut Store<EntityPayload>,
         &mut Vec<Frame>,
+        &mut TestControls,
     ) -> Result<R, InterpreterFailure>,
 ) -> Result<R, InterpreterFailure> {
     let loan = frames
         .last_mut()
         .and_then(|frame| frame.take_loan(receiver.list));
     if let Some(place) = loan {
-        let result = access(&place, store, frames);
+        let result = access(&place, store, frames, controls);
         let restored = frames
             .last_mut()
             .ok_or_else(|| internal("receiver loan has no active frame"))?
@@ -1574,8 +1748,9 @@ fn with_receiver_place_mut<R>(
             .map_err(|()| internal("receiver loan could not be restored"));
         return restored.and(result);
     }
-    let place = runtime_place_for_receiver(frames, receiver, span).map(Cow::into_owned)?;
-    access(&place, store, frames)
+    let place =
+        runtime_place_for_receiver(frames, receiver, span, controls)?.into_owned(span, controls)?;
+    access(&place, store, frames, controls)
 }
 
 fn checked_receiver_index(
@@ -1618,31 +1793,45 @@ fn runtime_place_for_source(
     frames: &[Frame],
     source: &ArgumentSource,
     span: Span,
+    controls: &mut TestControls,
 ) -> Result<RuntimePlace, InterpreterFailure> {
+    let projection_count = source.projections.len();
     let mut place = if source.projections.is_empty() {
-        runtime_place_for_register(frames, source.base)
+        runtime_place_for_register(frames, source.base, span, controls)?
     } else {
         match frames
             .last()
             .and_then(|frame| frame.value(source.base))
             .map(Value::kind)
         {
-            Some(ValueKind::Entity(entity)) => RuntimePlace {
-                root: RuntimePlaceRoot::Entity { entity: *entity },
-                projections: Vec::new(),
-            },
-            _ => runtime_place_for_register(frames, source.base),
+            Some(ValueKind::Entity(entity)) => {
+                let mut place = RuntimePlace::entity(*entity);
+                place
+                    .try_reserve_projections(projection_count, || controls.allow_place_attempt())
+                    .map_err(|CopyAllocation| allocation_failure(span))?;
+                place
+            }
+            _ => runtime_place_for_register_with_capacity(
+                frames,
+                source.base,
+                projection_count,
+                span,
+                controls,
+            )?,
         }
     };
     for projection in &source.projections {
-        place = match projection {
-            ArgumentProjection::Field(field) => place.project(RuntimeProjection::Field(*field)),
+        let projection = match projection {
+            ArgumentProjection::Field(field) => RuntimeProjection::Field(*field),
             ArgumentProjection::Index(index) => {
                 let raw = expect_int(frame_value(frames, *index)?)?;
                 let index = usize::try_from(raw).map_err(|_| bounds_failure(span))?;
-                place.project(RuntimeProjection::Index(index))
+                RuntimeProjection::Index(index)
             }
         };
+        place
+            .push_reserved(projection)
+            .map_err(|CopyAllocation| allocation_failure(span))?;
     }
     Ok(place)
 }
@@ -1658,8 +1847,8 @@ fn with_register_value<R>(
     let Some(frame) = frames.last() else {
         return Err(internal("register read has no active frame"));
     };
-    if let Some(place) = frame.loan(register).cloned() {
-        return with_place_value(module, store, frames, &place, span, access);
+    if let Some(place) = frame.loan(register) {
+        return with_place_value(module, store, frames, place, span, access);
     }
     let value = frame
         .value(register)
@@ -1679,8 +1868,12 @@ fn with_register_mut<R>(
         .len()
         .checked_sub(1)
         .ok_or_else(|| internal("register mutation has no active frame"))?;
-    if let Some(place) = frames[frame_index].loan(register).cloned() {
-        return with_place_mut(module, store, frames, &place, span, access);
+    if let Some(place) = frames[frame_index].take_loan(register) {
+        let result = with_place_mut(module, store, frames, &place, span, access);
+        let restored = frames[frame_index]
+            .set_loan(register, place)
+            .map_err(|()| internal("mutable register loan could not be restored"));
+        return restored.and(result);
     }
     let value = frames[frame_index]
         .value_mut(register)
@@ -1821,7 +2014,8 @@ fn structural_copy(
         controls.fail_structural_copies -= 1;
         return Err(allocation_failure(span));
     }
-    try_copy_value(value).map_err(|_| allocation_failure(span))
+    try_copy_value_with_text_allocations(value, &mut || controls.allow_text_attempt())
+        .map_err(|_| allocation_failure(span))
 }
 
 fn take_argument(
@@ -1882,34 +2076,6 @@ fn take_register(frames: &mut [Frame], register: Register) -> Result<Value, Inte
     frame
         .take(register)
         .ok_or_else(|| internal("validated source register is undefined or already moved"))
-}
-
-fn take_source(
-    module: &Module,
-    store: &mut Store<EntityPayload>,
-    frames: &mut [Frame],
-    source: &ArgumentSource,
-    span: Span,
-) -> Result<Value, InterpreterFailure> {
-    let place = runtime_place_for_source(frames, source, span)?;
-    with_place_mut(module, store, frames, &place, span, |destination| {
-        Ok(std::mem::replace(destination, Value::Unit))
-    })
-}
-
-fn write_source(
-    module: &Module,
-    store: &mut Store<EntityPayload>,
-    frames: &mut [Frame],
-    source: &ArgumentSource,
-    value: Value,
-    span: Span,
-) -> Result<(), InterpreterFailure> {
-    let place = runtime_place_for_source(frames, source, span)?;
-    with_place_mut(module, store, frames, &place, span, |destination| {
-        *destination = value;
-        Ok(())
-    })
 }
 
 fn active_view(frames: &[Frame], view: keld_ir::ViewId) -> Result<ActiveView, InterpreterFailure> {

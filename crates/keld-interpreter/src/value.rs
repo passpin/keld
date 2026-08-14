@@ -7,7 +7,7 @@ use crate::RuntimeList;
 #[derive(Debug, Eq)]
 pub enum RuntimeText {
     Inline { len: u8, bytes: [u8; 22] },
-    Heap(Box<str>),
+    Heap(String),
 }
 
 impl PartialEq for RuntimeText {
@@ -26,8 +26,31 @@ impl RuntimeText {
                 bytes,
             }
         } else {
-            Self::Heap(value.into_boxed_str())
+            Self::Heap(value)
         }
+    }
+
+    pub(crate) fn try_from_str(
+        value: &str,
+        allow_heap_allocation: impl FnOnce() -> bool,
+    ) -> Result<Self, CopyAllocation> {
+        if value.len() <= 22 {
+            let mut bytes = [0; 22];
+            bytes[..value.len()].copy_from_slice(value.as_bytes());
+            return Ok(Self::Inline {
+                len: u8::try_from(value.len()).expect("inline text length fits in u8"),
+                bytes,
+            });
+        }
+        if !allow_heap_allocation() {
+            return Err(CopyAllocation);
+        }
+        let mut owned = String::new();
+        owned
+            .try_reserve_exact(value.len())
+            .map_err(|_| CopyAllocation)?;
+        owned.push_str(value);
+        Ok(Self::Heap(owned))
     }
 
     pub(crate) fn byte_length(&self) -> usize {
@@ -320,6 +343,13 @@ enum CopyTask<'value> {
 }
 
 pub(crate) fn try_copy_value(value: &Value) -> Result<Value, CopyAllocation> {
+    try_copy_value_with_text_allocations(value, &mut || true)
+}
+
+pub(crate) fn try_copy_value_with_text_allocations(
+    value: &Value,
+    allow_text_allocation: &mut impl FnMut() -> bool,
+) -> Result<Value, CopyAllocation> {
     let mut work = Vec::new();
     let mut completed = Vec::new();
     work.try_reserve(1).map_err(|_| CopyAllocation)?;
@@ -329,7 +359,7 @@ pub(crate) fn try_copy_value(value: &Value) -> Result<Value, CopyAllocation> {
         match task {
             CopyTask::Visit(value) => {
                 let layers = value.optional_some_layers;
-                if let Some(value) = copy_leaf(value) {
+                if let Some(value) = copy_leaf(value, allow_text_allocation)? {
                     push_completed(&mut completed, value)?;
                     continue;
                 }
@@ -419,7 +449,10 @@ pub(crate) fn try_copy_value(value: &Value) -> Result<Value, CopyAllocation> {
     }
 }
 
-fn copy_leaf(value: &Value) -> Option<Value> {
+fn copy_leaf(
+    value: &Value,
+    allow_text_allocation: &mut impl FnMut() -> bool,
+) -> Result<Option<Value>, CopyAllocation> {
     let kind = match &value.kind {
         ValueKind::Absent => ValueKind::Absent,
         ValueKind::Unit => ValueKind::Unit,
@@ -430,14 +463,19 @@ fn copy_leaf(value: &Value) -> Option<Value> {
                 len: *len,
                 bytes: *bytes,
             },
-            RuntimeText::Heap(text) => RuntimeText::Heap(text.clone()),
+            RuntimeText::Heap(text) => {
+                RuntimeText::try_from_str(text, &mut *allow_text_allocation)?
+            }
         }),
         ValueKind::Entity(entity) => ValueKind::Entity(*entity),
         ValueKind::Link(link) => ValueKind::Link(*link),
         ValueKind::Lifecycle(lifecycle) => ValueKind::Lifecycle(*lifecycle),
-        ValueKind::Struct { .. } | ValueKind::List(_) => return None,
+        ValueKind::Struct { .. } | ValueKind::List(_) => return Ok(None),
     };
-    Some(Value::from_parts_for_test(value.optional_some_layers, kind))
+    Ok(Some(Value::from_parts_for_test(
+        value.optional_some_layers,
+        kind,
+    )))
 }
 
 fn push_completed(values: &mut Vec<Value>, value: Value) -> Result<(), CopyAllocation> {

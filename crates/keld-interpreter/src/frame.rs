@@ -41,14 +41,16 @@ impl Frame {
                 | RegisterStorage::Home { .. } => RegisterSlot::Empty,
             });
         }
-        let home_scopes = function
-            .register_storage
-            .iter()
-            .map(|storage| match storage {
+        let mut home_scopes = Vec::new();
+        home_scopes
+            .try_reserve_exact(function.register_storage.len())
+            .map_err(|_| crate::value::CopyAllocation)?;
+        for storage in &function.register_storage {
+            home_scopes.push(match storage {
                 RegisterStorage::Home { scope, .. } => Some(*scope),
                 _ => None,
-            })
-            .collect();
+            });
+        }
         let mut cleanup_trackers = Vec::new();
         cleanup_trackers
             .try_reserve_exact(function.storage_scope_parents.len())

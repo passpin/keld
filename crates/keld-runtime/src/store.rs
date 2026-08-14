@@ -460,14 +460,15 @@ impl<P> Store<P> {
             .checked_add(SEGMENT_SIZE.saturating_sub(1))
             .ok_or(StoreError::Allocation)?;
         u32::try_from(last).map_err(|_| StoreError::Allocation)?;
+        let total_slots = last.checked_add(1).ok_or(StoreError::Allocation)?;
         self.segments
             .try_reserve(1)
             .map_err(|_| StoreError::Allocation)?;
         self.reusable
-            .try_reserve(SEGMENT_SIZE)
+            .try_reserve(total_slots.saturating_sub(self.reusable.len()))
             .map_err(|_| StoreError::Allocation)?;
         self.permanently_retired
-            .try_reserve(SEGMENT_SIZE)
+            .try_reserve(total_slots.saturating_sub(self.permanently_retired.len()))
             .map_err(|_| StoreError::Allocation)?;
         let mut slots = Vec::new();
         slots
@@ -744,6 +745,33 @@ fn next_brand() -> Result<StoreBrand, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_vectors_reserve_room_for_every_allocated_slot() {
+        let mut store = Store::new().unwrap();
+        let root = store.root_lifecycle();
+        let entities = (0..=SEGMENT_SIZE)
+            .map(|value| {
+                store
+                    .allocate(RuntimeTypeId(0), root, value)
+                    .expect("entity allocation succeeds")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            store.reusable.capacity() >= store.reusable.len() + entities.len(),
+            "reusable capacity {} cannot accept {} retirements at length {}",
+            store.reusable.capacity(),
+            entities.len(),
+            store.reusable.len()
+        );
+        assert!(
+            store.permanently_retired.capacity() >= entities.len(),
+            "permanently-retired capacity {} cannot accept {} slots",
+            store.permanently_retired.capacity(),
+            entities.len()
+        );
+    }
 
     #[test]
     fn generation_exhaustion_permanently_retires_the_slot() {
