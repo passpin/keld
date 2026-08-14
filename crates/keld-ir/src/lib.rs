@@ -6,7 +6,7 @@ mod validate;
 
 pub use instruction::{FaultKind, Instruction, Terminator, ViewMode};
 pub use keld_numeric::{IntBinaryOp, IntUnaryOp};
-pub use keld_semantics::CompareOp;
+pub use keld_semantics::{CompareOp, FunctionId, ParameterIndex};
 pub use lower::{VerifiedInput, lower};
 pub use module::{
     ArgumentProjection, ArgumentSource, Function, IrBlock, IrBlockId, IrDefinition,

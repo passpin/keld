@@ -687,3 +687,259 @@ fn scalar_numeric_operations_match_checked_interpreter_boundaries() {
         assert!(child.stdout.is_empty());
     }
 }
+
+fn identity_and_main_module() -> Module {
+    let source_span = span();
+    let identity = Function {
+        id: keld_semantics::FunctionId(0),
+        span: source_span,
+        parameters: vec![Register(1)],
+        parameter_modes: vec![keld_semantics::ParameterMode::Loan],
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, IrType::Int],
+        register_storage: vec![RegisterStorage::Trivial, RegisterStorage::Trivial],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(0, Vec::new(), Terminator::Return(Some(Register(1))))],
+        entry: IrBlockId(0),
+    };
+    let main = Function {
+        id: keld_semantics::FunctionId(1),
+        span: source_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, IrType::Int, IrType::Int],
+        register_storage: vec![RegisterStorage::Trivial; 3],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            vec![
+                Instruction::ConstInt {
+                    dst: Register(1),
+                    value: 41,
+                    span: source_span,
+                },
+                Instruction::Call {
+                    dst: Some(Register(2)),
+                    function: keld_semantics::FunctionId(0),
+                    arguments: vec![(keld_ir::ParameterIndex(0), Register(1))],
+                    argument_sources: vec![(keld_ir::ParameterIndex(0), None)],
+                    current_lifecycle: Register(0),
+                    span: source_span,
+                },
+            ],
+            Terminator::Return(Some(Register(2))),
+        )],
+        entry: IrBlockId(0),
+    };
+    Module {
+        definitions: Vec::new(),
+        functions: vec![identity, main],
+        main: keld_semantics::FunctionId(1),
+    }
+}
+
+fn unit_call_module() -> Module {
+    let source_span = span();
+    let unit = Function {
+        id: keld_semantics::FunctionId(0),
+        span: source_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle],
+        register_storage: vec![RegisterStorage::Trivial],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Unit,
+        blocks: vec![block(0, Vec::new(), Terminator::Return(None))],
+        entry: IrBlockId(0),
+    };
+    let main = Function {
+        id: keld_semantics::FunctionId(1),
+        span: source_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, IrType::Int],
+        register_storage: vec![RegisterStorage::Trivial; 2],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            vec![
+                Instruction::Call {
+                    dst: None,
+                    function: keld_semantics::FunctionId(0),
+                    arguments: Vec::new(),
+                    argument_sources: Vec::new(),
+                    current_lifecycle: Register(0),
+                    span: source_span,
+                },
+                Instruction::ConstInt {
+                    dst: Register(1),
+                    value: 9,
+                    span: source_span,
+                },
+            ],
+            Terminator::Return(Some(Register(1))),
+        )],
+        entry: IrBlockId(0),
+    };
+    Module {
+        definitions: Vec::new(),
+        functions: vec![unit, main],
+        main: keld_semantics::FunctionId(1),
+    }
+}
+
+fn faulting_callee_module() -> Module {
+    let function_span = Span::new(SourceId(0), 0, 1).expect("function span");
+    let fault_span = Span::new(SourceId(0), 2, 3).expect("fault span");
+    let callee = Function {
+        id: keld_semantics::FunctionId(0),
+        span: function_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, IrType::Int, IrType::Int, IrType::Int],
+        register_storage: vec![RegisterStorage::Trivial; 4],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            vec![
+                Instruction::ConstInt {
+                    dst: Register(1),
+                    value: i64::MAX,
+                    span: fault_span,
+                },
+                Instruction::ConstInt {
+                    dst: Register(2),
+                    value: 1,
+                    span: fault_span,
+                },
+                Instruction::CheckedBinaryInt {
+                    dst: Register(3),
+                    op: IntBinaryOp::Add,
+                    lhs: Register(1),
+                    rhs: Register(2),
+                    span: fault_span,
+                },
+            ],
+            Terminator::Return(Some(Register(3))),
+        )],
+        entry: IrBlockId(0),
+    };
+    let main = Function {
+        id: keld_semantics::FunctionId(1),
+        span: function_span,
+        parameters: Vec::new(),
+        parameter_modes: Vec::new(),
+        parameter_effects: Vec::new(),
+        current_lifecycle: Register(0),
+        register_types: vec![IrType::Lifecycle, IrType::Int],
+        register_storage: vec![RegisterStorage::Trivial; 2],
+        storage_scope_parents: vec![None],
+        return_type: IrType::Int,
+        blocks: vec![block(
+            0,
+            vec![Instruction::Call {
+                dst: Some(Register(1)),
+                function: keld_semantics::FunctionId(0),
+                arguments: Vec::new(),
+                argument_sources: Vec::new(),
+                current_lifecycle: Register(0),
+                span: function_span,
+            }],
+            Terminator::Return(Some(Register(1))),
+        )],
+        entry: IrBlockId(0),
+    };
+    Module {
+        definitions: Vec::new(),
+        functions: vec![callee, main],
+        main: keld_semantics::FunctionId(1),
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn scalar_calls_cover_owned_results_unit_calls_and_callee_faults() {
+    let (runtime_dll, import_library) = runtime_artifacts("calls");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("calls.keld"),
+        source: SourceText::from_str(SourceId(0), "call\n").expect("source"),
+    };
+    for (index, (module, expected_stdout, expected_status, expected_stderr)) in [
+        (identity_and_main_module(), "41\n", 0, ""),
+        (unit_call_module(), "9\n", 0, ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("call-{index}.exe"));
+        let artifact = build_executable(
+            &module,
+            &metadata,
+            &request(
+                &output,
+                &runtime_dll,
+                &import_library,
+                if index == 0 {
+                    OptimizationLevel::O0
+                } else {
+                    OptimizationLevel::O2
+                },
+            ),
+        )
+        .expect("call native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("call native executable");
+        assert_eq!(child.status.code(), Some(expected_status));
+        assert_eq!(child.stdout, expected_stdout.as_bytes());
+        assert_eq!(String::from_utf8_lossy(&child.stderr), expected_stderr);
+    }
+}
+
+#[test]
+fn scalar_callee_fault_keeps_the_callee_location() {
+    let (runtime_dll, import_library) = runtime_artifacts("call-fault");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("call-fault.keld"),
+        source: SourceText::from_str(SourceId(0), "a\nb\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("callee-fault-{index}.exe"));
+        let artifact = build_executable(
+            &faulting_callee_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("callee fault native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("callee fault native executable");
+        assert_eq!(child.status.code(), Some(2));
+        assert_eq!(
+            String::from_utf8_lossy(&child.stderr),
+            "call-fault.keld:2:1: runtime[ArithmeticFault]: checked integer arithmetic overflow\n"
+        );
+    }
+}

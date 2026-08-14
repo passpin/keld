@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use keld_ir::{
-    CompareOp, FaultKind as IrFaultKind, Instruction, IntBinaryOp, IntUnaryOp, IrType, Module,
-    Register, Terminator, validate,
+    CompareOp, FaultKind as IrFaultKind, FunctionId, Instruction, IntBinaryOp, IntUnaryOp, IrType,
+    Module, ParameterIndex, Register, Terminator, validate,
 };
 use keld_native_abi::{RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
 use keld_native_llvm::{self, OptimizationLevel as LlvmOptimizationLevel};
@@ -343,8 +343,8 @@ fn scalar_type(ty: &IrType) -> Option<&'static str> {
     match ty {
         IrType::Bool => Some("i1"),
         IrType::Int => Some("i64"),
-        IrType::Lifecycle
-        | IrType::Unit
+        IrType::Lifecycle => Some("{ i64, i32, i32 }"),
+        IrType::Unit
         | IrType::Struct(_)
         | IrType::Entity(_)
         | IrType::Link { .. }
@@ -409,6 +409,7 @@ fn escape_llvm_bytes(bytes: &[u8]) -> String {
 }
 
 struct ScalarLowerer<'module> {
+    module: &'module Module,
     function: &'module keld_ir::Function,
     locations: &'module LocationTable,
     lines: Vec<String>,
@@ -417,8 +418,13 @@ struct ScalarLowerer<'module> {
 }
 
 impl<'module> ScalarLowerer<'module> {
-    fn new(function: &'module keld_ir::Function, locations: &'module LocationTable) -> Self {
+    fn new(
+        module: &'module Module,
+        function: &'module keld_ir::Function,
+        locations: &'module LocationTable,
+    ) -> Self {
         Self {
+            module,
             function,
             locations,
             lines: Vec::new(),
@@ -532,6 +538,20 @@ impl<'module> ScalarLowerer<'module> {
                     .join(", ");
                 self.line(format!("{} = phi {ty} {values}", register_name(*dst)));
             }
+            Instruction::Call {
+                dst,
+                function,
+                arguments,
+                argument_sources,
+                current_lifecycle,
+                ..
+            } => self.emit_call(
+                *dst,
+                *function,
+                arguments,
+                argument_sources,
+                *current_lifecycle,
+            )?,
             Instruction::ConstText { .. }
             | Instruction::ConstNoneLink { .. }
             | Instruction::Copy { .. }
@@ -571,12 +591,128 @@ impl<'module> ScalarLowerer<'module> {
             | Instruction::WriteField { .. }
             | Instruction::CloseView { .. }
             | Instruction::KeepEntity { .. }
-            | Instruction::RetireEntity { .. }
-            | Instruction::Call { .. } => {
+            | Instruction::RetireEntity { .. } => {
                 return Err(BackendError::Unsupported(
                     "native scalar lowering encountered a managed or call instruction".to_owned(),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn emit_call(
+        &mut self,
+        dst: Option<Register>,
+        function_id: FunctionId,
+        arguments: &[(ParameterIndex, Register)],
+        argument_sources: &[(ParameterIndex, Option<keld_ir::ArgumentSource>)],
+        current_lifecycle: Register,
+    ) -> Result<(), BackendError> {
+        let Some(callee) = self.module.functions.get(function_id.0 as usize) else {
+            return Err(BackendError::Unsupported(format!(
+                "call targets unknown function {}",
+                function_id.0
+            )));
+        };
+        if argument_sources.iter().any(|(_, source)| source.is_some()) {
+            return Err(BackendError::Unsupported(
+                "scalar calls cannot lower projected argument sources".to_owned(),
+            ));
+        }
+        let mut argument_map = BTreeMap::new();
+        for (parameter, register) in arguments {
+            if argument_map.insert(parameter.0, *register).is_some() {
+                return Err(BackendError::Unsupported(
+                    "scalar call contains duplicate parameter arguments".to_owned(),
+                ));
+            }
+        }
+        if argument_map.len() != callee.parameters.len() {
+            return Err(BackendError::Unsupported(
+                "scalar call argument count does not match callee".to_owned(),
+            ));
+        }
+        let mut call_arguments = vec![
+            "ptr %context".to_owned(),
+            format!(
+                "{} {}",
+                llvm_type_for_register(self.function, current_lifecycle)?,
+                register_name(current_lifecycle)
+            ),
+        ];
+        for (index, parameter) in callee.parameters.iter().enumerate() {
+            let parameter_index = u32::try_from(index).map_err(|_| {
+                BackendError::Unsupported("callee parameter index exceeds u32".to_owned())
+            })?;
+            let Some(argument) = argument_map.get(&parameter_index) else {
+                return Err(BackendError::Unsupported(
+                    "scalar call is missing a parameter argument".to_owned(),
+                ));
+            };
+            let expected = llvm_type_for_register(callee, *parameter)?;
+            let actual = llvm_type_for_register(self.function, *argument)?;
+            if expected != actual {
+                return Err(BackendError::Unsupported(
+                    "scalar call argument type does not match callee".to_owned(),
+                ));
+            }
+            call_arguments.push(format!("{expected} {}", register_name(*argument)));
+        }
+        let result_slot = match (&callee.return_type, dst) {
+            (IrType::Unit, None) => None,
+            (IrType::Unit, Some(_)) => {
+                return Err(BackendError::Unsupported(
+                    "Unit call unexpectedly has a result register".to_owned(),
+                ));
+            }
+            (return_type, Some(_)) => {
+                let ty = scalar_type(return_type).ok_or_else(|| {
+                    BackendError::Unsupported(
+                        "scalar call return type is not representable".to_owned(),
+                    )
+                })?;
+                let slot = format!("%call_result_{}_{}", function_id.0, self.lines.len());
+                self.line(format!("{slot} = alloca {ty}"));
+                call_arguments.push(format!("ptr {slot}"));
+                Some((slot, ty))
+            }
+            (_, None) => {
+                return Err(BackendError::Unsupported(
+                    "non-Unit call is missing a result register".to_owned(),
+                ));
+            }
+        };
+        call_arguments.push("ptr %out_kind".to_owned());
+        call_arguments.push("ptr %out_location".to_owned());
+        let stem = format!("call_{}_{}", function_id.0, self.lines.len());
+        let status = format!("%{stem}.status");
+        self.line(format!(
+            "{status} = call i32 @keld_fn_{}({})",
+            function_id.0,
+            call_arguments.join(", ")
+        ));
+        let is_ok = format!("%{stem}.is_ok");
+        self.line(format!("{is_ok} = icmp eq i32 {status}, 0"));
+        let ok_label = format!("{stem}.ok");
+        let status_label = format!("{stem}.status_dispatch");
+        let fault_label = format!("{stem}.fault");
+        self.line(format!(
+            "br i1 {is_ok}, label %{ok_label}, label %{status_label}"
+        ));
+        self.label(status_label);
+        let is_fault = format!("%{stem}.is_fault");
+        self.line(format!("{is_fault} = icmp eq i32 {status}, 1"));
+        self.line(format!(
+            "br i1 {is_fault}, label %{fault_label}, label %internal_exit"
+        ));
+        self.label(fault_label);
+        self.line("br label %fault_exit");
+        self.label(ok_label);
+        if let Some((slot, ty)) = result_slot
+            && let Some(dst) = dst
+        {
+            self.line(format!("{} = load {ty}, ptr {slot}", register_name(dst)));
         }
         Ok(())
     }
@@ -815,21 +951,26 @@ impl<'module> ScalarLowerer<'module> {
             )),
             Terminator::Return(Some(register)) => {
                 let ty = llvm_type_for_register(self.function, *register)?;
-                if ty != "i64" {
+                if matches!(self.function.return_type, IrType::Unit | IrType::Lifecycle)
+                    || scalar_type(&self.function.return_type) != Some(ty)
+                {
                     return Err(BackendError::Unsupported(
-                        "native scalar main must return Int".to_owned(),
+                        "native scalar return type does not match the function".to_owned(),
                     ));
                 }
                 self.line(format!(
-                    "store i64 {}, ptr %out_value",
+                    "store {ty} {}, ptr %out_value",
                     register_name(*register)
                 ));
                 self.line("ret i32 0");
             }
             Terminator::Return(None) => {
-                return Err(BackendError::Unsupported(
-                    "native scalar main requires an Int return value".to_owned(),
-                ));
+                if self.function.return_type != IrType::Unit {
+                    return Err(BackendError::Unsupported(
+                        "non-Unit scalar function requires a return value".to_owned(),
+                    ));
+                }
+                self.line("ret i32 0");
             }
             Terminator::Fault { kind, span } => {
                 let label = self.fault_label(*kind, *span);
@@ -861,13 +1002,14 @@ impl<'module> ScalarLowerer<'module> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String, BackendError> {
-    if !module.definitions.is_empty() || module.functions.len() != 1 {
+    if !module.definitions.is_empty() {
         return Err(BackendError::Unsupported(
-            "native scalar lowering requires one definition-free function".to_owned(),
+            "native scalar lowering requires definition-free functions".to_owned(),
         ));
     }
-    let Some(function) = module
+    let Some(main) = module
         .functions
         .iter()
         .find(|function| function.id == module.main)
@@ -876,36 +1018,84 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
             "module main function is missing".to_owned(),
         ));
     };
-    if !function.parameters.is_empty() || function.return_type != IrType::Int {
+    if !main.parameters.is_empty() || main.return_type != IrType::Int {
         return Err(BackendError::Unsupported(
             "native scalar main must be parameterless and return Int".to_owned(),
         ));
     }
-    for (index, ty) in function.register_types.iter().enumerate() {
-        if *ty != IrType::Lifecycle && scalar_type(ty).is_none() {
+    for function in &module.functions {
+        if function.return_type != IrType::Unit && scalar_type(&function.return_type).is_none() {
             return Err(BackendError::Unsupported(format!(
-                "register {index} has a non-scalar type"
+                "function {} has an unsupported return type",
+                function.id.0
             )));
+        }
+        for parameter in &function.parameters {
+            let Some(ty) = function.register_types.get(parameter.0 as usize) else {
+                return Err(BackendError::Unsupported(
+                    "function parameter register is missing".to_owned(),
+                ));
+            };
+            if scalar_type(ty).is_none() {
+                return Err(BackendError::Unsupported(
+                    "scalar function parameters must be Int, Bool, or Lifecycle".to_owned(),
+                ));
+            }
+        }
+        for (index, ty) in function.register_types.iter().enumerate() {
+            if scalar_type(ty).is_none() && *ty != IrType::Lifecycle {
+                return Err(BackendError::Unsupported(format!(
+                    "register {index} has a non-scalar type"
+                )));
+            }
         }
     }
     let locations = LocationTable::from_module(module, &metadata.source);
-    let mut lowerer = ScalarLowerer::new(function, &locations);
-    let Some(entry) = function
-        .blocks
-        .iter()
-        .find(|block| block.id == function.entry)
-    else {
-        return Err(BackendError::Unsupported(
-            "native scalar entry block is missing".to_owned(),
-        ));
-    };
-    lowerer.emit_block(entry)?;
-    for block in &function.blocks {
-        if block.id != function.entry {
-            lowerer.emit_block(block)?;
+    let mut functions_ir = String::new();
+    for function in &module.functions {
+        let mut lowerer = ScalarLowerer::new(module, function, &locations);
+        let Some(entry) = function
+            .blocks
+            .iter()
+            .find(|block| block.id == function.entry)
+        else {
+            return Err(BackendError::Unsupported(
+                "native scalar entry block is missing".to_owned(),
+            ));
+        };
+        lowerer.emit_block(entry)?;
+        for block in &function.blocks {
+            if block.id != function.entry {
+                lowerer.emit_block(block)?;
+            }
         }
+        let body = lowerer.finish();
+        let lifecycle_type = llvm_type_for_register(function, function.current_lifecycle)?;
+        let mut parameters = vec![
+            format!("ptr %context"),
+            format!(
+                "{lifecycle_type} {}",
+                register_name(function.current_lifecycle)
+            ),
+        ];
+        for parameter in &function.parameters {
+            let ty = llvm_type_for_register(function, *parameter)?;
+            parameters.push(format!("{ty} {}", register_name(*parameter)));
+        }
+        if function.return_type != IrType::Unit {
+            parameters.push("ptr %out_value".to_owned());
+        }
+        parameters.push("ptr %out_kind".to_owned());
+        parameters.push("ptr %out_location".to_owned());
+        let _ = writeln!(
+            functions_ir,
+            "define i32 @keld_fn_{}({}) {{\n{}\n}}\n",
+            function.id.0,
+            parameters.join(", "),
+            body
+        );
     }
-    let program = lowerer.finish();
+
     let path = metadata.path.to_string_lossy();
     let path_bytes = path.as_bytes();
     let path_length = path_bytes.len();
@@ -913,11 +1103,9 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let path_type_length = path_length.saturating_add(1);
     let path_pointer =
         format!("getelementptr inbounds ([{path_type_length} x i8], ptr @keld_path, i64 0, i64 0)");
+    let main_name = format!("keld_fn_{}", main.id.0);
     let mut ir = format!(
-        "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\ndefine i32 @keld_program_main(ptr %out_value, ptr %out_kind, ptr %out_location) {{\n{program}\n}}\n\n"
-    );
-    ir.push_str(
-        "define i32 @main() {\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %status = call i32 @keld_program_main(ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %internal_main\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
+        "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\n{functions_ir}\ndefine i32 @main() {{\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %status = call i32 @{main_name}(ptr null, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %internal_main\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
     );
     for location in locations.entries() {
         let _ = writeln!(
