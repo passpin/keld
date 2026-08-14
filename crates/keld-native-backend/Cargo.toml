@@ -12,6 +12,7 @@ keld-native-llvm = { path = "../keld-native-llvm", features = ["llvm"] }
 keld-source = { path = "../keld-source" }
 
 [dev-dependencies]
+keld-flow = { path = "../keld-flow" }
 keld-semantics = { path = "../keld-semantics" }
 
 [lints]

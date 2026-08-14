@@ -4,7 +4,7 @@
 
 use keld_ir::{
     CompareOp, FaultKind as IrFaultKind, FunctionId, Instruction, IntBinaryOp, IntUnaryOp, IrType,
-    Module, ParameterIndex, Register, Terminator, validate,
+    Module, ParameterIndex, Register, RegisterStorage, Terminator, validate,
 };
 use keld_native_abi::{RUNTIME_DLL_NAME, RUNTIME_IMPORT_LIBRARY_NAME};
 use keld_native_llvm::{self, OptimizationLevel as LlvmOptimizationLevel};
@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const TARGET_TRIPLE: &str = "x86_64-w64-windows-gnu";
 const LLVM_VERSION: &str = "22.1.8";
+const VALUE_IR_TYPE: &str = "{ i32, i32, [3 x i64] }";
 static NEXT_STAGE: AtomicU64 = AtomicU64::new(1);
 
 /// One deterministic source location embedded in a native executable.
@@ -354,6 +355,22 @@ fn scalar_type(ty: &IrType) -> Option<&'static str> {
     }
 }
 
+fn is_managed_type(ty: &IrType) -> bool {
+    matches!(
+        ty,
+        IrType::Struct(_)
+            | IrType::Entity(_)
+            | IrType::Link { .. }
+            | IrType::Text
+            | IrType::List(_)
+            | IrType::Optional(_)
+    )
+}
+
+fn value_type(ty: &IrType) -> Option<&'static str> {
+    scalar_type(ty).or_else(|| is_managed_type(ty).then_some(VALUE_IR_TYPE))
+}
+
 fn ir_fault_code(kind: IrFaultKind) -> u32 {
     match kind {
         IrFaultKind::Arithmetic => 1,
@@ -395,11 +412,26 @@ fn register_name(register: Register) -> String {
     format!("%r{}", register.0)
 }
 
+fn managed_slot_name(function: &keld_ir::Function, register: Register) -> String {
+    if function.parameters.contains(&register)
+        && function
+            .register_types
+            .get(register.0 as usize)
+            .is_some_and(is_managed_type)
+    {
+        register_name(register)
+    } else {
+        format!("%slot{}", register.0)
+    }
+}
+
 fn escape_llvm_bytes(bytes: &[u8]) -> String {
     let mut escaped = String::new();
     for byte in bytes {
         match byte {
-            b' '..=b'!' | b'#'..=b'[' | b']'..=b'~' => escaped.push(char::from(*byte)),
+            b' '..=b'!' | b'#'..=b'[' | b']'..=b'~' if *byte != b'\\' && *byte != b'"' => {
+                escaped.push(char::from(*byte));
+            }
             _ => {
                 let _ = write!(escaped, "\\{byte:02X}");
             }
@@ -415,6 +447,9 @@ struct ScalarLowerer<'module> {
     lines: Vec<String>,
     current_label: String,
     faults: BTreeSet<(u32, u32)>,
+    text_literals: BTreeMap<String, Vec<u8>>,
+    view_entities: BTreeMap<keld_ir::ViewId, Register>,
+    slots_emitted: bool,
 }
 
 impl<'module> ScalarLowerer<'module> {
@@ -430,7 +465,211 @@ impl<'module> ScalarLowerer<'module> {
             lines: Vec::new(),
             current_label: String::new(),
             faults: BTreeSet::new(),
+            text_literals: BTreeMap::new(),
+            view_entities: BTreeMap::new(),
+            slots_emitted: false,
         }
+    }
+
+    fn value_name(&self, register: Register) -> String {
+        self.function
+            .register_types
+            .get(register.0 as usize)
+            .filter(|ty| is_managed_type(ty))
+            .map_or_else(
+                || register_name(register),
+                |_: &IrType| managed_slot_name(self.function, register),
+            )
+    }
+
+    fn value_type(&self, register: Register) -> Result<&'static str, BackendError> {
+        self.function
+            .register_types
+            .get(register.0 as usize)
+            .and_then(value_type)
+            .ok_or_else(|| {
+                BackendError::Unsupported(format!(
+                    "register %{} has no native value representation",
+                    register.0
+                ))
+            })
+    }
+
+    fn is_managed_register(&self, register: Register) -> bool {
+        self.function
+            .register_types
+            .get(register.0 as usize)
+            .is_some_and(is_managed_type)
+    }
+
+    fn list_element_type(&self, list: Register) -> Result<&IrType, BackendError> {
+        match self.function.register_types.get(list.0 as usize) {
+            Some(IrType::List(element)) => Ok(element),
+            _ => Err(BackendError::Unsupported(
+                "List instruction receiver is not a List".to_owned(),
+            )),
+        }
+    }
+
+    fn definition_field_index(
+        &self,
+        definition: keld_ir::DefId,
+        field: keld_ir::FieldId,
+    ) -> Result<usize, BackendError> {
+        let definition = self
+            .module
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == definition)
+            .ok_or_else(|| BackendError::Unsupported("struct definition is missing".to_owned()))?;
+        definition
+            .fields
+            .iter()
+            .position(|(candidate, _)| *candidate == field)
+            .ok_or_else(|| BackendError::Unsupported("struct field is missing".to_owned()))
+    }
+
+    fn definition_field_type(
+        &self,
+        definition: keld_ir::DefId,
+        field: keld_ir::FieldId,
+    ) -> Result<&IrType, BackendError> {
+        let definition = self
+            .module
+            .definitions
+            .iter()
+            .find(|candidate| candidate.id == definition)
+            .ok_or_else(|| BackendError::Unsupported("definition is missing".to_owned()))?;
+        definition
+            .fields
+            .iter()
+            .find_map(|(candidate, ty)| (*candidate == field).then_some(ty))
+            .ok_or_else(|| BackendError::Unsupported("definition field is missing".to_owned()))
+    }
+
+    fn entity_register_definition(&self, entity: Register) -> Result<keld_ir::DefId, BackendError> {
+        match self.function.register_types.get(entity.0 as usize) {
+            Some(IrType::Entity(definition)) => Ok(*definition),
+            _ => Err(BackendError::Unsupported(
+                "entity instruction operand is not an Entity".to_owned(),
+            )),
+        }
+    }
+
+    fn lifecycle_pointer(&mut self, register: Register) -> String {
+        let slot = format!("%lifecycle_argument_{}", self.lines.len());
+        self.line(format!("{slot} = alloca {{ i64, i32, i32 }}"));
+        self.line(format!(
+            "store {{ i64, i32, i32 }} {}, ptr {slot}",
+            register_name(register)
+        ));
+        slot
+    }
+
+    fn emit_value_argument(&mut self, register: Register) -> Result<(String, bool), BackendError> {
+        if self.is_managed_register(register) {
+            return Ok((self.value_name(register), true));
+        }
+        let ty = self.value_type(register)?;
+        let slot = format!("%list_argument_{}.slot", self.lines.len());
+        self.line(format!("{slot} = alloca {VALUE_IR_TYPE}"));
+        match ty {
+            "i64" => self.line(format!(
+                "%list_argument_{}.value = insertvalue {VALUE_IR_TYPE} zeroinitializer, i64 {}, 2, 0",
+                self.lines.len(),
+                register_name(register)
+            )),
+            "i1" => {
+                let widened = format!("%list_argument_{}.widened", self.lines.len());
+                self.line(format!("{widened} = zext i1 {} to i64", register_name(register)));
+                self.line(format!(
+                    "%list_argument_{}.value = insertvalue {VALUE_IR_TYPE} zeroinitializer, i64 {widened}, 2, 0",
+                    self.lines.len()
+                ));
+            }
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "List element has no scalar envelope representation".to_owned(),
+                ));
+            }
+        }
+        let value = format!(
+            "%list_argument_{}.value",
+            self.lines.len().saturating_sub(1)
+        );
+        self.line(format!("store {VALUE_IR_TYPE} {value}, ptr {slot}"));
+        Ok((slot, false))
+    }
+
+    fn emit_value_result(
+        &mut self,
+        destination: Register,
+        output: &str,
+    ) -> Result<(), BackendError> {
+        if self.is_managed_register(destination) {
+            let value = format!("%list_result_{}", self.lines.len());
+            self.line(format!("{value} = load {VALUE_IR_TYPE}, ptr {output}"));
+            self.line(format!(
+                "store {VALUE_IR_TYPE} {value}, ptr {}",
+                self.value_name(destination)
+            ));
+            return Ok(());
+        }
+        let ty = self.value_type(destination)?;
+        let value = format!("%list_result_{}", self.lines.len());
+        self.line(format!("{value} = load {VALUE_IR_TYPE}, ptr {output}"));
+        let word = format!("{value}.word");
+        self.line(format!(
+            "{word} = extractvalue {VALUE_IR_TYPE} {value}, 2, 0"
+        ));
+        match ty {
+            "i64" => self.line(format!(
+                "{} = add i64 0, {word}",
+                register_name(destination)
+            )),
+            "i1" => self.line(format!(
+                "{} = icmp ne i64 {word}, 0",
+                register_name(destination)
+            )),
+            _ => {
+                return Err(BackendError::Unsupported(
+                    "List result has no scalar envelope representation".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn next_label(&self, prefix: &str) -> String {
+        format!("{prefix}_{}", self.lines.len())
+    }
+
+    fn emit_runtime_status(&mut self, status: &str, continuation: String) {
+        let is_ok = format!("{status}.ok");
+        let dispatch = self.next_label("runtime_dispatch");
+        let runtime_fault = self.next_label("runtime_fault");
+        let context_status = self.next_label("runtime_fault_status");
+        self.line(format!("{is_ok} = icmp eq i32 {status}, 0"));
+        self.line(format!(
+            "br i1 {is_ok}, label %{continuation}, label %{dispatch}"
+        ));
+        self.label(dispatch);
+        let is_fault = format!("{status}.language_fault");
+        self.line(format!("{is_fault} = icmp eq i32 {status}, 1"));
+        self.line(format!(
+            "br i1 {is_fault}, label %{runtime_fault}, label %internal_exit"
+        ));
+        self.label(runtime_fault);
+        let copied = format!("%{context_status}");
+        self.line(format!(
+            "{copied} = call i32 @keld_rt_v1_context_fault_parts(ptr %context, ptr %out_kind, ptr %out_location)"
+        ));
+        let copied_ok = format!("%{context_status}.ok");
+        self.line(format!("{copied_ok} = icmp eq i32 {copied}, 0"));
+        self.line(format!(
+            "br i1 {copied_ok}, label %fault_exit, label %internal_exit"
+        ));
+        self.label(continuation);
     }
 
     fn line(&mut self, value: impl Into<String>) {
@@ -454,20 +693,45 @@ impl<'module> ScalarLowerer<'module> {
 
     fn emit_block(&mut self, block: &keld_ir::IrBlock) -> Result<(), BackendError> {
         self.label(format!("bb{}", block.id.0));
-        let mut saw_non_phi = false;
-        for instruction in &block.instructions {
-            if matches!(instruction, Instruction::Phi { .. }) {
-                if saw_non_phi {
-                    return Err(BackendError::Unsupported(
-                        "Phi must precede non-Phi instructions in a block".to_owned(),
-                    ));
-                }
-            } else {
-                saw_non_phi = true;
-            }
+        let leading_phi = block
+            .instructions
+            .iter()
+            .take_while(|instruction| matches!(instruction, Instruction::Phi { .. }))
+            .count();
+        if block
+            .instructions
+            .iter()
+            .skip(leading_phi)
+            .any(|instruction| matches!(instruction, Instruction::Phi { .. }))
+        {
+            return Err(BackendError::Unsupported(
+                "Phi must precede non-Phi instructions in a block".to_owned(),
+            ));
+        }
+        for instruction in block.instructions.iter().take(leading_phi) {
+            self.emit_instruction(instruction)?;
+        }
+        if block.id == self.function.entry && !self.slots_emitted {
+            self.emit_managed_slots();
+        }
+        for instruction in block.instructions.iter().skip(leading_phi) {
             self.emit_instruction(instruction)?;
         }
         self.emit_terminator(&block.terminator)
+    }
+
+    fn emit_managed_slots(&mut self) {
+        self.slots_emitted = true;
+        for (index, ty) in self.function.register_types.iter().enumerate() {
+            let register = Register(
+                u32::try_from(index).expect("register index exceeds native register range"),
+            );
+            if is_managed_type(ty) && !self.function.parameters.contains(&register) {
+                let slot = managed_slot_name(self.function, register);
+                self.line(format!("{slot} = alloca {VALUE_IR_TYPE}"));
+                self.line(format!("store {VALUE_IR_TYPE} zeroinitializer, ptr {slot}"));
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -501,8 +765,53 @@ impl<'module> ScalarLowerer<'module> {
                 ));
             }
             Instruction::Compare {
-                dst, op, lhs, rhs, ..
+                dst,
+                op,
+                lhs,
+                rhs,
+                span,
             } => {
+                if matches!(
+                    self.function.register_types.get(lhs.0 as usize),
+                    Some(IrType::Text)
+                ) {
+                    if !matches!(op, CompareOp::Eq | CompareOp::NotEq)
+                        || !matches!(
+                            self.function.register_types.get(rhs.0 as usize),
+                            Some(IrType::Text)
+                        )
+                    {
+                        return Err(BackendError::Unsupported(
+                            "Text comparison supports only equality".to_owned(),
+                        ));
+                    }
+                    let out = format!("%text_equal_{}", self.lines.len());
+                    let status = format!("%text_equal_status_{}", self.lines.len());
+                    let location = self.locations.id_for(*span);
+                    self.line(format!("{out}.slot = alloca i8"));
+                    self.line(format!(
+                        "{status} = call i32 @keld_rt_v1_text_equal(ptr %context, ptr {}, ptr {}, ptr {out}.slot, i32 {location})",
+                        self.value_name(*lhs),
+                        self.value_name(*rhs),
+                    ));
+                    self.emit_runtime_status(
+                        &status,
+                        format!("text_equal_cont_{}", self.lines.len()),
+                    );
+                    self.line(format!("{out} = load i8, ptr {out}.slot"));
+                    let value = if matches!(op, CompareOp::Eq) {
+                        format!("{out}.bool")
+                    } else {
+                        format!("{out}.not")
+                    };
+                    if matches!(op, CompareOp::Eq) {
+                        self.line(format!("{value} = icmp ne i8 {out}, 0"));
+                    } else {
+                        self.line(format!("{value} = icmp eq i8 {out}, 0"));
+                    }
+                    self.line(format!("{} = xor i1 {value}, false", register_name(*dst)));
+                    return Ok(());
+                }
                 let ty = llvm_type_for_register(self.function, *lhs)?;
                 if ty != llvm_type_for_register(self.function, *rhs)? {
                     return Err(BackendError::Unsupported(
@@ -538,6 +847,924 @@ impl<'module> ScalarLowerer<'module> {
                     .join(", ");
                 self.line(format!("{} = phi {ty} {values}", register_name(*dst)));
             }
+            Instruction::ConstText { dst, value, span } => {
+                if !matches!(
+                    self.function.register_types.get(dst.0 as usize),
+                    Some(IrType::Text)
+                ) {
+                    return Err(BackendError::Unsupported(
+                        "ConstText destination is not Text".to_owned(),
+                    ));
+                }
+                let global = format!(
+                    "keld_text_{}_{}",
+                    self.function.id.0,
+                    self.text_literals.len()
+                );
+                self.text_literals
+                    .insert(global.clone(), value.as_bytes().to_vec());
+                let length = value.len();
+                let array_length = length.saturating_add(1);
+                let pointer = format!(
+                    "getelementptr inbounds ([{array_length} x i8], ptr @{global}, i64 0, i64 0)"
+                );
+                let status = format!("%text_new_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_text_new(ptr %context, ptr {pointer}, i64 {length}, ptr {}, i32 {location})",
+                    self.value_name(*dst),
+                ));
+                self.emit_runtime_status(&status, format!("text_new_cont_{}", self.lines.len()));
+            }
+            Instruction::TextByteLength { dst, text, span } => {
+                let output = format!("%text_length_{}", self.lines.len());
+                let status = format!("%text_length_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca i64"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_text_byte_length(ptr %context, ptr {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(*text),
+                ));
+                self.emit_runtime_status(&status, format!("text_length_cont_{}", self.lines.len()));
+                self.line(format!(
+                    "{} = load i64, ptr {output}.slot",
+                    register_name(*dst)
+                ));
+            }
+            Instruction::TextIsEmpty { dst, text, span } => {
+                let output = format!("%text_empty_{}", self.lines.len());
+                let status = format!("%text_empty_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca i8"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_text_is_empty(ptr %context, ptr {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(*text),
+                ));
+                self.emit_runtime_status(&status, format!("text_empty_cont_{}", self.lines.len()));
+                let loaded = format!("{output}.loaded");
+                self.line(format!("{loaded} = load i8, ptr {output}.slot"));
+                self.line(format!("{} = icmp ne i8 {loaded}, 0", register_name(*dst)));
+            }
+            Instruction::TextConcat {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                let status = format!("%text_concat_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_text_concat(ptr %context, ptr {}, ptr {}, ptr {}, i32 {location})",
+                    self.value_name(*lhs),
+                    self.value_name(*rhs),
+                    self.value_name(*dst),
+                ));
+                self.emit_runtime_status(&status, format!("text_concat_cont_{}", self.lines.len()));
+            }
+            Instruction::Copy { dst, src, span } => {
+                if self.is_managed_register(*src) {
+                    let status = format!("%value_copy_status_{}", self.lines.len());
+                    let location = self.locations.id_for(*span);
+                    self.line(format!(
+                        "{status} = call i32 @keld_rt_v1_value_copy(ptr %context, ptr {}, ptr {}, i32 {location})",
+                        self.value_name(*src),
+                        self.value_name(*dst),
+                    ));
+                    self.emit_runtime_status(
+                        &status,
+                        format!("value_copy_cont_{}", self.lines.len()),
+                    );
+                } else {
+                    let ty = self.value_type(*src)?;
+                    if ty == "i64" {
+                        self.line(format!(
+                            "{} = add i64 0, {}",
+                            register_name(*dst),
+                            register_name(*src)
+                        ));
+                    } else if ty == "i1" {
+                        self.line(format!(
+                            "{} = xor i1 {}, false",
+                            register_name(*dst),
+                            register_name(*src)
+                        ));
+                    } else {
+                        self.line(format!(
+                            "{} = select i1 true, {ty} {}, {ty} zeroinitializer",
+                            register_name(*dst),
+                            register_name(*src)
+                        ));
+                    }
+                }
+            }
+            Instruction::Take { dst, src, .. } => {
+                if self.is_managed_register(*src) {
+                    let loaded = format!("%take_{}_{}", src.0, self.lines.len());
+                    self.line(format!(
+                        "{loaded} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*src)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {loaded}, ptr {}",
+                        self.value_name(*dst)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*src)
+                    ));
+                } else {
+                    let ty = self.value_type(*src)?;
+                    self.line(format!(
+                        "{} = select i1 true, {ty} {}, {ty} zeroinitializer",
+                        register_name(*dst),
+                        register_name(*src)
+                    ));
+                }
+            }
+            Instruction::InstallHome {
+                destination,
+                source,
+                displaced,
+                ..
+            } => {
+                if self.is_managed_register(*destination) {
+                    let previous = format!("%install_previous_{}", self.lines.len());
+                    let incoming = format!("%install_incoming_{}", self.lines.len());
+                    self.line(format!(
+                        "{previous} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*destination)
+                    ));
+                    self.line(format!(
+                        "{incoming} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*source)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {previous}, ptr {}",
+                        self.value_name(*displaced)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {incoming}, ptr {}",
+                        self.value_name(*destination)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*source)
+                    ));
+                } else {
+                    let ty = self.value_type(*source)?;
+                    let previous = format!("%install_previous_{}", self.lines.len());
+                    self.line(format!(
+                        "{previous} = select i1 true, {ty} {}, {ty} zeroinitializer",
+                        register_name(*destination)
+                    ));
+                    self.line(format!(
+                        "{} = select i1 true, {ty} {}, {ty} zeroinitializer",
+                        register_name(*destination),
+                        register_name(*source)
+                    ));
+                    self.line(format!(
+                        "{} = select i1 true, {ty} {previous}, {ty} zeroinitializer",
+                        register_name(*displaced),
+                    ));
+                }
+            }
+            Instruction::MoveHome {
+                destination,
+                source,
+                ..
+            } => {
+                if self.is_managed_register(*destination) {
+                    let incoming = format!("%move_incoming_{}", self.lines.len());
+                    self.line(format!(
+                        "{incoming} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*source)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {incoming}, ptr {}",
+                        self.value_name(*destination)
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*source)
+                    ));
+                } else {
+                    let ty = self.value_type(*source)?;
+                    self.line(format!(
+                        "{} = select i1 true, {ty} {}, {ty} zeroinitializer",
+                        register_name(*destination),
+                        register_name(*source)
+                    ));
+                }
+            }
+            Instruction::DropHome { home, span }
+            | Instruction::DropIfLive { home, span }
+            | Instruction::DropSlot { slot: home, span } => {
+                if self.is_managed_register(*home) {
+                    let status = format!("%value_drop_status_{}", self.lines.len());
+                    let location = self.locations.id_for(*span);
+                    self.line(format!(
+                        "{status} = call i32 @keld_rt_v1_value_drop(ptr %context, ptr {}, i32 {location})",
+                        self.value_name(*home),
+                    ));
+                    self.emit_runtime_status(
+                        &status,
+                        format!("value_drop_cont_{}", self.lines.len()),
+                    );
+                }
+            }
+            Instruction::CleanupTrackedScope { scope, span } => {
+                let homes = self
+                    .function
+                    .register_storage
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(index, storage)| {
+                        let RegisterStorage::Home {
+                            scope: home_scope, ..
+                        } = storage
+                        else {
+                            return None;
+                        };
+                        (home_scope == scope).then(|| {
+                            Register(
+                                u32::try_from(index)
+                                    .expect("register index exceeds native register range"),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for home in homes {
+                    if self.is_managed_register(home) {
+                        let status = format!("%scope_drop_status_{}", self.lines.len());
+                        let location = self.locations.id_for(*span);
+                        self.line(format!(
+                            "{status} = call i32 @keld_rt_v1_value_drop(ptr %context, ptr {}, i32 {location})",
+                            self.value_name(home)
+                        ));
+                        self.emit_runtime_status(
+                            &status,
+                            format!("scope_drop_cont_{}", self.lines.len()),
+                        );
+                    }
+                }
+            }
+            Instruction::ConstructStruct {
+                dst,
+                definition,
+                fields,
+                span,
+            } => {
+                let Some(IrType::Struct(expected_definition)) =
+                    self.function.register_types.get(dst.0 as usize)
+                else {
+                    return Err(BackendError::Unsupported(
+                        "struct construction destination is not a struct".to_owned(),
+                    ));
+                };
+                if expected_definition != definition {
+                    return Err(BackendError::Unsupported(
+                        "struct construction definition does not match destination".to_owned(),
+                    ));
+                }
+                let definition_info = self
+                    .module
+                    .definitions
+                    .iter()
+                    .find(|candidate| candidate.id == *definition)
+                    .ok_or_else(|| {
+                        BackendError::Unsupported("struct definition is missing".to_owned())
+                    })?;
+                let count = definition_info.fields.len();
+                let fields_array = format!("%struct_fields_{}", self.lines.len());
+                let managed_array = format!("%struct_managed_{}", self.lines.len());
+                self.line(format!(
+                    "{fields_array} = alloca [{count} x {VALUE_IR_TYPE}]"
+                ));
+                self.line(format!("{managed_array} = alloca [{count} x i8]"));
+                let mut seen = BTreeSet::new();
+                for (field, source) in fields {
+                    let index = self.definition_field_index(*definition, *field)?;
+                    if !seen.insert(index) {
+                        return Err(BackendError::Unsupported(
+                            "struct field is repeated".to_owned(),
+                        ));
+                    }
+                    let (source_pointer, managed) = self.emit_value_argument(*source)?;
+                    let field_pointer = format!("%struct_field_{}_{}", self.lines.len(), index);
+                    let managed_pointer =
+                        format!("%struct_managed_field_{}_{}", self.lines.len(), index);
+                    self.line(format!(
+                        "{field_pointer} = getelementptr inbounds [{count} x {VALUE_IR_TYPE}], ptr {fields_array}, i64 0, i64 {index}"
+                    ));
+                    self.line(format!("{managed_pointer} = getelementptr inbounds [{count} x i8], ptr {managed_array}, i64 0, i64 {index}"));
+                    let value = format!("%struct_source_{}", self.lines.len());
+                    self.line(format!(
+                        "{value} = load {VALUE_IR_TYPE}, ptr {source_pointer}"
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {value}, ptr {field_pointer}"
+                    ));
+                    self.line(format!(
+                        "store i8 {}, ptr {managed_pointer}",
+                        u8::from(managed)
+                    ));
+                }
+                if seen.len() != count {
+                    return Err(BackendError::Unsupported(
+                        "struct construction does not initialize every field".to_owned(),
+                    ));
+                }
+                let status = format!("%struct_new_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_struct_new(ptr %context, i32 {}, ptr {fields_array}, ptr {managed_array}, i32 {count}, ptr {}, i32 {location})",
+                    definition.0,
+                    self.value_name(*dst)
+                ));
+                self.emit_runtime_status(&status, format!("struct_new_cont_{}", self.lines.len()));
+                for (_, source) in fields {
+                    if self.is_managed_register(*source) {
+                        self.line(format!(
+                            "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                            self.value_name(*source)
+                        ));
+                    }
+                }
+            }
+            Instruction::ReadStructField {
+                dst,
+                base,
+                field,
+                span,
+            } => {
+                let Some(IrType::Struct(definition)) =
+                    self.function.register_types.get(base.0 as usize)
+                else {
+                    return Err(BackendError::Unsupported(
+                        "struct field base is not a struct".to_owned(),
+                    ));
+                };
+                let index = self.definition_field_index(*definition, *field)?;
+                let output = format!("%struct_read_{}", self.lines.len());
+                let status = format!("%struct_read_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_struct_field(ptr %context, ptr {}, i32 {index}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(*base),
+                    u8::from(self.is_managed_register(*dst))
+                ));
+                self.emit_runtime_status(&status, format!("struct_read_cont_{}", self.lines.len()));
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+            }
+            Instruction::ConstNoneLink { dst, entity, .. } => {
+                if !matches!(
+                    self.function.register_types.get(dst.0 as usize),
+                    Some(IrType::Link { .. })
+                ) {
+                    return Err(BackendError::Unsupported(
+                        "ConstNoneLink destination is not a Link".to_owned(),
+                    ));
+                }
+                let value = format!("%none_link_{}", self.lines.len());
+                let expected = format!("{value}.expected");
+                self.line(format!(
+                    "{value} = insertvalue {VALUE_IR_TYPE} zeroinitializer, i64 {}, 2, 0",
+                    entity.0
+                ));
+                self.line(format!("{expected} = select i1 true, {VALUE_IR_TYPE} {value}, {VALUE_IR_TYPE} zeroinitializer"));
+                self.line(format!(
+                    "store {VALUE_IR_TYPE} {expected}, ptr {}",
+                    self.value_name(*dst)
+                ));
+            }
+            Instruction::BeginLifecycle { dst, parent, span } => {
+                let parent_pointer = self.lifecycle_pointer(*parent);
+                let output = format!("%lifecycle_result_{}", self.lines.len());
+                let status = format!("%begin_lifecycle_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {{ i64, i32, i32 }}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_begin_lifecycle(ptr %context, ptr {parent_pointer}, ptr {output}.slot, i32 {location})"
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("begin_lifecycle_cont_{}", self.lines.len()),
+                );
+                self.line(format!(
+                    "{} = load {{ i64, i32, i32 }}, ptr {output}.slot",
+                    register_name(*dst)
+                ));
+            }
+            Instruction::EndLifecycle { lifecycle, span } => {
+                let lifecycle_pointer = self.lifecycle_pointer(*lifecycle);
+                let status = format!("%end_lifecycle_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_end_lifecycle(ptr %context, ptr {lifecycle_pointer}, i32 {location})"
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("end_lifecycle_cont_{}", self.lines.len()),
+                );
+            }
+            Instruction::AllocateEntity {
+                dst,
+                definition,
+                fields,
+                lifecycle,
+                span,
+            } => {
+                let definition_info = self
+                    .module
+                    .definitions
+                    .iter()
+                    .find(|candidate| candidate.id == *definition)
+                    .ok_or_else(|| {
+                        BackendError::Unsupported("entity definition is missing".to_owned())
+                    })?;
+                let count = definition_info.fields.len();
+                let fields_array = format!("%entity_fields_{}", self.lines.len());
+                let managed_array = format!("%entity_managed_{}", self.lines.len());
+                self.line(format!(
+                    "{fields_array} = alloca [{count} x {VALUE_IR_TYPE}]"
+                ));
+                self.line(format!("{managed_array} = alloca [{count} x i8]"));
+                let mut seen = BTreeSet::new();
+                for (field, source) in fields {
+                    let index = self.definition_field_index(*definition, *field)?;
+                    if !seen.insert(index) {
+                        return Err(BackendError::Unsupported(
+                            "entity field is repeated".to_owned(),
+                        ));
+                    }
+                    let (source_pointer, managed) = self.emit_value_argument(*source)?;
+                    let field_pointer = format!("%entity_field_{}_{}", self.lines.len(), index);
+                    let managed_pointer =
+                        format!("%entity_managed_field_{}_{}", self.lines.len(), index);
+                    self.line(format!(
+                        "{field_pointer} = getelementptr inbounds [{count} x {VALUE_IR_TYPE}], ptr {fields_array}, i64 0, i64 {index}"
+                    ));
+                    self.line(format!(
+                        "{managed_pointer} = getelementptr inbounds [{count} x i8], ptr {managed_array}, i64 0, i64 {index}"
+                    ));
+                    let value = format!("%entity_source_{}", self.lines.len());
+                    self.line(format!(
+                        "{value} = load {VALUE_IR_TYPE}, ptr {source_pointer}"
+                    ));
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} {value}, ptr {field_pointer}"
+                    ));
+                    self.line(format!(
+                        "store i8 {}, ptr {managed_pointer}",
+                        u8::from(managed)
+                    ));
+                }
+                if seen.len() != count {
+                    return Err(BackendError::Unsupported(
+                        "entity construction does not initialize every field".to_owned(),
+                    ));
+                }
+                let lifecycle_pointer = self.lifecycle_pointer(*lifecycle);
+                let status = format!("%allocate_entity_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_allocate_entity(ptr %context, i32 {}, ptr {fields_array}, ptr {managed_array}, i32 {count}, ptr {lifecycle_pointer}, ptr {}, i32 {location})",
+                    definition.0,
+                    self.value_name(*dst)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("allocate_entity_cont_{}", self.lines.len()),
+                );
+                for (_, source) in fields {
+                    if self.is_managed_register(*source) {
+                        self.line(format!(
+                            "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                            self.value_name(*source)
+                        ));
+                    }
+                }
+            }
+            Instruction::EntityToLink { dst, entity, span } => {
+                let status = format!("%entity_to_link_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_entity_to_link(ptr %context, ptr {}, ptr {}, i32 {location})",
+                    self.value_name(*entity),
+                    self.value_name(*dst)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("entity_to_link_cont_{}", self.lines.len()),
+                );
+            }
+            Instruction::OpenView { view, entity, .. } => {
+                self.view_entities.insert(*view, *entity);
+            }
+            Instruction::ReadField {
+                dst,
+                view,
+                field,
+                span,
+            } => {
+                let entity = *self.view_entities.get(view).ok_or_else(|| {
+                    BackendError::Unsupported("field read uses an unknown view".to_owned())
+                })?;
+                let definition = self.entity_register_definition(entity)?;
+                let index = self.definition_field_index(definition, *field)?;
+                let output = format!("%entity_read_{}", self.lines.len());
+                let status = format!("%entity_read_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_entity_field(ptr %context, ptr {}, i32 {index}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(entity),
+                    u8::from(self.is_managed_register(*dst))
+                ));
+                self.emit_runtime_status(&status, format!("entity_read_cont_{}", self.lines.len()));
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+            }
+            Instruction::WriteField {
+                view,
+                field,
+                value,
+                span,
+            } => {
+                let entity = *self.view_entities.get(view).ok_or_else(|| {
+                    BackendError::Unsupported("field write uses an unknown view".to_owned())
+                })?;
+                let definition = self.entity_register_definition(entity)?;
+                let field_type = self.definition_field_type(definition, *field)?;
+                let managed = is_managed_type(field_type);
+                let (value_pointer, _) = self.emit_value_argument(*value)?;
+                let output = format!("%entity_write_{}", self.lines.len());
+                let status = format!("%entity_write_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_replace_field(ptr %context, ptr {}, i32 {}, ptr {value_pointer}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(entity),
+                    self.definition_field_index(definition, *field)?,
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("entity_write_cont_{}", self.lines.len()),
+                );
+                if managed {
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*value)
+                    ));
+                    let drop_status = format!("%entity_write_drop_status_{}", self.lines.len());
+                    self.line(format!(
+                        "{drop_status} = call i32 @keld_rt_v1_value_drop(ptr %context, ptr {output}.slot, i32 {location})"
+                    ));
+                    self.emit_runtime_status(
+                        &drop_status,
+                        format!("entity_write_drop_cont_{}", self.lines.len()),
+                    );
+                }
+            }
+            Instruction::CloseView { view, .. } => {
+                self.view_entities.remove(view);
+            }
+            Instruction::ReplaceField {
+                view,
+                field,
+                source,
+                displaced,
+                span,
+            } => {
+                let entity = *self.view_entities.get(view).ok_or_else(|| {
+                    BackendError::Unsupported("field replacement uses an unknown view".to_owned())
+                })?;
+                let definition = self.entity_register_definition(entity)?;
+                let field_type = self.definition_field_type(definition, *field)?;
+                let managed = is_managed_type(field_type);
+                let (value_pointer, _) = self.emit_value_argument(*source)?;
+                let output = format!("%entity_replace_{}", self.lines.len());
+                let status = format!("%entity_replace_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_replace_field(ptr %context, ptr {}, i32 {}, ptr {value_pointer}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(entity),
+                    self.definition_field_index(definition, *field)?,
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("entity_replace_cont_{}", self.lines.len()),
+                );
+                self.emit_value_result(*displaced, &format!("{output}.slot"))?;
+                if managed {
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*source)
+                    ));
+                }
+            }
+            Instruction::KeepEntity {
+                entity,
+                lifecycle,
+                span,
+            } => {
+                let lifecycle_pointer = self.lifecycle_pointer(*lifecycle);
+                let status = format!("%keep_entity_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_keep_entity(ptr %context, ptr {}, ptr {lifecycle_pointer}, i32 {location})",
+                    self.value_name(*entity)
+                ));
+                self.emit_runtime_status(&status, format!("keep_entity_cont_{}", self.lines.len()));
+            }
+            Instruction::RetireEntity { entity, span } => {
+                let status = format!("%retire_entity_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_retire_entity(ptr %context, ptr {}, i32 {location})",
+                    self.value_name(*entity)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("retire_entity_cont_{}", self.lines.len()),
+                );
+                self.line(format!(
+                    "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                    self.value_name(*entity)
+                ));
+            }
+            Instruction::ListNew { dst, span } => {
+                let status = format!("%list_new_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_new(ptr %context, ptr {}, i32 {location})",
+                    self.value_name(*dst)
+                ));
+                self.emit_runtime_status(&status, format!("list_new_cont_{}", self.lines.len()));
+            }
+            Instruction::ListLength { dst, list, span } => {
+                let output = format!("%list_length_{}", self.lines.len());
+                let status = format!("%list_length_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca i64"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_length(ptr %context, ptr {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(*list)
+                ));
+                self.emit_runtime_status(&status, format!("list_length_cont_{}", self.lines.len()));
+                self.line(format!(
+                    "{} = load i64, ptr {output}.slot",
+                    register_name(*dst)
+                ));
+            }
+            Instruction::ListPush { list, value, span } => {
+                let element = self.list_element_type(*list)?;
+                let managed = is_managed_type(element);
+                let (value_pointer, _) = self.emit_value_argument(*value)?;
+                let status = format!("%list_push_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_push(ptr %context, ptr {}, ptr {value_pointer}, i8 {}, i32 {location})",
+                    self.value_name(*list),
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(&status, format!("list_push_cont_{}", self.lines.len()));
+                if managed {
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*value)
+                    ));
+                }
+            }
+            Instruction::ListPushPlace {
+                list,
+                source,
+                value,
+                span,
+            } => {
+                if source.base != *list || !source.projections.is_empty() {
+                    return Err(BackendError::Unsupported(
+                        "projected List push requires a runtime place lowering".to_owned(),
+                    ));
+                }
+                self.emit_instruction(&Instruction::ListPush {
+                    list: *list,
+                    value: *value,
+                    span: *span,
+                })?;
+            }
+            Instruction::ListRemove {
+                dst,
+                list,
+                index,
+                span,
+            } => {
+                let output = format!("%list_remove_{}", self.lines.len());
+                let status = format!("%list_remove_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_remove(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(*list),
+                    register_name(*index)
+                ));
+                self.emit_runtime_status(&status, format!("list_remove_cont_{}", self.lines.len()));
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+            }
+            Instruction::ListRemovePlace {
+                dst,
+                list,
+                source,
+                index,
+                span,
+            } => {
+                if source.base != *list || !source.projections.is_empty() {
+                    return Err(BackendError::Unsupported(
+                        "projected List remove requires a runtime place lowering".to_owned(),
+                    ));
+                }
+                self.emit_instruction(&Instruction::ListRemove {
+                    dst: *dst,
+                    list: *list,
+                    index: *index,
+                    span: *span,
+                })?;
+            }
+            Instruction::ListGet {
+                dst,
+                receiver,
+                index,
+                span,
+            }
+            | Instruction::ListIndex {
+                dst,
+                receiver,
+                index,
+                span,
+            } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let element = self.list_element_type(receiver.list)?;
+                let managed = is_managed_type(element);
+                let output = format!("%list_get_{}", self.lines.len());
+                let status = format!("%list_get_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_get(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(receiver.list),
+                    register_name(*index),
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(&status, format!("list_get_cont_{}", self.lines.len()));
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+            }
+            Instruction::ListReplace {
+                receiver,
+                index,
+                value,
+                displaced,
+                span,
+            } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let element = self.list_element_type(receiver.list)?;
+                let managed = is_managed_type(element);
+                let (value_pointer, _) = self.emit_value_argument(*value)?;
+                let output = format!("%list_replace_{}", self.lines.len());
+                let status = format!("%list_replace_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_replace(ptr %context, ptr {}, i64 {}, ptr {value_pointer}, ptr {output}.slot, i8 {}, i32 {location})",
+                    self.value_name(receiver.list),
+                    register_name(*index),
+                    u8::from(managed)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_replace_cont_{}", self.lines.len()),
+                );
+                self.emit_value_result(*displaced, &format!("{output}.slot"))?;
+                if managed {
+                    self.line(format!(
+                        "store {VALUE_IR_TYPE} zeroinitializer, ptr {}",
+                        self.value_name(*value)
+                    ));
+                }
+            }
+            Instruction::ListTryRemove {
+                dst,
+                receiver,
+                index,
+                span,
+            } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let output = format!("%list_try_remove_{}", self.lines.len());
+                let status = format!("%list_try_remove_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_try_remove(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(receiver.list),
+                    register_name(*index)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_try_remove_cont_{}", self.lines.len()),
+                );
+                self.emit_value_result(*dst, &format!("{output}.slot"))?;
+            }
+            Instruction::ListClear { receiver, span } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let status = format!("%list_clear_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_clear(ptr %context, ptr {}, i32 {location})",
+                    self.value_name(receiver.list)
+                ));
+                self.emit_runtime_status(&status, format!("list_clear_cont_{}", self.lines.len()));
+            }
+            Instruction::ListReserve {
+                receiver,
+                additional,
+                span,
+            } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let status = format!("%list_reserve_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_reserve(ptr %context, ptr {}, i64 {}, i32 {location})",
+                    self.value_name(receiver.list),
+                    register_name(*additional)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_reserve_cont_{}", self.lines.len()),
+                );
+            }
+            Instruction::ListTryReserve {
+                dst,
+                receiver,
+                additional,
+                span,
+            } => {
+                if receiver.source.as_ref().is_some_and(|source| {
+                    source.base != receiver.list || !source.projections.is_empty()
+                }) {
+                    return Err(BackendError::Unsupported(
+                        "projected List receivers are not in direct lowering".to_owned(),
+                    ));
+                }
+                let output = format!("%list_try_reserve_{}", self.lines.len());
+                let status = format!("%list_try_reserve_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{output}.slot = alloca i8"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_list_try_reserve(ptr %context, ptr {}, i64 {}, ptr {output}.slot, i32 {location})",
+                    self.value_name(receiver.list),
+                    register_name(*additional)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("list_try_reserve_cont_{}", self.lines.len()),
+                );
+                let loaded = format!("{output}.loaded");
+                self.line(format!("{loaded} = load i8, ptr {output}.slot"));
+                self.line(format!("{} = icmp ne i8 {loaded}, 0", register_name(*dst)));
+            }
             Instruction::Call {
                 dst,
                 function,
@@ -552,49 +1779,23 @@ impl<'module> ScalarLowerer<'module> {
                 argument_sources,
                 *current_lifecycle,
             )?,
-            Instruction::ConstText { .. }
-            | Instruction::ConstNoneLink { .. }
-            | Instruction::Copy { .. }
-            | Instruction::Take { .. }
-            | Instruction::InstallHome { .. }
-            | Instruction::MoveHome { .. }
-            | Instruction::DropHome { .. }
-            | Instruction::DropIfLive { .. }
-            | Instruction::DropSlot { .. }
-            | Instruction::CleanupTrackedScope { .. }
-            | Instruction::ReplacePlace { .. }
-            | Instruction::ReplaceField { .. }
-            | Instruction::ListNew { .. }
-            | Instruction::ListLength { .. }
-            | Instruction::ListPush { .. }
-            | Instruction::ListPushPlace { .. }
-            | Instruction::ListRemove { .. }
-            | Instruction::ListRemovePlace { .. }
-            | Instruction::ListIndex { .. }
-            | Instruction::ListGet { .. }
-            | Instruction::ListReplace { .. }
-            | Instruction::ListTryRemove { .. }
-            | Instruction::ListClear { .. }
-            | Instruction::ListReserve { .. }
-            | Instruction::ListTryReserve { .. }
-            | Instruction::TextByteLength { .. }
-            | Instruction::TextIsEmpty { .. }
-            | Instruction::TextConcat { .. }
-            | Instruction::ConstructStruct { .. }
-            | Instruction::ReadStructField { .. }
-            | Instruction::BeginLifecycle { .. }
-            | Instruction::EndLifecycle { .. }
-            | Instruction::AllocateEntity { .. }
-            | Instruction::EntityToLink { .. }
-            | Instruction::OpenView { .. }
-            | Instruction::ReadField { .. }
-            | Instruction::WriteField { .. }
-            | Instruction::CloseView { .. }
-            | Instruction::KeepEntity { .. }
-            | Instruction::RetireEntity { .. } => {
-                return Err(BackendError::Unsupported(
-                    "native scalar lowering encountered a managed or call instruction".to_owned(),
-                ));
+            Instruction::ReplacePlace {
+                destination,
+                source,
+                displaced,
+                span,
+            } => {
+                if !destination.projections.is_empty() {
+                    return Err(BackendError::Unsupported(
+                        "projected place replacement requires a runtime place lowering".to_owned(),
+                    ));
+                }
+                self.emit_instruction(&Instruction::InstallHome {
+                    destination: destination.base,
+                    source: *source,
+                    displaced: *displaced,
+                    span: *span,
+                })?;
             }
         }
         Ok(())
@@ -650,14 +1851,32 @@ impl<'module> ScalarLowerer<'module> {
                     "scalar call is missing a parameter argument".to_owned(),
                 ));
             };
-            let expected = llvm_type_for_register(callee, *parameter)?;
-            let actual = llvm_type_for_register(self.function, *argument)?;
-            if expected != actual {
+            let expected_ir = callee
+                .register_types
+                .get(parameter.0 as usize)
+                .ok_or_else(|| {
+                    BackendError::Unsupported("callee parameter register is missing".to_owned())
+                })?;
+            let actual_ir = self
+                .function
+                .register_types
+                .get(argument.0 as usize)
+                .ok_or_else(|| {
+                    BackendError::Unsupported("call argument register is missing".to_owned())
+                })?;
+            let expected = scalar_type(expected_ir).unwrap_or("ptr");
+            let actual = scalar_type(actual_ir).unwrap_or("ptr");
+            if expected != actual || is_managed_type(expected_ir) != is_managed_type(actual_ir) {
                 return Err(BackendError::Unsupported(
-                    "scalar call argument type does not match callee".to_owned(),
+                    "call argument type does not match callee".to_owned(),
                 ));
             }
-            call_arguments.push(format!("{expected} {}", register_name(*argument)));
+            let argument_value = if is_managed_type(actual_ir) {
+                self.value_name(*argument)
+            } else {
+                register_name(*argument)
+            };
+            call_arguments.push(format!("{expected} {argument_value}"));
         }
         let result_slot = match (&callee.return_type, dst) {
             (IrType::Unit, None) => None,
@@ -667,15 +1886,23 @@ impl<'module> ScalarLowerer<'module> {
                 ));
             }
             (return_type, Some(_)) => {
-                let ty = scalar_type(return_type).ok_or_else(|| {
-                    BackendError::Unsupported(
-                        "scalar call return type is not representable".to_owned(),
-                    )
+                let ty = value_type(return_type).ok_or_else(|| {
+                    BackendError::Unsupported("call return type is not representable".to_owned())
                 })?;
-                let slot = format!("%call_result_{}_{}", function_id.0, self.lines.len());
-                self.line(format!("{slot} = alloca {ty}"));
-                call_arguments.push(format!("ptr {slot}"));
-                Some((slot, ty))
+                if is_managed_type(return_type) {
+                    let destination = self.value_name(dst.ok_or_else(|| {
+                        BackendError::Unsupported(
+                            "managed call result is missing a destination".to_owned(),
+                        )
+                    })?);
+                    call_arguments.push(format!("ptr {destination}"));
+                    Some((destination, ty))
+                } else {
+                    let slot = format!("%call_result_{}_{}", function_id.0, self.lines.len());
+                    self.line(format!("{slot} = alloca {ty}"));
+                    call_arguments.push(format!("ptr {slot}"));
+                    Some((slot, ty))
+                }
             }
             (_, None) => {
                 return Err(BackendError::Unsupported(
@@ -711,6 +1938,7 @@ impl<'module> ScalarLowerer<'module> {
         self.label(ok_label);
         if let Some((slot, ty)) = result_slot
             && let Some(dst) = dst
+            && !self.is_managed_register(dst)
         {
             self.line(format!("{} = load {ty}, ptr {slot}", register_name(dst)));
         }
@@ -950,18 +2178,27 @@ impl<'module> ScalarLowerer<'module> {
                 else_block.0
             )),
             Terminator::Return(Some(register)) => {
-                let ty = llvm_type_for_register(self.function, *register)?;
-                if matches!(self.function.return_type, IrType::Unit | IrType::Lifecycle)
-                    || scalar_type(&self.function.return_type) != Some(ty)
+                let ty = self.value_type(*register)?;
+                if self.function.return_type == IrType::Unit
+                    || value_type(&self.function.return_type) != Some(ty)
                 {
                     return Err(BackendError::Unsupported(
-                        "native scalar return type does not match the function".to_owned(),
+                        "native return type does not match the function".to_owned(),
                     ));
                 }
-                self.line(format!(
-                    "store {ty} {}, ptr %out_value",
-                    register_name(*register)
-                ));
+                if self.is_managed_register(*register) {
+                    let loaded = format!("%return_value_{}", self.lines.len());
+                    self.line(format!(
+                        "{loaded} = load {VALUE_IR_TYPE}, ptr {}",
+                        self.value_name(*register)
+                    ));
+                    self.line(format!("store {VALUE_IR_TYPE} {loaded}, ptr %out_value"));
+                } else {
+                    self.line(format!(
+                        "store {ty} {}, ptr %out_value",
+                        register_name(*register)
+                    ));
+                }
                 self.line("ret i32 0");
             }
             Terminator::Return(None) => {
@@ -977,16 +2214,49 @@ impl<'module> ScalarLowerer<'module> {
                 self.line(format!("br label %{label}"));
             }
             Terminator::Unreachable => self.line("br label %internal_exit"),
-            Terminator::ResolveLink { .. } => {
-                return Err(BackendError::Unsupported(
-                    "native scalar lowering cannot resolve links".to_owned(),
+            Terminator::ResolveLink {
+                link,
+                live_value,
+                live,
+                absent,
+                span,
+            } => {
+                let entity = format!("%resolve_entity_{}", self.lines.len());
+                let live_flag = format!("%resolve_live_{}", self.lines.len());
+                let status = format!("%resolve_link_status_{}", self.lines.len());
+                let location = self.locations.id_for(*span);
+                self.line(format!("{entity}.slot = alloca {VALUE_IR_TYPE}"));
+                self.line(format!("{live_flag}.slot = alloca i8"));
+                self.line(format!(
+                    "{status} = call i32 @keld_rt_v1_resolve_link(ptr %context, ptr {}, ptr {entity}.slot, ptr {live_flag}.slot, i32 {location})",
+                    self.value_name(*link)
+                ));
+                self.emit_runtime_status(
+                    &status,
+                    format!("resolve_link_cont_{}", self.lines.len()),
+                );
+                let live_loaded = format!("{live_flag}.loaded");
+                self.line(format!("{live_loaded} = load i8, ptr {live_flag}.slot"));
+                let live_condition = format!("{live_flag}.condition");
+                self.line(format!("{live_condition} = icmp ne i8 {live_loaded}, 0"));
+                let entity_value = format!("%resolve_entity_value_{}", self.lines.len());
+                self.line(format!(
+                    "{entity_value} = load {VALUE_IR_TYPE}, ptr {entity}.slot"
+                ));
+                self.line(format!(
+                    "store {VALUE_IR_TYPE} {entity_value}, ptr {}",
+                    self.value_name(*live_value)
+                ));
+                self.line(format!(
+                    "br i1 {live_condition}, label %bb{}, label %bb{}",
+                    live.0, absent.0
                 ));
             }
         }
         Ok(())
     }
 
-    fn finish(mut self) -> String {
+    fn finish(mut self) -> (String, BTreeMap<String, Vec<u8>>) {
         let faults = self.faults.iter().copied().collect::<Vec<_>>();
         for (kind, location) in faults {
             self.lines.push(format!("fault_{kind}_{location}:"));
@@ -998,17 +2268,12 @@ impl<'module> ScalarLowerer<'module> {
         self.line("ret i32 1");
         self.lines.push("internal_exit:".to_owned());
         self.line("ret i32 2");
-        self.lines.join("\n")
+        (self.lines.join("\n"), self.text_literals)
     }
 }
 
 #[allow(clippy::too_many_lines)]
 fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String, BackendError> {
-    if !module.definitions.is_empty() {
-        return Err(BackendError::Unsupported(
-            "native scalar lowering requires definition-free functions".to_owned(),
-        ));
-    }
     let Some(main) = module
         .functions
         .iter()
@@ -1024,7 +2289,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         ));
     }
     for function in &module.functions {
-        if function.return_type != IrType::Unit && scalar_type(&function.return_type).is_none() {
+        if function.return_type != IrType::Unit && value_type(&function.return_type).is_none() {
             return Err(BackendError::Unsupported(format!(
                 "function {} has an unsupported return type",
                 function.id.0
@@ -1036,14 +2301,14 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
                     "function parameter register is missing".to_owned(),
                 ));
             };
-            if scalar_type(ty).is_none() {
+            if value_type(ty).is_none() {
                 return Err(BackendError::Unsupported(
-                    "scalar function parameters must be Int, Bool, or Lifecycle".to_owned(),
+                    "native function parameters have no value representation".to_owned(),
                 ));
             }
         }
         for (index, ty) in function.register_types.iter().enumerate() {
-            if scalar_type(ty).is_none() && *ty != IrType::Lifecycle {
+            if value_type(ty).is_none() && *ty != IrType::Unit {
                 return Err(BackendError::Unsupported(format!(
                     "register {index} has a non-scalar type"
                 )));
@@ -1052,6 +2317,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     }
     let locations = LocationTable::from_module(module, &metadata.source);
     let mut functions_ir = String::new();
+    let mut text_literals = BTreeMap::new();
     for function in &module.functions {
         let mut lowerer = ScalarLowerer::new(module, function, &locations);
         let Some(entry) = function
@@ -1069,7 +2335,8 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
                 lowerer.emit_block(block)?;
             }
         }
-        let body = lowerer.finish();
+        let (body, literals) = lowerer.finish();
+        text_literals.extend(literals);
         let lifecycle_type = llvm_type_for_register(function, function.current_lifecycle)?;
         let mut parameters = vec![
             format!("ptr %context"),
@@ -1079,7 +2346,11 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
             ),
         ];
         for parameter in &function.parameters {
-            let ty = llvm_type_for_register(function, *parameter)?;
+            let ty = function
+                .register_types
+                .get(parameter.0 as usize)
+                .and_then(scalar_type)
+                .map_or("ptr", |ty| ty);
             parameters.push(format!("{ty} {}", register_name(*parameter)));
         }
         if function.return_type != IrType::Unit {
@@ -1104,9 +2375,30 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let path_pointer =
         format!("getelementptr inbounds ([{path_type_length} x i8], ptr @keld_path, i64 0, i64 0)");
     let main_name = format!("keld_fn_{}", main.id.0);
+    let mut literal_ir = String::new();
+    for (name, bytes) in &text_literals {
+        let array_length = bytes.len().saturating_add(1);
+        let _ = writeln!(
+            literal_ir,
+            "@{name} = private constant [{array_length} x i8] c\"{}\\00\"",
+            escape_llvm_bytes(bytes)
+        );
+    }
     let mut ir = format!(
-        "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\n{functions_ir}\ndefine i32 @main() {{\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %status = call i32 @{main_name}(ptr null, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %internal_main\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
+        "target triple = \"{TARGET_TRIPLE}\"\n\n@keld_path = private constant [{path_type_length} x i8] c\"{path_global}\\00\"\n{literal_ir}\ndeclare {{ i64, i1 }} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {{ i64, i1 }} @llvm.smul.with.overflow.i64(i64, i64)\ndeclare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_destroy(ptr)\ndeclare i32 @keld_rt_v1_context_fault_parts(ptr, ptr, ptr)\ndeclare i32 @keld_rt_v1_value_copy(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_value_drop(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_new(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_text_byte_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_is_empty(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_equal(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_text_concat(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_print_int(i64)\ndeclare i32 @keld_rt_v1_print_fault(i32, ptr, i64, i32, i32)\n\n{functions_ir}\ndefine i32 @main() {{\nentry_main:\n  %out_value = alloca i64\n  %out_kind = alloca i32\n  %out_location = alloca i32\n  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %context_ready, label %no_context\nno_context:\n  ret i32 70\ncontext_ready:\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)\n  %ok = icmp eq i32 %status, 0\n  br i1 %ok, label %success, label %status_dispatch\nsuccess:\n  %result = load i64, ptr %out_value\n  %print_status = call i32 @keld_rt_v1_print_int(i64 %result)\n  %print_ok = icmp eq i32 %print_status, 0\n  br i1 %print_ok, label %destroy_success, label %destroy_internal\ndestroy_success:\n  %destroy_success_status = call i32 @keld_rt_v1_context_destroy(ptr %context)\n  %destroy_success_ok = icmp eq i32 %destroy_success_status, 0\n  br i1 %destroy_success_ok, label %done, label %internal_main\nstatus_dispatch:\n  %language_fault = icmp eq i32 %status, 1\n  br i1 %language_fault, label %fault_dispatch, label %destroy_internal\nfault_dispatch:\n  %out_kind_value = load i32, ptr %out_kind\n  %fault_location = load i32, ptr %out_location\n  switch i32 %fault_location, label %fault_unknown [\n",
     );
+    let list_declarations = "declare i32 @keld_rt_v1_context_root_lifecycle(ptr, ptr)\ndeclare i32 @keld_rt_v1_begin_lifecycle(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_end_lifecycle(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_new(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_length(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_push(ptr, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_get(ptr, ptr, i64, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_replace(ptr, ptr, i64, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_list_try_remove(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_list_clear(ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_list_reserve(ptr, ptr, i64, i32)\ndeclare i32 @keld_rt_v1_list_try_reserve(ptr, ptr, i64, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_new(ptr, i32, ptr, ptr, i32, ptr, i32)\ndeclare i32 @keld_rt_v1_struct_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_allocate_entity(ptr, i32, ptr, ptr, i32, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_to_link(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_resolve_link(ptr, ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_entity_field(ptr, ptr, i32, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_replace_field(ptr, ptr, i32, ptr, ptr, i8, i32)\ndeclare i32 @keld_rt_v1_keep_entity(ptr, ptr, ptr, i32)\ndeclare i32 @keld_rt_v1_retire_entity(ptr, ptr, i32)\n";
+    ir = ir.replace(
+        "declare i32 @keld_rt_v1_print_int(i64)\n",
+        &format!("{list_declarations}declare i32 @keld_rt_v1_print_int(i64)\n"),
+    );
+    let old_context_bootstrap = format!(
+        "  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %context_ready, label %no_context\nno_context:\n  ret i32 70\ncontext_ready:\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} zeroinitializer, ptr %out_value, ptr %out_kind, ptr %out_location)"
+    );
+    let new_context_bootstrap = format!(
+        "  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %root_init, label %no_context\nno_context:\n  ret i32 70\nroot_init:\n  %root_lifecycle = alloca {{ i64, i32, i32 }}\n  %root_status = call i32 @keld_rt_v1_context_root_lifecycle(ptr %context, ptr %root_lifecycle)\n  %root_ok = icmp eq i32 %root_status, 0\n  br i1 %root_ok, label %context_ready, label %destroy_internal\ncontext_ready:\n  %root_value = load {{ i64, i32, i32 }}, ptr %root_lifecycle\n  %status = call i32 @{main_name}(ptr %context, {{ i64, i32, i32 }} %root_value, ptr %out_value, ptr %out_kind, ptr %out_location)"
+    );
+    ir = ir.replace(&old_context_bootstrap, &new_context_bootstrap);
     for location in locations.entries() {
         let _ = writeln!(
             ir,
@@ -1118,7 +2410,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     for location in locations.entries() {
         let _ = write!(
             ir,
-            "fault_location_{}:\n  %fault_status_{} = call i32 @keld_rt_v1_print_fault(i32 %out_kind_value, ptr {}, i64 {}, i32 {}, i32 {})\n  %fault_print_ok_{} = icmp eq i32 %fault_status_{}, 0\n  br i1 %fault_print_ok_{}, label %fault_done, label %internal_main\n",
+            "fault_location_{}:\n  %fault_status_{} = call i32 @keld_rt_v1_print_fault(i32 %out_kind_value, ptr {}, i64 {}, i32 {}, i32 {})\n  %fault_print_ok_{} = icmp eq i32 %fault_status_{}, 0\n  br i1 %fault_print_ok_{}, label %destroy_fault, label %destroy_internal\n",
             location.id,
             location.id,
             path_pointer,
@@ -1131,7 +2423,7 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         );
     }
     ir.push_str(
-        "fault_unknown:\n  br label %internal_main\nfault_done:\n  ret i32 2\ndone:\n  ret i32 0\ninternal_main:\n  ret i32 70\n}\n",
+        "fault_unknown:\n  br label %destroy_internal\ndestroy_fault:\n  %destroy_fault_status = call i32 @keld_rt_v1_context_destroy(ptr %context)\n  %destroy_fault_ok = icmp eq i32 %destroy_fault_status, 0\n  br i1 %destroy_fault_ok, label %fault_done, label %internal_main\nfault_done:\n  ret i32 2\ndone:\n  ret i32 0\ndestroy_internal:\n  %destroy_internal_status = call i32 @keld_rt_v1_context_destroy(ptr %context)\n  br label %internal_main\ninternal_main:\n  ret i32 70\n}\n",
     );
     Ok(ir)
 }

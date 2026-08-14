@@ -2,8 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use keld_native_abi::{FaultKind, KeldFault, KeldHandle, KeldLifecycle, KeldValue, RuntimeStatus};
-use keld_runtime::{Store, StoreError};
+use keld_native_abi::{
+    FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink, KeldValue, RuntimeStatus,
+};
+use keld_runtime::{EntityId, Link, RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
 use std::fmt;
 
 #[allow(dead_code)]
@@ -25,10 +27,17 @@ struct HandleSlot {
     payload: Option<NativePayload>,
 }
 
+#[derive(Clone, Debug)]
+struct NativeEntityPayload {
+    definition: u32,
+    fields: Vec<(KeldValue, bool)>,
+}
+
 /// Failure raised by an opaque native value operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeValueError {
     Allocation,
+    Capacity,
     InvalidHandle,
     TypeMismatch,
     Bounds,
@@ -38,6 +47,7 @@ impl fmt::Display for NativeValueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Allocation => "native value allocation failed",
+            Self::Capacity => "native list capacity is impossible",
             Self::InvalidHandle => "native value handle is stale or foreign",
             Self::TypeMismatch => "native value kind does not match the operation",
             Self::Bounds => "native value index is out of bounds",
@@ -66,7 +76,7 @@ impl std::error::Error for RuntimeContextError {}
 /// Runtime state shared by generated functions. The store remains source
 /// independent; later Native-1 layers add managed payload descriptors here.
 pub struct RuntimeContext {
-    store: Store<()>,
+    store: Store<NativeEntityPayload>,
     handles: Vec<HandleSlot>,
     reusable_handles: Vec<u32>,
     status: RuntimeStatus,
@@ -108,6 +118,239 @@ impl RuntimeContext {
             index,
             reserved: 0,
         }
+    }
+
+    fn store_error(_error: StoreError) -> NativeValueError {
+        NativeValueError::InvalidHandle
+    }
+
+    fn lifecycle_id(value: KeldLifecycle) -> RuntimeLifecycleId {
+        RuntimeLifecycleId::from_raw_parts(value.brand, value.index)
+    }
+
+    fn entity_id(value: KeldEntity) -> EntityId {
+        EntityId::from_raw_parts(value.brand, value.slot, value.generation, value.definition)
+    }
+
+    fn link_id(value: KeldLink) -> Link {
+        Link::from_raw_parts(value.brand, value.slot, value.generation, value.expected)
+    }
+
+    fn entity_value(value: EntityId) -> KeldEntity {
+        let (brand, slot, generation, definition) = value.raw_parts();
+        KeldEntity {
+            brand,
+            slot,
+            generation,
+            definition,
+            reserved: 0,
+        }
+    }
+
+    fn link_value(value: Link) -> KeldLink {
+        let (brand, slot, generation, expected) = value.raw_parts();
+        KeldLink {
+            brand,
+            slot,
+            generation,
+            expected,
+            reserved: 0,
+        }
+    }
+
+    /// Starts a child lifecycle in the independent custody store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign or inactive parent, or an
+    /// allocation failure when the store cannot grow.
+    pub fn begin_lifecycle(
+        &mut self,
+        parent: KeldLifecycle,
+    ) -> Result<KeldLifecycle, NativeValueError> {
+        let lifecycle = self
+            .store
+            .begin_lifecycle(Self::lifecycle_id(parent))
+            .map_err(Self::store_error)?;
+        let (brand, index) = lifecycle.raw_parts();
+        Ok(KeldLifecycle {
+            brand,
+            index,
+            reserved: 0,
+        })
+    }
+
+    /// Ends a child lifecycle and drops all managed fields in reverse custody
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure when the lifecycle is foreign, inactive, or
+    /// still has active children.
+    pub fn end_lifecycle(&mut self, lifecycle: KeldLifecycle) -> Result<(), NativeValueError> {
+        let mut payloads = Vec::new();
+        self.store
+            .end_lifecycle_with(Self::lifecycle_id(lifecycle), |payload| {
+                payloads.push(payload);
+            })
+            .map_err(Self::store_error)?;
+        for payload in payloads {
+            self.drop_entity_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    /// Allocates one entity payload in the supplied lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an allocation failure, a stale managed field, or an invalid
+    /// lifecycle error.
+    pub fn allocate_entity(
+        &mut self,
+        definition: u32,
+        fields: &[KeldValue],
+        managed: &[bool],
+        lifecycle: KeldLifecycle,
+    ) -> Result<KeldEntity, NativeValueError> {
+        if fields.len() != managed.len() {
+            return Err(NativeValueError::TypeMismatch);
+        }
+        for (field, is_managed) in fields.iter().copied().zip(managed.iter().copied()) {
+            if is_managed {
+                self.validate_handle(field)?;
+            }
+        }
+        let entity = self
+            .store
+            .allocate(
+                RuntimeTypeId(definition),
+                Self::lifecycle_id(lifecycle),
+                NativeEntityPayload {
+                    definition,
+                    fields: fields
+                        .iter()
+                        .copied()
+                        .zip(managed.iter().copied())
+                        .collect(),
+                },
+            )
+            .map_err(Self::store_error)?;
+        Ok(Self::entity_value(entity))
+    }
+
+    /// Converts a live entity into a weak link.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign or stale entity.
+    pub fn entity_to_link(&self, entity: KeldEntity) -> Result<KeldLink, NativeValueError> {
+        self.store
+            .link(Self::entity_id(entity))
+            .map(Self::link_value)
+            .map_err(Self::store_error)
+    }
+
+    /// Resolves a weak link, returning `None` for absent or stale links.
+    #[must_use]
+    pub fn resolve_link(&self, link: KeldLink) -> Option<KeldEntity> {
+        self.store
+            .resolve(Self::link_id(link))
+            .map(Self::entity_value)
+    }
+
+    /// Reads one entity field and its managed flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign or stale entity, or a bounds
+    /// failure for an absent field.
+    pub fn entity_field(
+        &self,
+        entity: KeldEntity,
+        field: u32,
+    ) -> Result<(KeldValue, bool), NativeValueError> {
+        self.store
+            .read(Self::entity_id(entity), |payload| {
+                let _ = payload.definition;
+                payload
+                    .fields
+                    .get(field as usize)
+                    .copied()
+                    .ok_or(NativeValueError::Bounds)
+            })
+            .map_err(Self::store_error)?
+    }
+
+    /// Replaces one entity field and returns the displaced value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign or stale entity, a bounds
+    /// failure for an absent field, or a stale managed value.
+    pub fn replace_entity_field(
+        &mut self,
+        entity: KeldEntity,
+        field: u32,
+        value: KeldValue,
+        managed: bool,
+    ) -> Result<(KeldValue, bool), NativeValueError> {
+        if managed {
+            self.validate_handle(value)?;
+        }
+        self.store
+            .edit(Self::entity_id(entity), |payload| {
+                let destination = payload
+                    .fields
+                    .get_mut(field as usize)
+                    .ok_or(NativeValueError::Bounds)?;
+                Ok(std::mem::replace(destination, (value, managed)))
+            })
+            .map_err(Self::store_error)?
+    }
+
+    /// Moves entity custody to an ancestor lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign entity, lifecycle, or invalid
+    /// custody relation.
+    pub fn keep_entity(
+        &mut self,
+        entity: KeldEntity,
+        lifecycle: KeldLifecycle,
+    ) -> Result<(), NativeValueError> {
+        self.store
+            .keep(Self::entity_id(entity), Self::lifecycle_id(lifecycle))
+            .map_err(Self::store_error)
+    }
+
+    /// Retires an entity and drops its managed fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an internal failure for a foreign or stale entity.
+    pub fn retire_entity(&mut self, entity: KeldEntity) -> Result<(), NativeValueError> {
+        let mut payload = None;
+        self.store
+            .retire_with(Self::entity_id(entity), |value| payload = Some(value))
+            .map_err(Self::store_error)?;
+        if let Some(payload) = payload {
+            self.drop_entity_payload(payload)?;
+        }
+        Ok(())
+    }
+
+    fn drop_entity_payload(
+        &mut self,
+        payload: NativeEntityPayload,
+    ) -> Result<(), NativeValueError> {
+        for (field, managed) in payload.fields {
+            if managed {
+                self.drop_managed(field)?;
+            }
+        }
+        Ok(())
     }
 
     /// Records a language fault only if no earlier status was recorded.
@@ -225,6 +468,15 @@ impl RuntimeContext {
     /// Returns a stale handle or type mismatch.
     pub fn text_is_empty(&self, value: KeldValue) -> Result<bool, NativeValueError> {
         Ok(self.text_bytes(value)?.is_empty())
+    }
+
+    /// Compares two immutable Text payloads by exact UTF-8 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stale handle or type mismatch.
+    pub fn text_equal(&self, lhs: KeldValue, rhs: KeldValue) -> Result<bool, NativeValueError> {
+        Ok(self.text_bytes(lhs)? == self.text_bytes(rhs)?)
     }
 
     /// Constructs a struct by moving the supplied field envelopes into a new
@@ -423,6 +675,101 @@ impl RuntimeContext {
             return Err(NativeValueError::Bounds);
         }
         Ok(elements.remove(index))
+    }
+
+    /// Reserves additional List capacity using checked required-capacity
+    /// arithmetic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeValueError::Capacity`] when the required length cannot
+    /// be represented, or [`NativeValueError::Allocation`] when allocation is
+    /// rejected by the host allocator.
+    pub fn list_reserve(
+        &mut self,
+        list: KeldValue,
+        additional: u64,
+    ) -> Result<(), NativeValueError> {
+        let (slot_index, generation) = decode_handle(list)?;
+        let slot = self
+            .handles
+            .get_mut(slot_index as usize)
+            .ok_or(NativeValueError::InvalidHandle)?;
+        if slot.generation != generation {
+            return Err(NativeValueError::InvalidHandle);
+        }
+        let NativePayload::List { elements } = slot
+            .payload
+            .as_mut()
+            .ok_or(NativeValueError::InvalidHandle)?
+        else {
+            return Err(NativeValueError::TypeMismatch);
+        };
+        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
+        let required = elements
+            .len()
+            .checked_add(additional)
+            .ok_or(NativeValueError::Capacity)?;
+        if required <= elements.capacity() {
+            return Ok(());
+        }
+        elements
+            .try_reserve(required.saturating_sub(elements.len()))
+            .map_err(|_| NativeValueError::Allocation)
+    }
+
+    /// Tries preferred then exact List growth without recording a fault.
+    ///
+    /// # Errors
+    ///
+    /// Returns handle/type/capacity errors. Allocation failures are reported
+    /// as `Ok(false)` so callers can implement `try_reserve` semantics.
+    pub fn list_try_reserve(
+        &mut self,
+        list: KeldValue,
+        additional: u64,
+    ) -> Result<bool, NativeValueError> {
+        let (slot_index, generation) = decode_handle(list)?;
+        let slot = self
+            .handles
+            .get_mut(slot_index as usize)
+            .ok_or(NativeValueError::InvalidHandle)?;
+        if slot.generation != generation {
+            return Err(NativeValueError::InvalidHandle);
+        }
+        let NativePayload::List { elements } = slot
+            .payload
+            .as_mut()
+            .ok_or(NativeValueError::InvalidHandle)?
+        else {
+            return Err(NativeValueError::TypeMismatch);
+        };
+        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
+        let required = elements
+            .len()
+            .checked_add(additional)
+            .ok_or(NativeValueError::Capacity)?;
+        if required <= elements.capacity() {
+            return Ok(true);
+        }
+        let preferred = elements
+            .len()
+            .checked_mul(2)
+            .map_or(required, |double| double.max(required));
+        if elements
+            .try_reserve(preferred.saturating_sub(elements.len()))
+            .is_ok()
+        {
+            return Ok(true);
+        }
+        if preferred != required
+            && elements
+                .try_reserve(required.saturating_sub(elements.len()))
+                .is_ok()
+        {
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Clears all List elements, recursively dropping managed children.

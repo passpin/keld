@@ -91,6 +91,7 @@ version = "0.1.0"
 name = "keld-native-backend"
 version = "0.1.0"
 dependencies = [
+ "keld-flow",
  "keld-ir",
  "keld-native-abi",
  "keld-native-llvm",
@@ -103,6 +104,7 @@ name = "keld-native-ffi"
 version = "0.1.0"
 dependencies = [
  "keld-native-abi",
+ "keld-native-runtime",
 ]
 
 [[package]]

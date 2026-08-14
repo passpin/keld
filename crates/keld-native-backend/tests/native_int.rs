@@ -125,7 +125,7 @@ fn runtime_artifacts(tag: &str) -> (PathBuf, PathBuf) {
     let export_list = temp.join("runtime.def");
     std::fs::write(
         &export_list,
-        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\n",
+        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\nkeld_rt_v1_struct_new\nkeld_rt_v1_struct_field\nkeld_rt_v1_begin_lifecycle\nkeld_rt_v1_end_lifecycle\nkeld_rt_v1_allocate_entity\nkeld_rt_v1_entity_to_link\nkeld_rt_v1_resolve_link\nkeld_rt_v1_entity_field\nkeld_rt_v1_replace_field\nkeld_rt_v1_keep_entity\nkeld_rt_v1_retire_entity\n",
     )
     .expect("runtime export list");
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
@@ -173,6 +173,414 @@ fn binary_module(lhs: i64, op: IntBinaryOp, rhs: i64) -> Module {
             Terminator::Return(Some(Register(3))),
         )],
     )
+}
+
+fn text_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::Text,
+        IrType::Text,
+        IrType::Text,
+        IrType::Int,
+        IrType::Bool,
+        IrType::Bool,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    register_storage[1] = RegisterStorage::Home {
+        scope: keld_flow::StorageScopeId(0),
+        conditional: false,
+    };
+    register_storage[2] = register_storage[1].clone();
+    register_storage[3] = register_storage[1].clone();
+    Module {
+        definitions: Vec::new(),
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![block(
+                0,
+                vec![
+                    Instruction::ConstText {
+                        dst: Register(1),
+                        value: "hé".to_owned(),
+                        span: source_span,
+                    },
+                    Instruction::Copy {
+                        dst: Register(2),
+                        src: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::TextConcat {
+                        dst: Register(3),
+                        lhs: Register(1),
+                        rhs: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::TextByteLength {
+                        dst: Register(4),
+                        text: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::TextIsEmpty {
+                        dst: Register(5),
+                        text: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::Compare {
+                        dst: Register(6),
+                        op: keld_ir::CompareOp::Eq,
+                        lhs: Register(1),
+                        rhs: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(7),
+                        value: 4,
+                        span: source_span,
+                    },
+                ],
+                Terminator::Return(Some(Register(7))),
+            )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn list_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::List(Box::new(IrType::Int)),
+        IrType::Int,
+        IrType::Int,
+        IrType::Int,
+        IrType::Optional(Box::new(IrType::Int)),
+        IrType::Int,
+        IrType::Optional(Box::new(IrType::Int)),
+        IrType::Bool,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    register_storage[1] = RegisterStorage::Home {
+        scope: keld_flow::StorageScopeId(0),
+        conditional: false,
+    };
+    Module {
+        definitions: Vec::new(),
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![block(
+                0,
+                vec![
+                    Instruction::ListNew {
+                        dst: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(2),
+                        value: 7,
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(3),
+                        value: 0,
+                        span: source_span,
+                    },
+                    Instruction::ListPush {
+                        list: Register(1),
+                        value: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::ListLength {
+                        dst: Register(4),
+                        list: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ListGet {
+                        dst: Register(5),
+                        receiver: keld_ir::Receiver {
+                            list: Register(1),
+                            source: None,
+                        },
+                        index: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::ListRemove {
+                        dst: Register(6),
+                        list: Register(1),
+                        index: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::ListTryRemove {
+                        dst: Register(7),
+                        receiver: keld_ir::Receiver {
+                            list: Register(1),
+                            source: None,
+                        },
+                        index: Register(3),
+                        span: source_span,
+                    },
+                    Instruction::ListTryReserve {
+                        dst: Register(8),
+                        receiver: keld_ir::Receiver {
+                            list: Register(1),
+                            source: None,
+                        },
+                        additional: Register(4),
+                        span: source_span,
+                    },
+                    Instruction::ListReserve {
+                        receiver: keld_ir::Receiver {
+                            list: Register(1),
+                            source: None,
+                        },
+                        additional: Register(4),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(1),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(9),
+                        value: 7,
+                        span: source_span,
+                    },
+                ],
+                Terminator::Return(Some(Register(9))),
+            )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn struct_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::Text,
+        IrType::Struct(keld_ir::DefId(0)),
+        IrType::Int,
+        IrType::Text,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    for register in [1_u32, 2] {
+        register_storage[register as usize] = RegisterStorage::Home {
+            scope: keld_flow::StorageScopeId(0),
+            conditional: false,
+        };
+    }
+    register_storage[4] = RegisterStorage::Loan;
+    Module {
+        definitions: vec![keld_ir::IrDefinition {
+            id: keld_ir::DefId(0),
+            kind: keld_ir::IrDefinitionKind::Struct,
+            fields: vec![
+                (keld_ir::FieldId(0), IrType::Int),
+                (keld_ir::FieldId(1), IrType::Text),
+            ],
+        }],
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![block(
+                0,
+                vec![
+                    Instruction::ConstText {
+                        dst: Register(1),
+                        value: "struct".to_owned(),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(3),
+                        value: 11,
+                        span: source_span,
+                    },
+                    Instruction::ConstructStruct {
+                        dst: Register(2),
+                        definition: keld_ir::DefId(0),
+                        fields: vec![
+                            (keld_ir::FieldId(0), Register(3)),
+                            (keld_ir::FieldId(1), Register(1)),
+                        ],
+                        span: source_span,
+                    },
+                    Instruction::ReadStructField {
+                        dst: Register(4),
+                        base: Register(2),
+                        field: keld_ir::FieldId(1),
+                        span: source_span,
+                    },
+                    Instruction::DropHome {
+                        home: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(5),
+                        value: 11,
+                        span: source_span,
+                    },
+                ],
+                Terminator::Return(Some(Register(5))),
+            )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn entity_module() -> Module {
+    let source_span = span();
+    let register_types = vec![
+        IrType::Lifecycle,
+        IrType::Text,
+        IrType::Entity(keld_ir::DefId(0)),
+        IrType::Int,
+        IrType::Link {
+            entity: keld_ir::DefId(0),
+            optional: false,
+        },
+        IrType::Text,
+        IrType::Int,
+        IrType::Int,
+    ];
+    let mut register_storage = vec![RegisterStorage::Trivial; register_types.len()];
+    register_storage[1] = RegisterStorage::Home {
+        scope: keld_flow::StorageScopeId(0),
+        conditional: false,
+    };
+    register_storage[2] = RegisterStorage::EntityFlow;
+    register_storage[5] = RegisterStorage::Loan;
+    Module {
+        definitions: vec![keld_ir::IrDefinition {
+            id: keld_ir::DefId(0),
+            kind: keld_ir::IrDefinitionKind::Entity,
+            fields: vec![
+                (keld_ir::FieldId(0), IrType::Int),
+                (keld_ir::FieldId(1), IrType::Text),
+            ],
+        }],
+        functions: vec![Function {
+            id: keld_semantics::FunctionId(0),
+            span: source_span,
+            parameters: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types,
+            register_storage,
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![block(
+                0,
+                vec![
+                    Instruction::ConstText {
+                        dst: Register(1),
+                        value: "entity".to_owned(),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(3),
+                        value: 17,
+                        span: source_span,
+                    },
+                    Instruction::AllocateEntity {
+                        dst: Register(2),
+                        definition: keld_ir::DefId(0),
+                        fields: vec![
+                            (keld_ir::FieldId(0), Register(3)),
+                            (keld_ir::FieldId(1), Register(1)),
+                        ],
+                        lifecycle: Register(0),
+                        span: source_span,
+                    },
+                    Instruction::EntityToLink {
+                        dst: Register(4),
+                        entity: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::OpenView {
+                        view: keld_ir::ViewId(0),
+                        entity: Register(2),
+                        mode: keld_ir::ViewMode::Read,
+                        span: source_span,
+                    },
+                    Instruction::ReadField {
+                        dst: Register(5),
+                        view: keld_ir::ViewId(0),
+                        field: keld_ir::FieldId(1),
+                        span: source_span,
+                    },
+                    Instruction::CloseView {
+                        view: keld_ir::ViewId(0),
+                        span: source_span,
+                    },
+                    Instruction::TextByteLength {
+                        dst: Register(6),
+                        text: Register(5),
+                        span: source_span,
+                    },
+                    Instruction::RetireEntity {
+                        entity: Register(2),
+                        span: source_span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(7),
+                        value: 6,
+                        span: source_span,
+                    },
+                ],
+                Terminator::Return(Some(Register(7))),
+            )],
+            entry: IrBlockId(0),
+        }],
+        main: keld_semantics::FunctionId(0),
+    }
 }
 
 fn unary_module(value: i64) -> Module {
@@ -292,7 +700,7 @@ fn builds_and_runs_a_const_int_program() {
     let export_list = temp.join("runtime.def");
     std::fs::write(
         &export_list,
-        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\n",
+        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
@@ -354,7 +762,7 @@ fn lowers_scalar_cfg_and_phi_at_both_optimization_levels() {
     let export_list = temp.join("runtime.def");
     std::fs::write(
         &export_list,
-        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\n",
+        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
@@ -469,7 +877,7 @@ fn scalar_faults_preserve_kind_span_and_unreachable_is_internal() {
     let export_list = temp.join("runtime.def");
     std::fs::write(
         &export_list,
-        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\n",
+        "LIBRARY keld_runtime_v1.dll\nEXPORTS\nkeld_rt_v1_abi_version\nkeld_rt_v1_print_int\nkeld_rt_v1_print_fault\nkeld_rt_v1_context_new\nkeld_rt_v1_context_destroy\nkeld_rt_v1_context_status\nkeld_rt_v1_context_fault\nkeld_rt_v1_context_fault_parts\nkeld_rt_v1_context_root_lifecycle\nkeld_rt_v1_value_copy\nkeld_rt_v1_value_drop\nkeld_rt_v1_text_new\nkeld_rt_v1_text_byte_length\nkeld_rt_v1_text_is_empty\nkeld_rt_v1_text_equal\nkeld_rt_v1_text_concat\nkeld_rt_v1_list_new\nkeld_rt_v1_list_length\nkeld_rt_v1_list_push\nkeld_rt_v1_list_get\nkeld_rt_v1_list_remove\nkeld_rt_v1_list_replace\nkeld_rt_v1_list_try_remove\nkeld_rt_v1_list_clear\nkeld_rt_v1_list_reserve\nkeld_rt_v1_list_try_reserve\n",
     )
     .expect("runtime export list");
     let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
@@ -685,6 +1093,126 @@ fn scalar_numeric_operations_match_checked_interpreter_boundaries() {
         assert_eq!(child.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&child.stderr).contains(expected_kind));
         assert!(child.stdout.is_empty());
+    }
+}
+
+#[test]
+fn text_literals_copy_concat_and_queries_run_natively() {
+    let (runtime_dll, import_library) = runtime_artifacts("text");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("text.keld"),
+        source: SourceText::from_str(SourceId(0), "text\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("text-{index}.exe"));
+        let artifact = build_executable(
+            &text_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("text native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("text native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"4\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn direct_list_operations_run_natively() {
+    let (runtime_dll, import_library) = runtime_artifacts("list");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("list.keld"),
+        source: SourceText::from_str(SourceId(0), "list\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("list-{index}.exe"));
+        let artifact = build_executable(
+            &list_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("list native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("list native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"7\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn struct_construction_and_managed_field_copy_run_natively() {
+    let (runtime_dll, import_library) = runtime_artifacts("struct");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("struct.keld"),
+        source: SourceText::from_str(SourceId(0), "struct\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("struct-{index}.exe"));
+        let artifact = build_executable(
+            &struct_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("struct native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("struct native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"11\n");
+        assert!(child.stderr.is_empty());
+    }
+}
+
+#[test]
+fn entity_allocation_links_views_and_retirement_run_natively() {
+    let (runtime_dll, import_library) = runtime_artifacts("entity");
+    let metadata = SourceMetadata {
+        path: PathBuf::from("entity.keld"),
+        source: SourceText::from_str(SourceId(0), "entity\n").expect("source"),
+    };
+    for (index, optimization) in [OptimizationLevel::O0, OptimizationLevel::O2]
+        .into_iter()
+        .enumerate()
+    {
+        let output = runtime_dll
+            .parent()
+            .expect("runtime directory")
+            .join(format!("entity-{index}.exe"));
+        let artifact = build_executable(
+            &entity_module(),
+            &metadata,
+            &request(&output, &runtime_dll, &import_library, optimization),
+        )
+        .expect("entity native build");
+        let child = Command::new(&artifact.executable)
+            .output()
+            .expect("entity native executable");
+        assert_eq!(child.status.code(), Some(0));
+        assert_eq!(child.stdout, b"6\n");
+        assert!(child.stderr.is_empty());
     }
 }
 
