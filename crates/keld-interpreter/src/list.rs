@@ -1,6 +1,9 @@
 use crate::value::{CopyAllocation, Value, try_copy_value};
 use keld_ir::AllocationPhase;
+use keld_runtime::{LIST_CAPACITY_ELEMENT_BYTES, checked_list_capacity};
 use std::collections::BTreeSet;
+
+const _: () = assert!(std::mem::size_of::<Value>() == LIST_CAPACITY_ELEMENT_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapacityError {
@@ -60,18 +63,7 @@ impl AllocationPolicy for AllocationController {
 /// Returns [`CapacityError::Impossible`] when the signed source value, element
 /// count, or byte address calculation cannot be represented.
 pub fn required_capacity(length: usize, additional: i64) -> Result<usize, CapacityError> {
-    let additional = usize::try_from(additional).map_err(|_| CapacityError::Impossible)?;
-    let required = length
-        .checked_add(additional)
-        .ok_or(CapacityError::Impossible)?;
-    let _source_length = i64::try_from(required).map_err(|_| CapacityError::Impossible)?;
-    let bytes = required
-        .checked_mul(std::mem::size_of::<Value>())
-        .ok_or(CapacityError::Impossible)?;
-    if bytes > isize::MAX as usize {
-        return Err(CapacityError::Impossible);
-    }
-    Ok(required)
+    checked_list_capacity(length, additional).ok_or(CapacityError::Impossible)
 }
 
 #[derive(Debug, Eq, PartialEq)]

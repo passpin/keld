@@ -134,6 +134,14 @@ fn remove_and_clear_preserve_capacity() {
 fn reserve_negative_and_unaddressable_sizes_are_capacity_faults() {
     assert_eq!(required_capacity(0, -1), Err(CapacityError::Impossible));
     assert_eq!(
+        required_capacity(0, 192_153_584_101_141_162),
+        Ok(192_153_584_101_141_162)
+    );
+    assert_eq!(
+        required_capacity(0, 192_153_584_101_141_163),
+        Err(CapacityError::Impossible)
+    );
+    assert_eq!(
         required_capacity(0, i64::MAX),
         Err(CapacityError::Impossible)
     );

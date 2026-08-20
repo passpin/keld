@@ -435,23 +435,257 @@ fn validate_runtime_dll(path: &Path) -> Result<(), BackendError> {
     Err(runtime_dll_error(path))
 }
 
-fn contains_ascii_case_insensitive(bytes: &[u8], needle: &[u8]) -> bool {
-    bytes.windows(needle.len()).any(|window| {
-        window
-            .iter()
-            .zip(needle)
-            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+fn archive_member_size(header: &[u8]) -> Option<usize> {
+    std::str::from_utf8(header.get(48..58)?)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn visit_gnu_archive(bytes: &[u8], mut visit: impl FnMut(&[u8])) -> bool {
+    if !bytes.starts_with(b"!<arch>\n") {
+        return false;
+    }
+    let mut offset = 8;
+    while offset < bytes.len() {
+        let Some(header_end) = offset.checked_add(60) else {
+            return false;
+        };
+        let Some(header) = bytes.get(offset..header_end) else {
+            return false;
+        };
+        if header.get(58..60) != Some(b"`\n") {
+            return false;
+        }
+        let Some(size) = archive_member_size(header) else {
+            return false;
+        };
+        let Some(data_end) = header_end.checked_add(size) else {
+            return false;
+        };
+        let Some(member) = bytes.get(header_end..data_end) else {
+            return false;
+        };
+        visit(member);
+        let Some(next) = data_end.checked_add(size % 2) else {
+            return false;
+        };
+        offset = next;
+    }
+    offset == bytes.len()
+}
+
+fn coff_section_data<'bytes>(bytes: &'bytes [u8], wanted: &[u8]) -> Option<&'bytes [u8]> {
+    if read_pe_u16(bytes, 0) != Some(0x8664) {
+        return None;
+    }
+    let section_count = usize::from(read_pe_u16(bytes, 2)?);
+    let optional_size = usize::from(read_pe_u16(bytes, 16)?);
+    let section_table = 20usize.checked_add(optional_size)?;
+    for index in 0..section_count {
+        let section = section_table.checked_add(index.checked_mul(40)?)?;
+        let name = bytes.get(section..section.checked_add(8)?)?;
+        let name_matches = name
+            .get(..wanted.len())
+            .is_some_and(|prefix| prefix == wanted)
+            && name
+                .get(wanted.len()..)
+                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == 0));
+        if !name_matches {
+            continue;
+        }
+        let raw_size = usize::try_from(read_pe_u32(bytes, section.checked_add(16)?)?).ok()?;
+        let raw_pointer = usize::try_from(read_pe_u32(bytes, section.checked_add(20)?)?).ok()?;
+        return bytes.get(raw_pointer..raw_pointer.checked_add(raw_size)?);
+    }
+    None
+}
+
+fn visit_coff_symbols(bytes: &[u8], mut visit: impl FnMut(&[u8], i16) -> bool) -> bool {
+    if read_pe_u16(bytes, 0) != Some(0x8664) {
+        return false;
+    }
+    let Some(symbol_table) = read_pe_u32(bytes, 8).and_then(|value| usize::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Some(symbol_count) = read_pe_u32(bytes, 12).and_then(|value| usize::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Some(symbol_bytes) = symbol_count.checked_mul(18) else {
+        return false;
+    };
+    let Some(string_table) = symbol_table.checked_add(symbol_bytes) else {
+        return false;
+    };
+    let Some(string_table_size) =
+        read_pe_u32(bytes, string_table).and_then(|value| usize::try_from(value).ok())
+    else {
+        return false;
+    };
+    let Some(string_table_end) = string_table.checked_add(string_table_size) else {
+        return false;
+    };
+    let Some(string_table) = bytes.get(string_table..string_table_end) else {
+        return false;
+    };
+    let mut index = 0;
+    while index < symbol_count {
+        let Some(entry_offset) = index
+            .checked_mul(18)
+            .and_then(|offset| symbol_table.checked_add(offset))
+        else {
+            return false;
+        };
+        let Some(entry) = entry_offset
+            .checked_add(18)
+            .and_then(|end| bytes.get(entry_offset..end))
+        else {
+            return false;
+        };
+        let name = if entry.get(..4) == Some([0; 4].as_slice()) {
+            let Some(string_offset) =
+                read_pe_u32(entry, 4).and_then(|value| usize::try_from(value).ok())
+            else {
+                return false;
+            };
+            let Some(string) = string_table.get(string_offset..) else {
+                return false;
+            };
+            let Some(end) = string.iter().position(|byte| *byte == 0) else {
+                return false;
+            };
+            &string[..end]
+        } else {
+            let end = entry[..8].iter().position(|byte| *byte == 0).unwrap_or(8);
+            &entry[..end]
+        };
+        let Some(section) =
+            read_pe_u16(entry, 12).map(|section| i16::from_ne_bytes(section.to_ne_bytes()))
+        else {
+            return false;
+        };
+        if visit(name, section) {
+            return true;
+        }
+        let Some(auxiliary_count) = entry.get(17).map(|count| usize::from(*count)) else {
+            return false;
+        };
+        let Some(next) = index.checked_add(auxiliary_count + 1) else {
+            return false;
+        };
+        index = next;
+    }
+    true
+}
+
+fn coff_symbol_section(bytes: &[u8], wanted: &[u8]) -> Option<i16> {
+    let mut section = None;
+    let valid = visit_coff_symbols(bytes, |name, symbol_section| {
+        if name == wanted {
+            section = Some(symbol_section);
+            true
+        } else {
+            false
+        }
+    });
+    valid.then_some(section).flatten()
+}
+
+fn coff_symbol_matching(
+    bytes: &[u8],
+    mut matches: impl FnMut(&[u8], i16) -> bool,
+) -> Option<Vec<u8>> {
+    let mut head = None;
+    let valid = visit_coff_symbols(bytes, |name, section| {
+        if matches(name, section) {
+            head = Some(name.to_vec());
+            true
+        } else {
+            false
+        }
+    });
+    valid.then_some(head).flatten()
+}
+
+fn coff_head_symbol(bytes: &[u8]) -> Option<Vec<u8>> {
+    coff_symbol_matching(bytes, |name, section| {
+        section > 0 && name.starts_with(b"_head_")
     })
+}
+
+fn coff_import_name_symbol(bytes: &[u8]) -> Option<Vec<u8>> {
+    coff_symbol_matching(bytes, |name, section| {
+        section > 0 && name.ends_with(b"_iname")
+    })
+}
+
+fn section_starts_with_c_string(section: &[u8], wanted: &[u8]) -> bool {
+    section
+        .get(..wanted.len())
+        .is_some_and(|prefix| prefix == wanted)
+        && section.get(wanted.len()) == Some(&0)
 }
 
 fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
     let bytes = std::fs::read(path)?;
-    if !bytes.starts_with(b"!<arch>\n")
-        || !contains_ascii_case_insensitive(bytes.as_slice(), RUNTIME_DLL_NAME.as_bytes())
-        || !contains_ascii_case_insensitive(&bytes, b"keld_rt_v1_abi_version")
-    {
+    let abi_import = b"keld_rt_v1_abi_version";
+    let abi_imp_symbol = b"__imp_keld_rt_v1_abi_version";
+    let mut import_name_symbol = None;
+    let archive_valid = visit_gnu_archive(&bytes, |member| {
+        let Some(dll_name) = coff_section_data(member, b".idata$7") else {
+            return;
+        };
+        if section_starts_with_c_string(dll_name, RUNTIME_DLL_NAME.as_bytes()) {
+            import_name_symbol = coff_import_name_symbol(member);
+        }
+    });
+    let Some(import_name_symbol) = import_name_symbol.as_deref() else {
         return Err(BackendError::Toolchain(format!(
-            "runtime import library must be a GNU archive for {RUNTIME_DLL_NAME} exporting keld_rt_v1_abi_version: {}",
+            "runtime import library must contain a COFF import for {RUNTIME_DLL_NAME} and keld_rt_v1_abi_version: {}",
+            path.display()
+        )));
+    };
+    let mut head_symbol = None;
+    let head_archive_valid = visit_gnu_archive(&bytes, |member| {
+        if coff_section_data(member, b".idata$2").is_none() {
+            return;
+        }
+        let Some(candidate) = coff_head_symbol(member) else {
+            return;
+        };
+        if coff_symbol_section(member, import_name_symbol) == Some(0) {
+            head_symbol = Some(candidate);
+        }
+    });
+    let Some(head_symbol) = head_symbol.as_deref() else {
+        return Err(BackendError::Toolchain(format!(
+            "runtime import library must contain a COFF import for {RUNTIME_DLL_NAME} and keld_rt_v1_abi_version: {}",
+            path.display()
+        )));
+    };
+    let mut found_abi_import = false;
+    let import_archive_valid = visit_gnu_archive(&bytes, |member| {
+        let Some(import_name) = coff_section_data(member, b".idata$6") else {
+            return;
+        };
+        if !section_starts_with_c_string(import_name.get(2..).unwrap_or_default(), abi_import) {
+            return;
+        }
+        let import_defined =
+            coff_symbol_section(member, abi_import).is_some_and(|section| section > 0);
+        let import_pointer_defined =
+            coff_symbol_section(member, abi_imp_symbol).is_some_and(|section| section > 0);
+        let head_undefined = coff_symbol_section(member, head_symbol) == Some(0);
+        if import_defined && import_pointer_defined && head_undefined {
+            found_abi_import = true;
+        }
+    });
+    if !archive_valid || !head_archive_valid || !import_archive_valid || !found_abi_import {
+        return Err(BackendError::Toolchain(format!(
+            "runtime import library must contain a COFF import for {RUNTIME_DLL_NAME} and keld_rt_v1_abi_version: {}",
             path.display()
         )));
     }

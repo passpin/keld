@@ -8,7 +8,9 @@ use keld_native_abi::{
     AllocationPhase, FaultKind, KeldEntity, KeldFault, KeldHandle, KeldLifecycle, KeldLink,
     KeldPlaceStep, KeldValue, RuntimeStatus,
 };
-use keld_runtime::{EntityId, Link, RuntimeLifecycleId, RuntimeTypeId, Store, StoreError};
+use keld_runtime::{
+    EntityId, Link, RuntimeLifecycleId, RuntimeTypeId, Store, StoreError, checked_list_capacity,
+};
 #[cfg(feature = "test-controls")]
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1535,18 +1537,7 @@ impl RuntimeContext {
     }
 
     fn required_list_capacity(length: usize, additional: i64) -> Result<usize, NativeValueError> {
-        let additional = usize::try_from(additional).map_err(|_| NativeValueError::Capacity)?;
-        let required = length
-            .checked_add(additional)
-            .ok_or(NativeValueError::Capacity)?;
-        let _source_length = i64::try_from(required).map_err(|_| NativeValueError::Capacity)?;
-        let bytes = required
-            .checked_mul(std::mem::size_of::<(KeldValue, bool)>())
-            .ok_or(NativeValueError::Capacity)?;
-        if bytes > isize::MAX as usize {
-            return Err(NativeValueError::Capacity);
-        }
-        Ok(required)
+        checked_list_capacity(length, additional).ok_or(NativeValueError::Capacity)
     }
 
     fn validate_handle(&self, value: KeldValue) -> Result<(), NativeValueError> {

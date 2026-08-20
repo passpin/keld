@@ -1395,7 +1395,7 @@ fn invalid_runtime_dll_is_rejected_before_link() {
 }
 
 #[test]
-fn import_library_with_wrong_dll_name_is_rejected() {
+fn import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected() {
     let (runtime_dll, import_library) = runtime_artifacts("wrong-import");
     let directory = runtime_dll.parent().expect("runtime directory");
     let definition = directory.join("runtime.def");
@@ -1417,6 +1417,25 @@ fn import_library_with_wrong_dll_name_is_rejected() {
         .status()
         .expect("dlltool");
     assert!(status.success(), "dlltool failed: {status}");
+    let benign_member = directory.join("benign.o");
+    std::fs::write(
+        &benign_member,
+        b"benign metadata keld_runtime_v1.dll keld_rt_v1_abi_version",
+    )
+    .expect("benign archive member");
+    let ar = std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into());
+    let status = Command::new(ar)
+        .args(["r", import_library.to_str().expect("import library path")])
+        .arg(&benign_member)
+        .status()
+        .expect("ar");
+    assert!(status.success(), "ar failed: {status}");
+    let archive = std::fs::read(&import_library).expect("import archive");
+    assert!(
+        String::from_utf8_lossy(&archive).contains("keld_runtime_v1.dll")
+            && String::from_utf8_lossy(&archive).contains("keld_rt_v1_abi_version"),
+        "the benign member must contain both legacy validation strings"
+    );
     let output = directory.join("wrong-import.exe");
     let error = build_executable(
         &const_module(7),
