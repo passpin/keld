@@ -133,6 +133,8 @@ pub struct Function {
     pub id: FunctionId,
     pub span: Span,
     pub parameters: Vec<Register>,
+    /// Registers that represent mutable source-level local slots rather than SSA temporaries.
+    pub locals: Vec<Register>,
     pub parameter_modes: Vec<ParameterMode>,
     pub parameter_effects: Vec<LoanEffect>,
     pub current_lifecycle: Register,
@@ -241,6 +243,7 @@ impl TestModuleBuilder {
                     .into_iter()
                     .map(|(register, _)| register)
                     .collect(),
+                locals: Vec::new(),
                 parameter_modes: vec![ParameterMode::Loan; parameter_count],
                 parameter_effects: vec![LoanEffect::Read; parameter_count],
                 current_lifecycle,

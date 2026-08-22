@@ -297,6 +297,17 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
                 );
             }
         }
+        let mut locals = BTreeSet::new();
+        for local in &self.function.locals {
+            self.check_register(*local, self.function.span);
+            if !locals.insert(*local) {
+                self.sink.error(
+                    REGISTER_ERROR,
+                    self.function.span,
+                    "function local register is duplicated",
+                );
+            }
+        }
         self.validate_parameter_storage_roles();
         self.validate_register_storage_roles();
         self.validate_produced_register_roles();
@@ -489,6 +500,13 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
         let mut defined = predefined.clone();
         for block in &self.function.blocks {
             for instruction in &block.instructions {
+                if let Instruction::Copy { dst, .. } = instruction
+                    && self.function.locals.contains(dst)
+                {
+                    // Local slots are mutable storage. Copy into one is a write, not an SSA definition.
+                    defined.insert(*dst);
+                    continue;
+                }
                 if let Some(destination) = instruction_destination(instruction)
                     && !defined.insert(destination)
                 {

@@ -324,6 +324,7 @@ impl<'flow> FunctionLowerer<'flow> {
                 .iter()
                 .map(|local| self.registers.local(*local))
                 .collect(),
+            locals: self.registers.locals.clone(),
             parameter_modes: self.function.parameter_modes.clone(),
             parameter_effects: self.storage_summary.map_or_else(
                 || vec![keld_storage::LoanEffect::Read; self.function.parameters.len()],

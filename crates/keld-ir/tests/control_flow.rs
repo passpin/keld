@@ -45,6 +45,7 @@ fn validator_accepts_a_minimal_valid_cycle() {
             id: FunctionId(0),
             span,
             parameters: Vec::new(),
+            locals: Vec::new(),
             parameter_modes: Vec::new(),
             parameter_effects: Vec::new(),
             current_lifecycle: Register(0),
@@ -94,4 +95,42 @@ fn validator_accepts_a_minimal_valid_cycle() {
     };
 
     assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
+}
+
+
+#[test]
+fn validator_still_rejects_duplicate_ssa_definitions() {
+    let span = Span::new(SourceId(0), 0, 0).expect("empty test span is valid");
+    let module = Module {
+        definitions: Vec::new(),
+        functions: vec![Function {
+            id: FunctionId(0),
+            span,
+            parameters: Vec::new(),
+            locals: Vec::new(),
+            parameter_modes: Vec::new(),
+            parameter_effects: Vec::new(),
+            current_lifecycle: Register(0),
+            register_types: vec![IrType::Lifecycle, IrType::Int],
+            register_storage: vec![RegisterStorage::Trivial, RegisterStorage::Trivial],
+            storage_scope_parents: vec![None],
+            return_type: IrType::Int,
+            blocks: vec![IrBlock {
+                id: IrBlockId(0),
+                instructions: vec![
+                    Instruction::ConstInt { dst: Register(1), value: 1, span },
+                    Instruction::ConstInt { dst: Register(1), value: 2, span },
+                ],
+                terminator: Terminator::Return(Some(Register(1))),
+            }],
+            entry: IrBlockId(0),
+        }],
+        main: FunctionId(0),
+    };
+
+    let diagnostics = validate(&module);
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code.0 == "KLD9002"
+            && diagnostic.primary.message.contains("defined more than once")
+    }), "{diagnostics:#?}");
 }

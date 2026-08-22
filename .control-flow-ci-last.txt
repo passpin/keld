@@ -11,136 +11,51 @@ info: downloading 5 components
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
    Compiling keld-ir v0.1.0 (/home/runner/work/keld/keld/crates/keld-ir)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.41s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.07s
      Running tests/control_flow.rs (target/debug/deps/control_flow-653fd54a9c37437f)
 
-running 2 tests
+running 3 tests
 test validator_accepts_a_minimal_valid_cycle ... ok
-test source_loop_lowers_to_valid_cyclic_executable_ir ... FAILED
+test validator_still_rejects_duplicate_ssa_definitions ... ok
+test source_loop_lowers_to_valid_cyclic_executable_ir ... ok
 
-failures:
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
----- source_loop_lowers_to_valid_cyclic_executable_ir stdout ----
-
-thread 'source_loop_lowers_to_valid_cyclic_executable_ir' (2856) panicked at crates/keld-ir/tests/control_flow.rs:29:5:
-[
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD9002",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    68,
-                ),
-                end: BytePos(
-                    83,
-                ),
-            },
-            message: "register is defined more than once",
-        },
-        secondary: [],
-        help: Some(
-            "rebuild executable IR from verified Keld flow",
-        ),
-    },
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD9002",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    151,
-                ),
-                end: BytePos(
-                    161,
-                ),
-            },
-            message: "register is defined more than once",
-        },
-        secondary: [],
-        help: Some(
-            "rebuild executable IR from verified Keld flow",
-        ),
-    },
-]
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
-
-failures:
-    source_loop_lowers_to_valid_cyclic_executable_ir
-
-test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-error: test failed, to rerun pass `-p keld-ir --test control_flow`
  Downloading crates ...
   Downloaded stats_alloc v0.1.10
    Compiling keld-runtime v0.1.0 (/home/runner/work/keld/keld/crates/keld-runtime)
    Compiling stats_alloc v0.1.10
    Compiling keld-interpreter v0.1.0 (/home/runner/work/keld/keld/crates/keld-interpreter)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.66s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.39s
      Running tests/control_flow.rs (target/debug/deps/control_flow-be5f502e8575b564)
 
 running 6 tests
 test repeated_managed_allocation_fixture_executes_to_six ... FAILED
 test explicit_iteration_lifecycle_exits_before_the_next_iteration ... FAILED
-test break_and_continue_fixture_executes_to_eight ... FAILED
-test nested_break_and_continue_target_the_innermost_loop ... FAILED
-test while_condition_is_re_evaluated_after_each_backedge ... FAILED
-test zero_iteration_loop_skips_its_body ... FAILED
+test break_and_continue_fixture_executes_to_eight ... ok
+test nested_break_and_continue_target_the_innermost_loop ... ok
+test zero_iteration_loop_skips_its_body ... ok
+test while_condition_is_re_evaluated_after_each_backedge ... ok
 
 failures:
 
 ---- repeated_managed_allocation_fixture_executes_to_six stdout ----
 
-thread 'repeated_managed_allocation_fixture_executes_to_six' (3051) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (2 diagnostics)
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+thread 'repeated_managed_allocation_fixture_executes_to_six' (3059) panicked at crates/keld-interpreter/src/machine.rs:469:53:
+interpreter execution failed: validated loan destination is not empty
 
 ---- explicit_iteration_lifecycle_exits_before_the_next_iteration stdout ----
 
-thread 'explicit_iteration_lifecycle_exits_before_the_next_iteration' (3049) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (2 diagnostics)
-
----- break_and_continue_fixture_executes_to_eight stdout ----
-
-thread 'break_and_continue_fixture_executes_to_eight' (3048) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (2 diagnostics)
-
----- nested_break_and_continue_target_the_innermost_loop stdout ----
-
-thread 'nested_break_and_continue_target_the_innermost_loop' (3050) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (3 diagnostics)
-
----- while_condition_is_re_evaluated_after_each_backedge stdout ----
-
-thread 'while_condition_is_re_evaluated_after_each_backedge' (3052) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (1 diagnostics)
-
----- zero_iteration_loop_skips_its_body stdout ----
-
-thread 'zero_iteration_loop_skips_its_body' (3053) panicked at crates/keld-interpreter/src/machine.rs:464:53:
-interpreter setup failed: executable IR failed validation (1 diagnostics)
+thread 'explicit_iteration_lifecycle_exits_before_the_next_iteration' (3057) panicked at crates/keld-interpreter/src/machine.rs:469:53:
+interpreter execution failed: validated loan destination is not empty
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
 failures:
-    break_and_continue_fixture_executes_to_eight
     explicit_iteration_lifecycle_exits_before_the_next_iteration
-    nested_break_and_continue_target_the_innermost_loop
     repeated_managed_allocation_fixture_executes_to_six
-    while_condition_is_re_evaluated_after_each_backedge
-    zero_iteration_loop_skips_its_body
 
-test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: FAILED. 4 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 error: test failed, to rerun pass `-p keld-interpreter --test control_flow`
 
