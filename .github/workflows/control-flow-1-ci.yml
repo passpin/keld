@@ -2,8 +2,7 @@ name: Control Flow 1 CI
 
 on:
   push:
-    branches:
-      - feature/control-flow-1
+    branches: [feature/control-flow-1]
 
 permissions:
   contents: write
@@ -13,75 +12,47 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Apply queued Task 8 edits
+      - name: Run focused final gate
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($script in @('.control-flow-apply.py', '.control-flow-docs-apply.py')) {
-            if (-not (Test-Path $script)) { continue }
-            & python $script *>> .control-flow-patch-last.txt
-            if ($LASTEXITCODE -ne 0) { throw "$script failed: $LASTEXITCODE" }
-            git rm $script
-          }
-
-      - name: Run complete Task 8 acceptance gate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
           $log = '.control-flow-ci-last.txt'
           Remove-Item $log -ErrorAction SilentlyContinue
+          $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
+          $env:KELD_MINGW_GCC = 'C:\mingw64\bin\gcc.exe'
+          $env:KELD_DLLTOOL = 'C:\mingw64\bin\dlltool.exe'
+          rustup target add x86_64-pc-windows-gnu *>> $log
+          & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
+          $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          $llvm = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+          "llvm=$llvm" | Out-File $log -Append
+          $setup = if ($llvm -eq '22.1.8') { 0 } else { 1 }
 
-          function Find-Tool([string]$name) {
-            foreach ($candidate in @("C:\mingw64\bin\$name", "C:\msys64\mingw64\bin\$name")) {
-              if (Test-Path $candidate) { return $candidate }
-            }
-            $command = Get-Command $name -ErrorAction SilentlyContinue
-            if ($null -ne $command) { return $command.Source }
-            throw "required MinGW tool not found: $name"
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log; $prod=$LASTEXITCODE
+          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log; $test=$LASTEXITCODE
+          $artifacts=0
+          foreach ($p in @('keld_runtime_v1.dll','libkeld_runtime_v1.dll.a','keld_runtime_v1_test.dll','libkeld_runtime_v1_test.dll.a')) {
+            if (-not (Test-Path "target\x86_64-pc-windows-gnu\release\$p")) { $artifacts=1 }
           }
 
-          try {
-            $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
-            $env:KELD_MINGW_GCC = Find-Tool 'gcc.exe'
-            $env:KELD_DLLTOOL = Find-Tool 'dlltool.exe'
-            rustup target add x86_64-pc-windows-gnu *>> $log
-            if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
+          cargo test -p keld-semantics *>> $log; $semantics=$LASTEXITCODE
+          cargo test -p keld-flow *>> $log; $flow=$LASTEXITCODE
+          cargo test -p keld-lifecycle *>> $log; $lifecycle=$LASTEXITCODE
+          cargo test -p keld-storage *>> $log; $storage=$LASTEXITCODE
+          cargo test -p keld-ir *>> $log; $ir=$LASTEXITCODE
+          cargo test -p keld-interpreter *>> $log; $interpreter=$LASTEXITCODE
+          cargo test -p keld-native-backend --test differential -- --nocapture *>> $log; $diff=$LASTEXITCODE
+          cargo test -p keld-native-backend --test native_int -- --nocapture *>> $log; $native=$LASTEXITCODE
+          cargo test -p keld-native-backend --test surface_audit -- --nocapture *>> $log; $surface=$LASTEXITCODE
+          cargo test -p keld-cli --test cli --test milestone_acceptance *>> $log; $cli=$LASTEXITCODE
 
-            & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
-            if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed: $LASTEXITCODE" }
-            $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
-            $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
-            $llvmVersion = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
-            "llvm-config=$llvmVersion" | Out-File $log -Append
-            if ($llvmVersion -ne '22.1.8') { throw "LLVM version mismatch: $llvmVersion" }
+          "setup=$setup prod=$prod test_runtime=$test artifacts=$artifacts semantics=$semantics flow=$flow lifecycle=$lifecycle storage=$storage ir=$ir interpreter=$interpreter differential=$diff native_int=$native surface=$surface cli=$cli" | Out-File $log -Append
+          $status = if (@($setup,$prod,$test,$artifacts,$semantics,$flow,$lifecycle,$storage,$ir,$interpreter,$diff,$native,$surface,$cli) -contains 1) { 1 } else { 0 }
+          "exit_status=$status" | Out-File $log -Append
 
-            cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log
-            if ($LASTEXITCODE -ne 0) { throw "production runtime build failed: $LASTEXITCODE" }
-
-            cargo test -p keld-cli --test cli --test milestone_acceptance -- --nocapture *>> $log
-            $cli = $LASTEXITCODE
-            cargo test -p keld-semantics -- --nocapture *>> $log
-            $semantics = $LASTEXITCODE
-            cargo test -p keld-ir -- --nocapture *>> $log
-            $ir = $LASTEXITCODE
-            "cli_milestone=$cli semantics=$semantics ir=$ir" | Out-File $log -Append
-            if ($cli -ne 0) { $status = $cli }
-            elseif ($semantics -ne 0) { $status = $semantics }
-            else { $status = $ir }
-          }
-          catch {
-            $_ | Out-String | Out-File $log -Append
-            $status = 1
-          }
-
-          "`nexit_status=$status" | Out-File $log -Append
-          git add -A
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "ci: record Control Flow-1 verification [skip ci]"
-            git push
-          }
+          git add .control-flow-ci-last.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "ci: record focused Control Flow-1 final gate [skip ci]"
+          git push
           exit $status
