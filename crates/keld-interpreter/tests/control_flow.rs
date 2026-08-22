@@ -1,11 +1,11 @@
-use keld_interpreter::{Value, run_text_for_test};
+use keld_interpreter::{ValueKind, run_text_for_test};
 
 fn run_int(source: &str) -> i64 {
     let result = run_text_for_test(source).expect("Control Flow-1 program must execute");
-    let Value::Int(value) = result.value else {
-        panic!("expected Int result, got {:?}", result.value);
-    };
-    value
+    match result.value.kind() {
+        ValueKind::Int(value) => *value,
+        other => panic!("expected Int result, got {other:?}"),
+    }
 }
 
 #[test]
