@@ -133,6 +133,7 @@ fn loan_phi_module() -> Module {
             id: FunctionId(0),
             span,
             parameters: vec![],
+            locals: Vec::new(),
             parameter_modes: vec![],
             parameter_effects: vec![],
             current_lifecycle: Register(0),

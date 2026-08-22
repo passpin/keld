@@ -415,6 +415,7 @@ fn ir_function(
         id: keld_semantics::FunctionId(0),
         span: ir_span(),
         parameters: Vec::new(),
+        locals: Vec::new(),
         parameter_modes: Vec::new(),
         parameter_effects: Vec::new(),
         current_lifecycle: keld_ir::Register(0),
