@@ -153,7 +153,7 @@ At a loop join, the verifier keeps only facts valid on every incoming edge. Exis
 - a path that retires or invalidates a reference prevents later direct use unless all incoming paths re-establish a valid live proof;
 - equality and distinctness facts survive a join only when proven on all incoming paths.
 
-Control Flow-1 must not confuse one static allocation site with one dynamic entity identity. The same source allocation executed in different iterations may create distinct runtime entities. Loop-carried entity provenance therefore uses conservative merged provenance unless identity equality is proved. When uncertain, the analysis prefers may-alias over an unsound must-alias or must-distinct conclusion.
+Control Flow-1 must not confuse one static allocation site with one dynamic entity identity. The same source allocation executed in different iterations may create distinct runtime entities. Loop-carried entity provenance therefore uses conservative merged provenance unless identity equality is proved. When uncertain, the analysis prefers may-alias over an incorrect must-alias or must-distinct conclusion.
 
 Identity comparison may refine such conservative facts again inside a branch.
 
@@ -190,7 +190,7 @@ Call-graph traversal and other HIR visitors must recurse through loop conditions
 
 A general `while condition` is assumed able to fall through because the condition may be false before any iteration.
 
-Control Flow-1 may recognize the narrow syntactic case of a literal `while true` with no reachable `break` targeting that loop as non-fallthrough for function return checking. It does not attempt general termination proofs.
+A literal `while true` is treated as non-fallthrough only when its body contains no syntactic `break` that targets that same loop. Breaks inside nested loops do not count. The check is deliberately structural and conservative: Control Flow-1 does not attempt reachability or termination proofs merely to classify a loop as infinite.
 
 Dead loop bodies are still parsed and type-checked even when the condition is a literal `false`.
 
