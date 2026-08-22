@@ -10,59 +10,88 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Apply queued edit and record failure
         id: patch
-        shell: bash
+        shell: pwsh
         run: |
-          if [ ! -f .control-flow-apply.py ]; then
-            echo "applied=false" >> "$GITHUB_OUTPUT"
+          if (-not (Test-Path .control-flow-apply.py)) {
+            "applied=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
             exit 0
-          fi
+          }
 
-          set +e
-          python3 .control-flow-apply.py > .control-flow-patch-last.txt 2>&1
-          status=$?
-          set -e
-          printf '\nexit_status=%s\n' "$status" >> .control-flow-patch-last.txt
+          & python .control-flow-apply.py *> .control-flow-patch-last.txt
+          $status = $LASTEXITCODE
+          "`nexit_status=$status" | Out-File -FilePath .control-flow-patch-last.txt -Append
 
-          if [ "$status" -ne 0 ]; then
+          if ($status -ne 0) {
             git add .control-flow-patch-last.txt
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "ci: record Control Flow-1 edit failure [skip ci]"
             git push
-            exit "$status"
-          fi
+            exit $status
+          }
 
           git rm .control-flow-apply.py
-          echo "applied=true" >> "$GITHUB_OUTPUT"
+          "applied=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Run complete Task 6 IR and interpreter gate
-        shell: bash
+      - name: Run Task 7 Native-1 differential gate
+        shell: pwsh
         run: |
-          set +e
-          (
-            cargo test -p keld-ir
-            first=$?
-            cargo test -p keld-interpreter
-            second=$?
-            if [ "$first" -ne 0 ]; then exit "$first"; fi
-            exit "$second"
-          ) > .control-flow-ci-last.txt 2>&1
-          status=$?
-          set -e
-          printf '\nexit_status=%s\n' "$status" >> .control-flow-ci-last.txt
+          $ErrorActionPreference = 'Continue'
+          $log = '.control-flow-ci-last.txt'
+          Remove-Item $log -ErrorAction SilentlyContinue
+
+          function Find-Tool([string]$name) {
+            $candidates = @(
+              "C:\mingw64\bin\$name",
+              "C:\msys64\mingw64\bin\$name"
+            )
+            foreach ($candidate in $candidates) {
+              if (Test-Path $candidate) { return $candidate }
+            }
+            $command = Get-Command $name -ErrorAction SilentlyContinue
+            if ($null -ne $command) { return $command.Source }
+            throw "required MinGW tool not found: $name"
+          }
+
+          try {
+            $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
+            $env:KELD_MINGW_GCC = Find-Tool 'gcc.exe'
+            $env:KELD_DLLTOOL = Find-Tool 'dlltool.exe'
+            "KELD_MINGW_GCC=$env:KELD_MINGW_GCC" | Out-File $log -Append
+            "KELD_DLLTOOL=$env:KELD_DLLTOOL" | Out-File $log -Append
+
+            rustup target add x86_64-pc-windows-gnu *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
+
+            . ./scripts/activate-llvm.ps1 *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "LLVM activation failed: $LASTEXITCODE" }
+
+            cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
+
+            cargo test -p keld-native-backend --test differential -- --nocapture *>> $log
+            $status = $LASTEXITCODE
+          }
+          catch {
+            $_ | Out-String | Out-File $log -Append
+            $status = 1
+          }
+
+          "`nexit_status=$status" | Out-File $log -Append
 
           git add -A
-          if ! git diff --cached --quiet; then
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "ci: record Control Flow-1 verification [skip ci]"
             git push
-          fi
+          }
 
-          exit "$status"
+          exit $status
