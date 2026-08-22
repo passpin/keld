@@ -6,69 +6,14 @@ info: downloading 5 components
    Compiling keld-numeric v0.1.0 (/home/runner/work/keld/keld/crates/keld-numeric)
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.88s
-     Running unittests src/lib.rs (target/debug/deps/keld_semantics-6735a99730213fe1)
+error[E0599]: no variant, associated function, or constant named `While` found for enum `HirStmtKind` in the current scope
+  --> crates/keld-semantics/tests/control_flow_semantics.rs:65:22
+   |
+65 |     let HirStmtKind::While(while_) = &while_statement.kind else {
+   |                      ^^^^^ variant, associated function, or constant not found in `HirStmtKind`
 
-running 0 tests
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `keld-semantics` (test "control_flow_semantics") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
 
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/entrypoint.rs (target/debug/deps/entrypoint-5593ba31eea1dc12)
-
-running 8 tests
-test else_if_conditions_are_preserved_as_nested_hir ... ok
-test constant_fault_detection_respects_short_circuit_evaluation ... ok
-test constructor_and_call_arguments_keep_source_evaluation_order ... ok
-test constant_faults_and_int_range_errors_are_compile_time_diagnostics ... ok
-test unary_min_magnitude_and_int_constants_lower_to_exact_hir_values ... ok
-test unchecked_link_field_access_remains_marked_for_proof_analysis ... ok
-test non_unit_functions_must_return_on_every_structured_path ... ok
-test requires_exactly_one_zero_parameter_int_main_without_retirement_effects ... ok
-
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/feature_gate.rs (target/debug/deps/feature_gate-2a41d8f78d709931)
-
-running 4 tests
-test outer_unsupported_construct_suppresses_child_feature_cascades ... ok
-test supported_bootstrap_program_reaches_typed_hir ... ok
-test direct_and_mutual_recursion_are_deferred ... ok
-test every_deferred_construct_has_one_focused_feature_diagnostic ... ok
-
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/types.rs (target/debug/deps/types-435f613687684596)
-
-running 21 tests
-test classifies_managed_types_and_structural_duplicability ... ok
-test get_rejects_single_home_elements ... ok
-test bootstrap_assignment_exclusions_are_focused ... ok
-test condition_type_error_is_focused_and_ordering_requires_ints ... ok
-test parses_text_list_and_general_optional_types ... ok
-test managed_struct_field_replacement_requires_a_var_base ... ok
-test records_consuming_parameters_and_uninitialized_vars ... ok
-test rejects_self_and_mutual_by_value_layout_cycles_but_links_break_cycles ... ok
-test resolves_entity_names_as_refs_and_link_fields_as_links ... ok
-test indexed_list_diagnostics_are_focused ... ok
-test semantic_ids_follow_source_order_not_lookup_order ... ok
-test type_errors_use_stable_focused_codes ... ok
-test types_empty_list_constructor_from_expected_type ... ok
-test types_copy_as_an_explicit_structural_operation ... ok
-test types_complete_list_operations ... ok
-test types_list_length_as_a_checked_property ... ok
-test types_list_push_with_an_element_type ... ok
-test types_list_remove_returns_the_element_type ... ok
-test types_take_as_an_explicit_owned_expression ... ok
-test types_text_literal_and_byte_length ... ok
-test by_value_layout_depth_over_256_is_rejected_iteratively ... ok
-
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-
-   Doc-tests keld_semantics
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-exit_status=0
+exit_status=101
