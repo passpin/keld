@@ -1,0 +1,119 @@
+name: Native-1 ordinary COFF fix
+
+on:
+  push:
+    branches:
+      - fix/native1-ordinary-coff-runtime-override
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: TDD fix and verify
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'start'
+          $lastOutput = ''
+          $report = '.github/native1-fix-report.txt'
+          $workflow = '.github/workflows/native1-fix.yml'
+          $helper = '.github/native1-fix-helper.py'
+
+          function Run-Checked([string]$name, [scriptblock]$command) {
+            $script:stage = $name
+            $output = @(& $command 2>&1)
+            $exit = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            $script:lastOutput = ($output | Select-Object -Last 100 | Out-String)
+            if ($exit -ne 0) { throw "$name failed with exit code $exit" }
+          }
+
+          function Run-ExpectedFailure([string]$name, [scriptblock]$command) {
+            $script:stage = $name
+            $output = @(& $command 2>&1)
+            $exit = $LASTEXITCODE
+            $output | ForEach-Object { Write-Host $_ }
+            $script:lastOutput = ($output | Select-Object -Last 100 | Out-String)
+            if ($exit -eq 0) { throw "$name unexpectedly succeeded" }
+          }
+
+          try {
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            @('status=STARTED', "head=$env:GITHUB_SHA") | Set-Content -LiteralPath $report -Encoding utf8
+            git add $report
+            Run-Checked 'commit start marker' { git commit -m 'ci: mark Native-1 fix started' }
+            Run-Checked 'push start marker' { git push origin HEAD:fix/native1-ordinary-coff-runtime-override }
+
+            Run-Checked 'install Rust toolchain' { rustup toolchain install 1.97.0 --profile minimal --component rustfmt clippy }
+            Run-Checked 'install GNU target' { rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0 }
+            Run-Checked 'select Rust toolchain' { rustup default 1.97.0 }
+
+            $stage = 'bootstrap pinned LLVM'
+            $lockPath = '.tools\llvm\llvm-packages.lock.json'
+            $lockText = Get-Content -Raw -LiteralPath $lockPath
+            $lockText = $lockText.Replace('https://mirror.msys2.org/', 'https://repo.msys2.org/')
+            Set-Content -LiteralPath $lockPath -Value $lockText -NoNewline
+            $bootstrapOutput = @(& .\scripts\bootstrap-llvm.ps1 2>&1)
+            $bootstrapOutput | ForEach-Object { Write-Host $_ }
+            $lastOutput = ($bootstrapOutput | Select-Object -Last 100 | Out-String)
+            $prefix = ($bootstrapOutput | Select-Object -Last 1).ToString().Trim()
+            if (-not (Test-Path -LiteralPath (Join-Path $prefix 'bin\llvm-config.exe'))) { throw "bootstrap returned invalid prefix: $prefix" }
+
+            $stage = 'locate MinGW tools'
+            $llvmBin = Join-Path $prefix 'bin'
+            $env:PATH = "$llvmBin;C:\msys64\mingw64\bin;$env:PATH"
+            $env:LLVM_SYS_221_PREFIX = $prefix
+            $env:KELD_MINGW_GCC = (Get-Command gcc.exe -ErrorAction Stop).Source
+            $env:KELD_DLLTOOL = (Get-Command dlltool.exe -ErrorAction Stop).Source
+            $env:KELD_AR = (Get-Command ar.exe -ErrorAction Stop).Source
+
+            Run-Checked 'build Native-1 runtime' { cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu }
+            Copy-Item target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll target\x86_64-pc-windows-gnu\release\keld_runtime_v1.normal.dll -Force
+            Run-Checked 'build Native-1 test runtime' { cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu --features test-controls }
+            Copy-Item target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll target\x86_64-pc-windows-gnu\release\keld_runtime_v1_test.dll -Force
+            Copy-Item target\x86_64-pc-windows-gnu\release\keld_runtime_v1.normal.dll target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll -Force
+
+            Run-Checked 'add ordinary COFF override regression' { python .github/native1-fix-helper.py add-test }
+            Run-Checked 'format RED regression' { cargo fmt --all }
+            Run-ExpectedFailure 'RED ordinary COFF override regression' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact }
+            Run-Checked 'apply minimal validator fix' { python .github/native1-fix-helper.py apply-fix }
+            Run-Checked 'format GREEN fix' { cargo fmt --all }
+            Run-Checked 'GREEN ordinary COFF override regression' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact }
+            Run-Checked 'native backend regression suite' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --tests }
+            Run-Checked 'workspace debug tests' { cargo test --workspace --all-targets --target x86_64-pc-windows-gnu }
+            Run-Checked 'workspace release tests' { cargo test --workspace --all-targets --release --target x86_64-pc-windows-gnu }
+            Run-Checked 'workspace Clippy' { cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings }
+            Run-Checked 'format check' { cargo fmt --all -- --check }
+            Run-Checked 'diff check' { git diff --check }
+
+            git checkout -- .tools/llvm/llvm-packages.lock.json
+            Remove-Item -LiteralPath $report -Force
+            git rm $workflow $helper
+            git add crates/keld-native-backend/src/lib.rs crates/keld-native-backend/tests/native_int.rs
+            Run-Checked 'staged diff check' { git diff --cached --check }
+            Run-Checked 'commit verified fix' { git commit -m 'fix(native): reject ordinary COFF runtime overrides' }
+            Run-Checked 'push verified fix' { git push origin HEAD:fix/native1-ordinary-coff-runtime-override }
+          }
+          catch {
+            $message = ($_ | Out-String).Trim()
+            Write-Host "FAILED at $stage: $message"
+            git checkout -- .tools/llvm/llvm-packages.lock.json 2>$null
+            git reset --hard HEAD
+            git clean -fd
+            @('status=FAIL', "stage=$stage", "message=$message", '--- last output ---', $lastOutput) | Set-Content -LiteralPath $report -Encoding utf8
+            git add $report
+            git commit -m 'ci: record Native-1 fix failure'
+            if ($LASTEXITCODE -eq 0) { git push origin HEAD:fix/native1-ordinary-coff-runtime-override }
+            exit 0
+          }
