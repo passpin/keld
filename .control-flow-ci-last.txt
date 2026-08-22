@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.08s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.18s
      Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
 
 running 0 tests
@@ -19,8 +19,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 4 tests
 test copying_a_reference_preserves_must_alias_provenance ... ok
-test identity_inequality_refines_the_valid_branch ... ok
 test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
+test identity_inequality_refines_the_valid_branch ... ok
 test identity_equality_refines_to_must_alias ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -49,8 +49,8 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 3 tests
 test keep_rejects_dynamic_parameter_lifecycle ... ok
-test keep_moves_a_known_inner_entity_to_an_active_ancestor ... ok
 test keep_requires_a_strict_ancestor_not_the_same_lifecycle ... ok
+test keep_moves_a_known_inner_entity_to_an_active_ancestor ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -79,7 +79,7 @@ failures:
 
 ---- loop_carried_allocation_uses_a_stable_distinct_merge_provenance stdout ----
 
-thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3141) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:185:5:
+thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3166) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:197:5:
 carried/current refs missing: previous=None, current=Some(EntityReferenceFact { definition: DefId(0), provenance: ProvenanceId(2) })
 block=FlowBlock {
     id: BlockId(
@@ -378,6 +378,700 @@ facts=EntityOperationFacts {
         ),
     },
 }
+trace:
+block BlockId(0): previous=None, ops=[
+    CopyLocal {
+        dst: ValueId(
+            0,
+        ),
+        local: LocalId(
+            0,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                73,
+            ),
+            end: BytePos(
+                78,
+            ),
+        },
+    },
+    StoreLocal {
+        local: LocalId(
+            1,
+        ),
+        value: ValueId(
+            0,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                58,
+            ),
+            end: BytePos(
+                78,
+            ),
+        },
+    },
+    ConstInt {
+        dst: ValueId(
+            1,
+        ),
+        value: 0,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                87,
+            ),
+            end: BytePos(
+                89,
+            ),
+        },
+    },
+    StoreLocal {
+        local: LocalId(
+            2,
+        ),
+        value: ValueId(
+            1,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                79,
+            ),
+            end: BytePos(
+                89,
+            ),
+        },
+    },
+], term=Goto(
+    BlockId(
+        1,
+    ),
+)
+block BlockId(1): previous=Some(EntityReferenceFact { definition: DefId(0), provenance: ProvenanceId(9) }), ops=[
+    CopyLocal {
+        dst: ValueId(
+            2,
+        ),
+        local: LocalId(
+            2,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                96,
+            ),
+            end: BytePos(
+                98,
+            ),
+        },
+    },
+    ConstInt {
+        dst: ValueId(
+            3,
+        ),
+        value: 2,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                100,
+            ),
+            end: BytePos(
+                102,
+            ),
+        },
+    },
+    Compare {
+        dst: ValueId(
+            4,
+        ),
+        op: Less,
+        lhs: ValueId(
+            2,
+        ),
+        rhs: ValueId(
+            3,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                96,
+            ),
+            end: BytePos(
+                102,
+            ),
+        },
+    },
+], term=ExitScopes {
+    storage_scopes: [
+        StorageScopeId(
+            1,
+        ),
+    ],
+    lifecycles: [],
+    next: Goto(
+        BlockId(
+            2,
+        ),
+    ),
+}
+block BlockId(2): previous=None, ops=[], term=Branch {
+    condition: ValueId(
+        4,
+    ),
+    then_block: BlockId(
+        3,
+    ),
+    else_block: BlockId(
+        4,
+    ),
+}
+block BlockId(3): previous=None, ops=[
+    CopyLocal {
+        dst: ValueId(
+            5,
+        ),
+        local: LocalId(
+            2,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                130,
+            ),
+            end: BytePos(
+                132,
+            ),
+        },
+    },
+    AllocateEntity {
+        dst: ValueId(
+            6,
+        ),
+        definition: DefId(
+            0,
+        ),
+        fields: [
+            (
+                FieldId(
+                    0,
+                ),
+                ValueId(
+                    5,
+                ),
+            ),
+        ],
+        lifecycle: LifecycleId(
+            0,
+        ),
+        site: AllocationSite(
+            0,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                118,
+            ),
+            end: BytePos(
+                133,
+            ),
+        },
+    },
+    StoreLocal {
+        local: LocalId(
+            3,
+        ),
+        value: ValueId(
+            6,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                104,
+            ),
+            end: BytePos(
+                133,
+            ),
+        },
+    },
+    CopyLocal {
+        dst: ValueId(
+            7,
+        ),
+        local: LocalId(
+            2,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                137,
+            ),
+            end: BytePos(
+                139,
+            ),
+        },
+    },
+    ConstInt {
+        dst: ValueId(
+            8,
+        ),
+        value: 1,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                142,
+            ),
+            end: BytePos(
+                144,
+            ),
+        },
+    },
+    Compare {
+        dst: ValueId(
+            9,
+        ),
+        op: Eq,
+        lhs: ValueId(
+            7,
+        ),
+        rhs: ValueId(
+            8,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                137,
+            ),
+            end: BytePos(
+                144,
+            ),
+        },
+    },
+], term=Branch {
+    condition: ValueId(
+        9,
+    ),
+    then_block: BlockId(
+        5,
+    ),
+    else_block: BlockId(
+        6,
+    ),
+}
+block BlockId(4): previous=None, ops=[
+    ConstInt {
+        dst: ValueId(
+            20,
+        ),
+        value: 1,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                275,
+            ),
+            end: BytePos(
+                276,
+            ),
+        },
+    },
+    UnaryInt {
+        dst: ValueId(
+            21,
+        ),
+        op: Neg,
+        value: ValueId(
+            20,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                273,
+            ),
+            end: BytePos(
+                276,
+            ),
+        },
+    },
+], term=ExitScopes {
+    storage_scopes: [
+        StorageScopeId(
+            0,
+        ),
+    ],
+    lifecycles: [],
+    next: Return(
+        Some(
+            ValueId(
+                21,
+            ),
+        ),
+    ),
+}
+block BlockId(5): previous=None, ops=[
+    CopyLocal {
+        dst: ValueId(
+            10,
+        ),
+        local: LocalId(
+            1,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                149,
+            ),
+            end: BytePos(
+                158,
+            ),
+        },
+    },
+    CopyLocal {
+        dst: ValueId(
+            11,
+        ),
+        local: LocalId(
+            3,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                161,
+            ),
+            end: BytePos(
+                169,
+            ),
+        },
+    },
+], term=BranchIdentity {
+    lhs: ValueId(
+        10,
+    ),
+    rhs: ValueId(
+        11,
+    ),
+    equal: BlockId(
+        9,
+    ),
+    not_equal: BlockId(
+        8,
+    ),
+}
+block BlockId(6): previous=None, ops=[], term=Goto(
+    BlockId(
+        7,
+    ),
+)
+block BlockId(7): previous=None, ops=[
+    CopyLocal {
+        dst: ValueId(
+            16,
+        ),
+        local: LocalId(
+            3,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                244,
+            ),
+            end: BytePos(
+                252,
+            ),
+        },
+    },
+    StoreLocal {
+        local: LocalId(
+            1,
+        ),
+        value: ValueId(
+            16,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                233,
+            ),
+            end: BytePos(
+                252,
+            ),
+        },
+    },
+    CopyLocal {
+        dst: ValueId(
+            17,
+        ),
+        local: LocalId(
+            2,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                257,
+            ),
+            end: BytePos(
+                259,
+            ),
+        },
+    },
+    ConstInt {
+        dst: ValueId(
+            18,
+        ),
+        value: 1,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                261,
+            ),
+            end: BytePos(
+                263,
+            ),
+        },
+    },
+    BinaryInt {
+        dst: ValueId(
+            19,
+        ),
+        op: Add,
+        lhs: ValueId(
+            17,
+        ),
+        rhs: ValueId(
+            18,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                257,
+            ),
+            end: BytePos(
+                263,
+            ),
+        },
+    },
+    StoreLocal {
+        local: LocalId(
+            2,
+        ),
+        value: ValueId(
+            19,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                253,
+            ),
+            end: BytePos(
+                263,
+            ),
+        },
+    },
+], term=ExitScopes {
+    storage_scopes: [
+        StorageScopeId(
+            2,
+        ),
+    ],
+    lifecycles: [],
+    next: Goto(
+        BlockId(
+            1,
+        ),
+    ),
+}
+block BlockId(8): previous=None, ops=[
+    CopyLocal {
+        dst: ValueId(
+            12,
+        ),
+        local: LocalId(
+            3,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                178,
+            ),
+            end: BytePos(
+                186,
+            ),
+        },
+    },
+    Retire {
+        entity: ValueId(
+            12,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                171,
+            ),
+            end: BytePos(
+                186,
+            ),
+        },
+    },
+    CopyLocal {
+        dst: ValueId(
+            13,
+        ),
+        local: LocalId(
+            1,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                194,
+            ),
+            end: BytePos(
+                203,
+            ),
+        },
+    },
+    ReadEntityField {
+        dst: ValueId(
+            14,
+        ),
+        entity: ValueId(
+            13,
+        ),
+        field: FieldId(
+            0,
+        ),
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                194,
+            ),
+            end: BytePos(
+                209,
+            ),
+        },
+    },
+], term=ExitScopes {
+    storage_scopes: [
+        StorageScopeId(
+            4,
+        ),
+        StorageScopeId(
+            3,
+        ),
+        StorageScopeId(
+            2,
+        ),
+        StorageScopeId(
+            0,
+        ),
+    ],
+    lifecycles: [],
+    next: Return(
+        Some(
+            ValueId(
+                14,
+            ),
+        ),
+    ),
+}
+block BlockId(9): previous=None, ops=[
+    ConstInt {
+        dst: ValueId(
+            15,
+        ),
+        value: 99,
+        span: Span {
+            source: SourceId(
+                0,
+            ),
+            start: BytePos(
+                225,
+            ),
+            end: BytePos(
+                228,
+            ),
+        },
+    },
+], term=ExitScopes {
+    storage_scopes: [
+        StorageScopeId(
+            5,
+        ),
+        StorageScopeId(
+            3,
+        ),
+        StorageScopeId(
+            2,
+        ),
+        StorageScopeId(
+            0,
+        ),
+    ],
+    lifecycles: [],
+    next: Return(
+        Some(
+            ValueId(
+                15,
+            ),
+        ),
+    ),
+}
+block BlockId(10): previous=None, ops=[], term=Unreachable
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
@@ -388,7 +1082,7 @@ test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 
 error: test failed, to rerun pass `-p keld-lifecycle --test provenance_facts`
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
      Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
 
 running 0 tests
@@ -398,13 +1092,13 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/control_flow.rs (target/debug/deps/control_flow-4631168b95e5fac0)
 
 running 7 tests
-test explicit_lifecycles_have_distinct_parented_ids ... ok
 test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
+test explicit_lifecycles_have_distinct_parented_ids ... ok
 test nested_loop_control_targets_the_innermost_loop ... ok
 test direct_entity_identity_condition_uses_branch_identity ... ok
+test while_lowers_to_condition_scope_branch_and_back_edge ... ok
 test when_resolves_link_into_live_and_absent_blocks ... ok
 test stable_dump_contains_no_host_addresses_or_debug_format ... ok
-test while_lowers_to_condition_scope_branch_and_back_edge ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -413,8 +1107,8 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 10 tests
 test call_arguments_are_materialized_left_to_right ... ok
 test assignment_materializes_identity_then_rhs_then_writes ... ok
-test compound_assignment_reads_old_value_before_rhs ... ok
 test boolean_operators_use_control_flow_and_one_phi ... ok
+test compound_assignment_reads_old_value_before_rhs ... ok
 test nested_index_projections_preserve_index_evaluation_order ... ok
 test constructor_field_ids_do_not_reorder_source_evaluation ... ok
 test indexed_replacement_materializes_target_before_rhs ... ok
