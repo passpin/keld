@@ -41,18 +41,11 @@ jobs:
           git rm .control-flow-apply.py
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run Task 5 full storage gate
+      - name: Run Task 6 compound-assignment RED/GREEN gate
         shell: bash
         run: |
           set +e
-          (
-            cargo test -p keld-storage
-            first=$?
-            cargo test -p keld-ir --test lowering
-            second=$?
-            if [ "$first" -ne 0 ]; then exit "$first"; fi
-            exit "$second"
-          ) > .control-flow-ci-last.txt 2>&1
+          cargo test -p keld-flow --test evaluation_order local_compound_assignment_reads_updates_and_stores_the_local > .control-flow-ci-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-ci-last.txt
