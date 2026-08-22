@@ -4,16 +4,98 @@ info: downloading 5 components
     Updating crates.io index
    Compiling keld-source v0.1.0 (/home/runner/work/keld/keld/crates/keld-source)
    Compiling keld-numeric v0.1.0 (/home/runner/work/keld/keld/crates/keld-numeric)
+   Compiling keld-native-abi v0.1.0 (/home/runner/work/keld/keld/crates/keld-native-abi)
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.10s
-     Running tests/evaluation_order.rs (target/debug/deps/evaluation_order-4719371b9af8e836)
+   Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
+   Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
+   Compiling keld-ir v0.1.0 (/home/runner/work/keld/keld/crates/keld-ir)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.43s
+     Running tests/control_flow.rs (target/debug/deps/control_flow-653fd54a9c37437f)
 
-running 1 test
-test local_compound_assignment_reads_updates_and_stores_the_local ... ok
+running 2 tests
+test validator_accepts_a_minimal_valid_cycle ... ok
+test source_loop_lowers_to_valid_cyclic_executable_ir ... FAILED
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+failures:
+
+---- source_loop_lowers_to_valid_cyclic_executable_ir stdout ----
+
+thread 'source_loop_lowers_to_valid_cyclic_executable_ir' (2985) panicked at crates/keld-ir/tests/control_flow.rs:29:5:
+[
+    Diagnostic {
+        code: DiagnosticCode(
+            "KLD9002",
+        ),
+        severity: Error,
+        primary: Label {
+            span: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    68,
+                ),
+                end: BytePos(
+                    83,
+                ),
+            },
+            message: "register is defined more than once",
+        },
+        secondary: [],
+        help: Some(
+            "rebuild executable IR from verified Keld flow",
+        ),
+    },
+    Diagnostic {
+        code: DiagnosticCode(
+            "KLD9002",
+        ),
+        severity: Error,
+        primary: Label {
+            span: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    151,
+                ),
+                end: BytePos(
+                    161,
+                ),
+            },
+            message: "register is defined more than once",
+        },
+        secondary: [],
+        help: Some(
+            "rebuild executable IR from verified Keld flow",
+        ),
+    },
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
-exit_status=0
+failures:
+    source_loop_lowers_to_valid_cyclic_executable_ir
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p keld-ir --test control_flow`
+ Downloading crates ...
+  Downloaded stats_alloc v0.1.10
+   Compiling keld-runtime v0.1.0 (/home/runner/work/keld/keld/crates/keld-runtime)
+   Compiling stats_alloc v0.1.10
+   Compiling keld-interpreter v0.1.0 (/home/runner/work/keld/keld/crates/keld-interpreter)
+error[E0164]: expected tuple struct or tuple variant, found associated function `Value::Int`
+ --> crates/keld-interpreter/tests/control_flow.rs:5:9
+  |
+5 |     let Value::Int(value) = result.value else {
+  |         ^^^^^^^^^^^^^^^^^ `fn` calls are not allowed in patterns
+  |
+  = help: for more information, visit https://doc.rust-lang.org/book/ch19-00-patterns.html
+
+For more information about this error, try `rustc --explain E0164`.
+error: could not compile `keld-interpreter` (test "control_flow") due to 1 previous error
+
+exit_status=101
