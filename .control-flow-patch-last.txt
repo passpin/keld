@@ -1,3 +1,3 @@
-added local compound-assignment Flow regression
+lowered projection-free compound assignments through CopyLocal/BinaryInt/StoreLocal
 
 exit_status=0
