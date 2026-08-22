@@ -180,12 +180,14 @@ fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
     let facts = module
         .entity_facts_at(function, identity_block.id, u32::try_from(last_copy).unwrap())
         .expect("identity block publishes facts before its final copy");
-    let previous = facts
-        .local_reference(copied_locals[0])
-        .expect("loop-carried previous identity remains available at the comparison");
-    let current = facts
-        .local_reference(copied_locals[1])
-        .expect("current iteration allocation remains available at the comparison");
+    let previous = facts.local_reference(copied_locals[0]);
+    let current = facts.local_reference(copied_locals[1]);
+    assert!(
+        previous.is_some() && current.is_some(),
+        "carried/current refs missing: previous={previous:?}, current={current:?}\nblock={identity_block:#?}\nfacts={facts:#?}"
+    );
+    let previous = previous.unwrap();
+    let current = current.unwrap();
 
     assert_eq!(
         facts.alias_relation(previous, current),
