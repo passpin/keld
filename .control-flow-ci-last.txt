@@ -9,18 +9,19 @@ info: downloading 5 components
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.35s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.63s
      Running tests/cleanup_planner.rs (target/debug/deps/cleanup_planner-2523eb781e564b7a)
 
-running 6 tests
+running 7 tests
 test owned_temporary_loan_drops_after_the_call_succeeds ... ok
 test maybe_live_home_uses_one_conditional_flag ... ok
 test divergent_successful_initialization_order_tracks_only_that_scope ... ok
-test plan_distinguishes_owned_temporary_local_home_and_loan ... ok
 test store_local_plan_distinguishes_initialization_and_live_replacement ... ok
+test plan_distinguishes_owned_temporary_local_home_and_loan ... ok
+test cyclic_reinitialization_order_uses_bounded_outer_scope_tracking ... ok
 test uniform_scope_uses_direct_reverse_drops ... ok
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/control_flow.rs (target/debug/deps/control_flow-a335100353c9ac2a)
 
@@ -44,11 +45,11 @@ test consuming_parameter_can_return_an_explicit_take ... ok
 test explicit_copy_leaves_the_source_live ... ok
 test entity_managed_field_assignment_requires_transfer ... ok
 test list_push_requires_explicit_transfer_for_named_single_home_elements ... ok
-test managed_struct_field_read_is_not_an_implicit_copy ... ok
 test moved_var_can_be_reinitialized_before_return ... ok
 test named_single_home_assignment_is_not_implicitly_a_copy ... ok
-test struct_construction_requires_transfer_for_managed_fields ... ok
+test managed_struct_field_read_is_not_an_implicit_copy ... ok
 test text_named_assignment_is_not_an_implicit_copy ... ok
+test struct_construction_requires_transfer_for_managed_fields ... ok
 test nested_text_lists_allow_whole_transfer_and_reject_partial_moves ... ok
 
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
