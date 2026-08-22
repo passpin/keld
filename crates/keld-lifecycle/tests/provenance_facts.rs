@@ -182,9 +182,21 @@ fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
         .expect("identity block publishes facts before its final copy");
     let previous = facts.local_reference(copied_locals[0]);
     let current = facts.local_reference(copied_locals[1]);
+    let trace = function_data
+        .blocks
+        .iter()
+        .map(|block| {
+            let first = (!block.operations.is_empty())
+                .then(|| module.entity_facts_at(function, block.id, 0))
+                .flatten()
+                .and_then(|facts| facts.local_reference(copied_locals[0]));
+            format!("block {:?}: previous={first:?}, ops={:#?}, term={:#?}", block.id, block.operations, block.terminator)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
         previous.is_some() && current.is_some(),
-        "carried/current refs missing: previous={previous:?}, current={current:?}\nblock={identity_block:#?}\nfacts={facts:#?}"
+        "carried/current refs missing: previous={previous:?}, current={current:?}\nblock={identity_block:#?}\nfacts={facts:#?}\ntrace:\n{trace}"
     );
     let previous = previous.unwrap();
     let current = current.unwrap();
