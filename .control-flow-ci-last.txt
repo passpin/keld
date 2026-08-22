@@ -9,14 +9,14 @@ info: downloading 5 components
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.26s
      Running unittests src/lib.rs (target/debug/deps/keld_storage-22ed5ec511668d7e)
 
 running 2 tests
 test tests::home_join_preserves_the_single_home_lattice ... ok
 test cleanup::tests::generated_join_orders_match_the_reference_stack_model ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
 
      Running tests/cleanup_planner.rs (target/debug/deps/cleanup_planner-2523eb781e564b7a)
 
@@ -48,12 +48,12 @@ test different_fields_on_one_entity_remain_non_overlapping ... ok
 test alias_locals_conflict_on_the_same_entity_field ... ok
 test nested_entity_field_replacement_conflicts_with_an_outer_reservation ... ok
 test broad_retirement_conflicts_with_every_same_type_entity_field ... ok
-test nested_entity_retirement_conflicts_with_an_outer_reservation ... ok
 test nested_read_of_the_same_entity_field_is_compatible ... ok
+test nested_entity_retirement_conflicts_with_an_outer_reservation ... ok
 test nested_mutation_of_a_proven_distinct_entity_is_valid ... ok
-test proven_distinct_fresh_entities_keep_disjoint_field_loans ... ok
 test read_only_loans_through_entity_aliases_are_compatible ... ok
 test unrefined_same_type_entity_parameters_conservatively_conflict ... ok
+test proven_distinct_fresh_entities_keep_disjoint_field_loans ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -65,16 +65,16 @@ test consuming_call_requires_take_for_a_named_argument ... ok
 test borrowed_parameter_cannot_be_returned_as_owned ... ok
 test a_branch_move_produces_maybe_live_at_the_join ... ok
 test consuming_parameter_can_return_an_explicit_take ... ok
-test let_cannot_be_rebound_as_a_whole_value ... ok
 test explicit_copy_leaves_the_source_live ... ok
 test entity_managed_field_assignment_requires_transfer ... ok
-test list_push_requires_explicit_transfer_for_named_single_home_elements ... ok
-test managed_struct_field_read_is_not_an_implicit_copy ... ok
+test let_cannot_be_rebound_as_a_whole_value ... ok
 test moved_var_can_be_reinitialized_before_return ... ok
+test managed_struct_field_read_is_not_an_implicit_copy ... ok
 test named_single_home_assignment_is_not_implicitly_a_copy ... ok
+test list_push_requires_explicit_transfer_for_named_single_home_elements ... ok
 test struct_construction_requires_transfer_for_managed_fields ... ok
-test nested_text_lists_allow_whole_transfer_and_reject_partial_moves ... ok
 test text_named_assignment_is_not_an_implicit_copy ... ok
+test nested_text_lists_allow_whole_transfer_and_reject_partial_moves ... ok
 
 test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -89,8 +89,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 7 tests
 test nested_indexed_replacement_keeps_projected_reservations ... ok
-test distinct_struct_fields_are_disjoint ... ok
 test different_constant_indices_are_disjoint ... ok
+test distinct_struct_fields_are_disjoint ... ok
 test same_constant_indices_conflict ... ok
 test distinct_and_equal_entity_fields_follow_identity_aware_overlap ... ok
 test same_struct_field_conflicts ... ok
@@ -115,8 +115,8 @@ test pending_read_reservation_blocks_later_structural_argument_evaluation ... ok
 test outer_reservation_survives_nested_argument_evaluation ... ok
 test nested_structural_access_checks_reservations_beyond_the_immediate_call ... ok
 test nested_structural_field_access_checks_every_active_call_reservation ... ok
-test two_read_loans_of_the_same_list_are_valid ... ok
 test structural_loan_cannot_overlap_a_second_loan_of_the_same_list ... ok
+test two_read_loans_of_the_same_list_are_valid ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -128,7 +128,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
    Compiling keld-native-abi v0.1.0 (/home/runner/work/keld/keld/crates/keld-native-abi)
    Compiling keld-ir v0.1.0 (/home/runner/work/keld/keld/crates/keld-ir)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.69s
      Running tests/lowering.rs (target/debug/deps/lowering-6218b34efd54ad23)
 
 running 5 tests
