@@ -1,0 +1,3 @@
+error: corrupt patch at .control-flow-apply.patch:52
+
+exit_status=128
