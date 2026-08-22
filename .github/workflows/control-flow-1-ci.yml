@@ -79,6 +79,8 @@ jobs:
             "llvm-config=$llvmVersion" | Out-File $log -Append
             if ($llvmVersion -ne '22.1.8') { throw "LLVM version mismatch: $llvmVersion" }
 
+            cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "production runtime build failed: $LASTEXITCODE" }
             cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
 
