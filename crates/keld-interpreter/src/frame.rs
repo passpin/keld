@@ -138,11 +138,15 @@ impl Frame {
 
     pub fn set_loan(&mut self, register: Register, place: RuntimePlace) -> Result<(), ()> {
         let destination = self.registers.get_mut(register.0 as usize).ok_or(())?;
-        if !matches!(destination, RegisterSlot::Empty) {
-            return Err(());
+        match destination {
+            RegisterSlot::Empty | RegisterSlot::Loan(_) => {
+                // A static SSA loan definition can execute again after a CFG back-edge.
+                // The previous dynamic loan value is dead at that redefinition point.
+                *destination = RegisterSlot::Loan(place);
+                Ok(())
+            }
+            RegisterSlot::Owned(_) | RegisterSlot::DropSlot(_) => Err(()),
         }
-        *destination = RegisterSlot::Loan(place);
-        Ok(())
     }
 
     pub fn take_loan(&mut self, register: Register) -> Option<RuntimePlace> {
