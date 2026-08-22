@@ -1,0 +1,11 @@
+fn main() -> Int {
+    var i = 0
+    var total = 0
+    while i < 6 {
+        i += 1
+        if i == 2 { continue }
+        if i == 5 { break }
+        total += i
+    }
+    return total
+}
