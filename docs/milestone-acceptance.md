@@ -105,6 +105,33 @@ historical full gate recorded 256 reference-model seeds and the GNU workspace,
 strict Clippy, formatting, and diff checks as passing; Native-1 differential
 execution is recorded below.
 
+## Completed Control Flow-1 acceptance
+
+Control Flow-1 implements the normative rules in
+[`spec/control-flow.md`](spec/control-flow.md) without changing the historical
+16 bootstrap criteria above. `while`, `break`, and `continue` lower through the
+existing structured CFG and cleanup machinery; there is no implicit loop
+lifecycle and no executable-IR or native loop opcode.
+
+| Requirement | Executable evidence |
+|---|---|
+| ordinary structured loop result | `control_flow_loop.keld` returns `8` through the library, CLI interpreter, Native O0, and Native O2 paths |
+| repeated managed allocation | `control_flow_allocations.keld` returns `6`; the repeated concat site keeps one site ID with attempts `1,2,3` |
+| loop-control diagnostics | semantics/CLI acceptance rejects outside-loop `break` and `continue` with `KLD0112` |
+| cyclic Home fixed point | `keld-storage/tests/control_flow.rs` covers `MaybeLive`, repair, zero iteration, and body-home re-entry |
+| structured managed cleanup | `keld-interpreter/tests/cleanup.rs` covers body `Text` cleanup on `continue`, `List[Text]` cleanup on `break`, and condition-temporary cleanup |
+| lifecycle exits | `keld-flow/tests/{control_flow,storage_scopes}.rs` proves `ExitScopes` for return and iteration lifecycle exits |
+| no implicit lifecycle / ancestor keep | `keld-interpreter/tests/control_flow.rs` proves plain-loop entities remain in the enclosing lifecycle and kept entities survive an inner lifecycle `break` |
+| lifecycle/provenance fixed point | `keld-lifecycle/tests/control_flow.rs` covers path retirement, loop-carried dynamic identity, and retirement call effects in conditions |
+| condition boundary | interpreter/lifecycle regressions cover checked faults, call effects, and managed full-expression cleanup before body or loop exit |
+| cyclic executable IR | `keld-ir` cyclic validation plus CLI milestone acceptance require a validated CFG backedge with no loop opcode |
+| native parity and repeated condition allocation | `keld-native-backend/tests/differential.rs` compares interpreter with LLVM O0/O2, including one static condition-concat site with attempts `1,2,3` |
+
+The Native-1 executable surface remains **48 instruction variants and 6
+terminators**. Control Flow-1 expands which CFG shapes are accepted, not the
+instruction/terminator enum surface. The `surface_audit` suite remains the
+exhaustive executable-surface guard.
+
 ## Verification command for this historical milestone
 
 From the repository root in PowerShell:

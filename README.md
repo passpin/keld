@@ -80,9 +80,9 @@ The accepted source surface currently includes:
 - immutable `let` and replaceable `var` bindings, explicit moves through
   `take`, structural duplication through `.copy()`, normal and consuming
   parameters, and owned managed returns;
-- functions, blocks, conditionals, assignments, calls, checked unary/binary
-  arithmetic, boolean operators, scalar comparisons, and explicit runtime
-  faults;
+- functions, blocks, conditionals, `while`, `break`, `continue`, assignments,
+  calls, checked unary/binary arithmetic, boolean operators, scalar comparisons,
+  and explicit runtime faults;
 - lifecycle creation/end, entity allocation, link resolution with `when`,
   `keep`, `retire`, deterministic reverse cleanup, and validated executable IR;
 - the complete current List operation set: construction, length, push, index
@@ -97,9 +97,10 @@ milestone.
 ## Explicitly deferred or rejected gates
 
 The parser recognizes the broader Keld grammar, but the semantic gate still
-rejects imports/`use`, enums, externs/foreign declarations, generics, loops,
-`break`, `continue`, `match`, exceptions/typed errors, unsafe modules, and
-recursion. Map, Set, Slice, iterators, Text integer indexing, and substrings
+rejects imports/`use`, enums, externs/foreign declarations, generics, `match`,
+exceptions/typed errors, unsafe modules, and recursion. `for`, loop labels,
+`while let`, loop `else`, and break values remain deferred. Map, Set, Slice,
+iterators, Text integer indexing, and substrings
 are deferred. Resources, packages, WebAssembly, transpilation, and targets
 other than Windows x86-64 GNU remain deferred. Native-1 does not add new
 source syntax; it lowers only validated executable IR.
@@ -109,3 +110,5 @@ Architecture and verification evidence are in
 [`docs/milestone-acceptance.md`](docs/milestone-acceptance.md). Normative value
 and List rules are in [`docs/spec/storage-values.md`](docs/spec/storage-values.md)
 and numeric rules are in [`docs/spec/numeric-safety.md`](docs/spec/numeric-safety.md).
+Accepted `while`, `break`, and `continue` semantics are normative in
+[`docs/spec/control-flow.md`](docs/spec/control-flow.md).

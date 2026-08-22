@@ -130,6 +130,14 @@ removed when static analysis proves a uniform state. Borrowed parameters have a
 separate Loaned state and never receive cleanup; consuming parameters enter as
 Live homes.
 
+The same Home lattice and joins apply at cyclic CFG backedges. A loop reaches a
+fixed point over the static homes in the function; analysis metadata does not
+grow with dynamic iteration count. A lexical home whose loop-body scope is
+exited is cleaned before the backedge, `continue`, or `break` transfer and is in
+its scope-entry state when that static body scope is entered again. Outer homes
+retain only the converged state justified by every incoming loop edge. See
+[control-flow.md](control-flow.md) for the normative loop rules.
+
 `take` is rejected when applied to:
 
 - an implicitly copyable value;

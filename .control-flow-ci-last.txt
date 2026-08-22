@@ -65,108 +65,289 @@ llvm-config=22.1.8
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
-    Finished `release` profile [optimized] target(s) in 3.62s
-   Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
-   Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 2.12s
+    Finished `release` profile [optimized] target(s) in 3.72s
  Downloading crates ...
-  Downloaded stats_alloc v0.1.10
+  Downloaded cc v1.4.2
+  Downloaded lazy_static v1.5.0
+  Downloaded shlex v2.0.1
+  Downloaded regex-lite v0.1.9
+  Downloaded anyhow v1.0.104
+  Downloaded find-msvc-tools v0.1.10
+  Downloaded semver v1.0.28
+  Downloaded llvm-sys v221.0.1
+  Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
+   Compiling anyhow v1.0.104
+   Compiling find-msvc-tools v0.1.10
+   Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
+   Compiling shlex v2.0.1
+   Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
+   Compiling cc v1.4.2
+   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
+   Compiling lazy_static v1.5.0
+   Compiling semver v1.0.28
+   Compiling regex-lite v0.1.9
+   Compiling libc v0.2.189
+   Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
-   Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
-   Compiling stats_alloc v0.1.10
-   Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
-   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
-   Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
+   Compiling llvm-sys v221.0.1
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.35s
-     Running tests\cleanup.rs (target\x86_64-pc-windows-gnu\debug\deps\cleanup-ee8daaa2f524a090.exe)
+   Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
+   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
+   Compiling keld-cli v0.1.0 (D:\a\keld\keld\crates\keld-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.61s
+     Running tests\cli.rs (target\x86_64-pc-windows-gnu\debug\deps\cli-1a4a08f7c532adb9.exe)
 
-running 14 tests
-test continue_drops_body_local_text_on_every_iteration ... ok
-test break_drops_body_local_list_before_loop_exit ... ok
-test fields_and_list_elements_drop_in_reverse_order_iteratively ... ok
-test entity_field_replacement_cleans_displaced_then_installed_text ... ok
-test inline_and_heap_text_use_the_same_home_cleanup_rules ... ok
-test locals_drop_in_reverse_successful_initialization_order ... ok
-test managed_condition_temporary_is_cleaned_at_the_condition_boundary ... ok
-test moved_and_uninitialized_homes_are_skipped ... ok
-test maybe_live_home_drops_only_on_the_initialized_path ... ok
-test nested_entity_field_replacement_preserves_recursive_reverse_cleanup ... ok
-test optional_try_remove_result_cleans_present_element ... ok
-test owned_temporary_loan_drops_after_the_call_closes ... ok
-test nested_text_cleanup_is_iterative_and_preserves_reverse_success_order ... ok
-test reinitialized_home_becomes_the_newest_cleanup ... ok
+running 10 tests
+test impossible_list_capacity_is_a_capacity_runtime_fault ... ok
+test missing_source_is_a_static_read_failure ... ok
+test dump_ir_is_stable ... ok
+test check_is_silent_on_success_and_static_failures_have_stable_codes ... ok
+test deferred_containers_and_views_remain_outside_the_bootstrap_surface ... ok
+test run_representative_programs_prints_only_the_main_result ... ok
+test runtime_fault_and_command_misuse_have_distinct_exit_codes ... ok
+test native_engine_forwards_runtime_faults_with_interpreter_format ... ok
+test native_build_handles_unicode_paths_and_refuses_collisions ... ok
+test native_engine_matches_representative_source_fixtures ... ok
 
-test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.84s
 
-     Running tests\control_flow.rs (target\x86_64-pc-windows-gnu\debug\deps\control_flow-ad2d7eb63e667185.exe)
+     Running tests\milestone_acceptance.rs (target\x86_64-pc-windows-gnu\debug\deps\milestone_acceptance-c0a02f857509338a.exe)
 
-running 9 tests
-test checked_fault_in_condition_occurs_before_body ... ok
-test break_and_continue_fixture_executes_to_eight ... ok
-test explicit_iteration_lifecycle_exits_before_the_next_iteration ... ok
-test keep_to_ancestor_survives_break_out_of_inner_lifecycle ... ok
-test repeated_managed_allocation_fixture_executes_to_six ... ok
-test while_condition_is_re_evaluated_after_each_backedge ... ok
-test nested_break_and_continue_target_the_innermost_loop ... ok
-test plain_loop_does_not_create_an_implicit_lifecycle ... ok
-test zero_iteration_loop_skips_its_body ... ok
+running 21 tests
+test control_flow_1_acceptance_table_is_complete_and_separate ... ok
+test control_flow_1_self_review_proofs_are_present ... ok
+test control_flow_1_static_loop_join_diagnostics_are_focused ... ok
+test control_flow_1_compiler_ir_is_validated_and_cyclic ... ok
+test criterion_02_lifecycle_end_invalidates_member_links ... ok
+test criterion_01_cyclic_graph_needs_no_ownership_syntax ... ok
+test criterion_03_keep_to_ancestor_survives ... ok
+test criterion_06_double_retirement_is_rejected ... ok
+test criterion_07_direct_reference_cannot_escape_to_persistent_storage ... ok
+test criterion_08_cleanup_order_has_an_executable_proof ... ok
+test criterion_09_runtime_model_and_generation_exhaustion_are_covered ... ok
+test criterion_04_retired_direct_use_is_static_error ... ok
+test criterion_11_grammar_goldens_cover_the_milestone_syntax ... ok
+test control_flow_1_source_results_match_library_and_cli ... ok
+test criterion_05_stale_link_takes_absence_path ... ok
+test criterion_12_may_alias_use_after_retirement_is_rejected ... ok
+test criterion_15_views_close_before_structural_operations ... ok
+test criterion_16_numeric_stages_have_identical_boundaries ... ok
+test criterion_13_identity_refined_distinct_parameters_are_accepted ... ok
+test criterion_14_broad_retirement_allows_link_reacquisition ... ok
+test criterion_10_library_and_cli_observations_match ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
 
-   Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.73s
-     Running tests\control_flow.rs (target\x86_64-pc-windows-gnu\debug\deps\control_flow-4e38afa03d37970b.exe)
+   Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.65s
+     Running unittests src\lib.rs (target\x86_64-pc-windows-gnu\debug\deps\keld_semantics-ec25c4dfe8597fc4.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\control_flow_semantics.rs (target\x86_64-pc-windows-gnu\debug\deps\control_flow_semantics-84a03258a064fb9d.exe)
+
+running 8 tests
+test literal_true_loop_without_direct_break_is_non_fallthrough ... ok
+test direct_break_makes_true_loop_may_fallthrough ... ok
+test loop_control_outside_loop_is_rejected ... ok
+test break_in_nested_loop_does_not_make_outer_true_loop_fallthrough ... ok
+test while_break_and_continue_are_not_feature_gated ... ok
+test recursion_hidden_inside_loop_is_still_deferred ... ok
+test while_condition_must_be_bool ... ok
+test while_is_preserved_in_typed_hir ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\entrypoint.rs (target\x86_64-pc-windows-gnu\debug\deps\entrypoint-03fb69a70f60fece.exe)
+
+running 8 tests
+test else_if_conditions_are_preserved_as_nested_hir ... ok
+test constant_fault_detection_respects_short_circuit_evaluation ... ok
+test constructor_and_call_arguments_keep_source_evaluation_order ... ok
+test constant_faults_and_int_range_errors_are_compile_time_diagnostics ... ok
+test requires_exactly_one_zero_parameter_int_main_without_retirement_effects ... ok
+test non_unit_functions_must_return_on_every_structured_path ... ok
+test unchecked_link_field_access_remains_marked_for_proof_analysis ... ok
+test unary_min_magnitude_and_int_constants_lower_to_exact_hir_values ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\feature_gate.rs (target\x86_64-pc-windows-gnu\debug\deps\feature_gate-f18ddb03c2c164ce.exe)
 
 running 4 tests
-test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
-test retirement_call_effect_in_condition_invalidates_post_loop_use ... ok
-test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
-test loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity ... ok
+test outer_unsupported_construct_suppresses_child_feature_cascades ... ok
+test supported_bootstrap_program_reaches_typed_hir ... ok
+test every_deferred_construct_has_one_focused_feature_diagnostic ... ok
+test direct_and_mutual_recursion_are_deferred ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
- Downloading crates ...
-  Downloaded lazy_static v1.5.0
-  Downloaded shlex v2.0.1
-  Downloaded semver v1.0.28
-  Downloaded find-msvc-tools v0.1.10
-  Downloaded llvm-sys v221.0.1
-  Downloaded anyhow v1.0.104
-  Downloaded regex-lite v0.1.9
-  Downloaded cc v1.4.2
-  Downloaded libc v0.2.189
-   Compiling anyhow v1.0.104
-   Compiling shlex v2.0.1
-   Compiling find-msvc-tools v0.1.10
-   Compiling lazy_static v1.5.0
-   Compiling libc v0.2.189
-   Compiling semver v1.0.28
-   Compiling cc v1.4.2
-   Compiling regex-lite v0.1.9
-   Compiling llvm-sys v221.0.1
-   Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
-   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.29s
-     Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
+     Running tests\types.rs (target\x86_64-pc-windows-gnu\debug\deps\types-4f3a3bbaf8fd1ac4.exe)
 
-running 8 tests
-test allocation_schedule_includes_context_setup_failure ... ok
-test allocation_schedule_covers_preferred_and_exact_list_growth_failures ... ok
-test repeated_condition_concat_uses_one_static_site_with_three_attempts ... ok
-test repeated_loop_concat_allocation_uses_one_static_site_with_three_attempts ... ok
-test every_executable_ir_variant_is_in_a_real_differential_fixture ... ok
-test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
-test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
-test source_surface_fixtures_extend_the_same_differential_schedule ... ok
+running 21 tests
+test classifies_managed_types_and_structural_duplicability ... ok
+test bootstrap_assignment_exclusions_are_focused ... ok
+test condition_type_error_is_focused_and_ordering_requires_ints ... ok
+test get_rejects_single_home_elements ... ok
+test managed_struct_field_replacement_requires_a_var_base ... ok
+test indexed_list_diagnostics_are_focused ... ok
+test parses_text_list_and_general_optional_types ... ok
+test records_consuming_parameters_and_uninitialized_vars ... ok
+test rejects_self_and_mutual_by_value_layout_cycles_but_links_break_cycles ... ok
+test semantic_ids_follow_source_order_not_lookup_order ... ok
+test resolves_entity_names_as_refs_and_link_fields_as_links ... ok
+test types_complete_list_operations ... ok
+test type_errors_use_stable_focused_codes ... ok
+test types_copy_as_an_explicit_structural_operation ... ok
+test types_empty_list_constructor_from_expected_type ... ok
+test types_list_push_with_an_element_type ... ok
+test types_list_length_as_a_checked_property ... ok
+test types_list_remove_returns_the_element_type ... ok
+test types_take_as_an_explicit_owned_expression ... ok
+test types_text_literal_and_byte_length ... ok
+test by_value_layout_depth_over_256_is_rejected_iteratively ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.18s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
-interpreter=0 lifecycle=0 differential=0
+   Doc-tests keld_semantics
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.66s
+     Running unittests src\lib.rs (target\x86_64-pc-windows-gnu\debug\deps\keld_ir-f33399a8b484868f.exe)
+
+running 3 tests
+test module::optional_depth_tests::optional_depth_reports_checked_overflow ... ok
+test module::optional_depth_tests::optional_link_is_a_base_type_not_an_envelope_layer ... ok
+test validate::tests::optional_depth_overflow_is_owned_by_kld9006 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\allocation_schedule.rs (target\x86_64-pc-windows-gnu\debug\deps\allocation_schedule-99842da3a1fe2b22.exe)
+
+running 1 test
+test allocation_schedule_is_independent_of_storage_order_and_tracks_preorder_ordinals ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\control_flow.rs (target\x86_64-pc-windows-gnu\debug\deps\control_flow-5a12f9d66a79fcc0.exe)
+
+running 3 tests
+test validator_accepts_a_minimal_valid_cycle ... ok
+test validator_still_rejects_duplicate_ssa_definitions ... ok
+test source_loop_lowers_to_valid_cyclic_executable_ir ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\dump_golden.rs (target\x86_64-pc-windows-gnu\debug\deps\dump_golden-3abfa2c140ca286c.exe)
+
+running 1 test
+test executable_ir_dump_is_byte_stable_and_uses_numeric_ids ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\entity_liveness_validation.rs (target\x86_64-pc-windows-gnu\debug\deps\entity_liveness_validation-ec3ac99320c3c8e9.exe)
+
+running 6 tests
+test direct_double_retire_is_rejected ... ok
+test retirement_before_an_entry_backedge_is_rejected ... ok
+test copy_alias_use_after_retire_is_rejected ... ok
+test identity_retired_on_one_predecessor_is_not_live_after_the_join ... ok
+test retiring_a_phi_rejects_use_of_any_possible_input_identity ... ok
+test retiring_one_parameter_does_not_retire_an_independent_entity_parameter ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\lowering.rs (target\x86_64-pc-windows-gnu\debug\deps\lowering-305b02dbe7311f80.exe)
+
+running 5 tests
+test plain_entity_field_assignment_keeps_the_write_instruction ... ok
+test managed_entity_field_replacement_is_a_closed_non_failing_transaction ... ok
+test entity_fields_are_lowered_to_closed_access_windows ... ok
+test lifecycle_edges_and_identity_branches_become_executable_operations ... ok
+test resolved_link_edges_and_phi_inputs_validate_as_edge_definitions ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests\review_adversarial.rs (target\x86_64-pc-windows-gnu\debug\deps\review_adversarial-423dd5094465bfc9.exe)
+
+running 2 tests
+test projected_list_push_is_rejected_while_entity_view_is_open ... ok
+test projected_list_remove_is_rejected_while_entity_view_is_open ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\storage_validation.rs (target\x86_64-pc-windows-gnu\debug\deps\storage_validation-d34c64a50e988cee.exe)
+
+running 39 tests
+test aggregate_construction_must_not_consume_a_loan_field ... ok
+test a_loan_register_cannot_be_taken ... ok
+test a_loan_register_cannot_be_moved_or_dropped ... ok
+test calls_require_live_managed_arguments_and_projected_bases ... ok
+test const_text_destination_must_be_an_owned_home ... ok
+test conditional_drop_accepts_a_maybe_live_home ... ok
+test consuming_call_must_not_consume_a_loan_register ... ok
+test entity_construction_must_not_consume_a_loan_field ... ok
+test displaced_values_must_be_dropped_after_replacement ... ok
+test entity_field_write_must_not_consume_a_loan_register ... ok
+test compiler_produced_register_categories_validate ... ok
+test entity_field_replacement_registers_must_match_the_selected_field ... ok
+test entity_results_must_use_entity_flow_registers ... ok
+test indexed_replacement_requires_displaced_cleanup ... ok
+test list_get_lowers_to_a_valid_optional_result ... ok
+test list_push_must_not_consume_a_loan_register ... ok
+test list_replacement_must_not_consume_a_loan_register ... ok
+test managed_construction_results_must_not_be_loans ... ok
+test list_read_and_structural_operations_require_a_live_home ... ok
+test managed_entity_field_read_destination_must_be_a_loan ... ok
+test managed_home_cannot_return_live_without_cleanup ... ok
+test managed_entity_fields_must_not_use_write_field_ir ... ok
+test managed_field_and_list_reads_must_produce_loans ... ok
+test managed_phi_inputs_must_be_live_on_each_predecessor ... ok
+test managed_parameter_roles_follow_their_parameter_modes ... ok
+test managed_return_is_also_an_exhaustive_live_use ... ok
+test managed_phi_inputs_must_match_the_destination_role ... ok
+test managed_return_register_must_be_live ... ok
+test managed_struct_field_read_destination_must_be_a_loan ... ok
+test managed_take_destination_must_be_a_home ... ok
+test maybe_live_managed_return_register_must_be_live ... ok
+test plain_results_must_not_be_managed_homes ... ok
+test moved_home_cannot_be_dropped_twice ... ok
+test projected_call_source_must_resolve_to_the_argument_type ... ok
+test projected_call_source_index_must_be_an_int ... ok
+test struct_field_replacement_must_not_consume_a_loan_register ... ok
+test text_read_requires_a_live_managed_home ... ok
+test text_compare_and_concat_require_live_managed_homes ... ok
+test tracked_scope_cleanup_must_name_the_register_scope ... ok
+
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests\view_validation.rs (target\x86_64-pc-windows-gnu\debug\deps\view_validation-4ac5168bb16e6f6e.exe)
+
+running 4 tests
+test structural_operation_with_an_open_view_is_invalid ... ok
+test register_use_must_be_dominated_by_its_definition ... ok
+test a_read_view_cannot_be_used_to_write ... ok
+test constructors_and_calls_require_complete_unique_arguments ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keld_ir
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+cli_milestone=0 semantics=0 ir=0
 
 exit_status=0

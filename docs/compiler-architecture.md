@@ -112,6 +112,13 @@ cleanup contract. `List[T]` and `Text` remain single-home, aggregate cleanup is
 recursive and iterative, `List()` has no element buffer, and bounds/capacity
 checks execute in every build.
 
+Control Flow-1 permits cyclic Flow CFGs. `keld-lifecycle` and `keld-storage` own
+monotone fixed-point verification across backedges using their existing
+liveness, provenance, Home, loan, and cleanup domains. Flow owns structured
+loop targets and `ExitScopes`; executable IR receives only the converged result
+and represents loops as ordinary validated CFG cycles. Neither the interpreter
+nor the LLVM backend infers loop-specific lifecycle or storage policy.
+
 The interpreter milestone verifies nested `List[List[Int]]` and
 `List[List[Text]]` transfer, copy, projected loans and replacements, removal,
 clearing, bounds, reservation retry, and cleanup. `Map`, `Set`, `Slice`,
