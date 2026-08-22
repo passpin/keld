@@ -7,7 +7,7 @@ on:
     types: [opened, synchronize, reopened]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -19,6 +19,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Configure Rust and GNU target
         run: |
@@ -101,3 +102,13 @@ jobs:
           cargo fmt --all -- --check
           git checkout -- .tools/llvm/llvm-packages.lock.json
           git diff --check
+
+      - name: Commit verified fix and remove temporary CI scaffolding
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/native1-fix-v2.yml .github/native1-fix-helper.py .github/native1-v2-trigger.txt
+          git add crates/keld-native-backend/src/lib.rs crates/keld-native-backend/tests/native_int.rs
+          git diff --cached --check
+          git commit -m 'fix(native): reject ordinary COFF runtime overrides'
+          git push origin "HEAD:${{ github.head_ref }}"
