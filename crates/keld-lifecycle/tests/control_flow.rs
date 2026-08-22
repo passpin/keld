@@ -48,3 +48,12 @@ fn retirement_on_one_loop_exit_rejects_post_loop_use() {
         result.diagnostics
     );
 }
+
+#[test]
+fn loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity() {
+    let result = verify_text_for_test(
+        "entity Item { value: Int }\nfn inspect(seed: Item) -> Int { var previous = seed; var i = 0; while i < 2 { let current = Item(value: i); if i == 1 { if previous != current { retire current; return previous.value } else { return 99 } }; previous = current; i = i + 1 }; return -1 }\nfn main() -> Int { lifecycle level { let seed = Item(value: 7); return inspect(seed) } }\n",
+    );
+
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+}
