@@ -117,3 +117,43 @@ fn nested_entity_field_replacement_preserves_recursive_reverse_cleanup() {
         vec![(1, b'b'), (1, b'a'), (1, b'd'), (1, b'c')]
     );
 }
+
+
+#[test]
+fn continue_drops_body_local_text_on_every_iteration() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { var i = 0; while i < 2 { let text: Text = \"x\"; i += 1; continue }; return i }\n",
+    )
+    .expect("continue cleanup executes");
+    assert_eq!(trace.result.value, Value::Int(2));
+    assert_eq!(trace.text_markers(), vec![(1, b'x'), (1, b'x')]);
+}
+
+#[test]
+fn break_drops_body_local_list_before_loop_exit() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { while true { let values: List[Text] = List(); values.push(\"b\"); break }; return 0 }\n",
+    )
+    .expect("break cleanup executes");
+    assert_eq!(trace.result.value, Value::Int(0));
+    assert_eq!(trace.list_indices(), vec![0]);
+    assert_eq!(trace.text_markers(), vec![(1, b'b')]);
+}
+
+#[test]
+fn managed_condition_temporary_is_cleaned_at_the_condition_boundary() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { while (\"abcdefghijklmnopqrstuvwxyz\" + \"!\").is_empty { return 1 }; return 0 }\n",
+    )
+    .expect("managed condition executes");
+    assert_eq!(trace.result.value, Value::Int(0));
+    assert_eq!(
+        trace
+            .text_markers()
+            .into_iter()
+            .filter(|(length, first)| *length == 27 && *first == b'a')
+            .count(),
+        1,
+        "the concatenation temporary must be destroyed exactly once"
+    );
+}
