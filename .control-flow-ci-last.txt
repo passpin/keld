@@ -61,14 +61,14 @@ installing mingw-w64-x86_64-llvm-tools...
 installing mingw-w64-x86_64-llvm...
 llvm-config=22.1.8
     Updating crates.io index
-   Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
+   Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
-    Finished `release` profile [optimized] target(s) in 3.48s
+    Finished `release` profile [optimized] target(s) in 3.62s
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 2.62s
+    Finished `release` profile [optimized] target(s) in 2.12s
  Downloading crates ...
   Downloaded stats_alloc v0.1.10
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
@@ -83,7 +83,7 @@ llvm-config=22.1.8
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.38s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.35s
      Running tests\cleanup.rs (target\x86_64-pc-windows-gnu\debug\deps\cleanup-ee8daaa2f524a090.exe)
 
 running 14 tests
@@ -94,12 +94,12 @@ test entity_field_replacement_cleans_displaced_then_installed_text ... ok
 test inline_and_heap_text_use_the_same_home_cleanup_rules ... ok
 test locals_drop_in_reverse_successful_initialization_order ... ok
 test managed_condition_temporary_is_cleaned_at_the_condition_boundary ... ok
-test maybe_live_home_drops_only_on_the_initialized_path ... ok
-test nested_text_cleanup_is_iterative_and_preserves_reverse_success_order ... ok
-test nested_entity_field_replacement_preserves_recursive_reverse_cleanup ... ok
 test moved_and_uninitialized_homes_are_skipped ... ok
-test owned_temporary_loan_drops_after_the_call_closes ... ok
+test maybe_live_home_drops_only_on_the_initialized_path ... ok
+test nested_entity_field_replacement_preserves_recursive_reverse_cleanup ... ok
 test optional_try_remove_result_cleans_present_element ... ok
+test owned_temporary_loan_drops_after_the_call_closes ... ok
+test nested_text_cleanup_is_iterative_and_preserves_reverse_success_order ... ok
 test reinitialized_home_becomes_the_newest_cleanup ... ok
 
 test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
@@ -111,131 +111,48 @@ test checked_fault_in_condition_occurs_before_body ... ok
 test break_and_continue_fixture_executes_to_eight ... ok
 test explicit_iteration_lifecycle_exits_before_the_next_iteration ... ok
 test keep_to_ancestor_survives_break_out_of_inner_lifecycle ... ok
-test while_condition_is_re_evaluated_after_each_backedge ... ok
-test plain_loop_does_not_create_an_implicit_lifecycle ... ok
-test nested_break_and_continue_target_the_innermost_loop ... ok
 test repeated_managed_allocation_fixture_executes_to_six ... ok
+test while_condition_is_re_evaluated_after_each_backedge ... ok
+test nested_break_and_continue_target_the_innermost_loop ... ok
+test plain_loop_does_not_create_an_implicit_lifecycle ... ok
 test zero_iteration_loop_skips_its_body ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.73s
      Running tests\control_flow.rs (target\x86_64-pc-windows-gnu\debug\deps\control_flow-4e38afa03d37970b.exe)
 
 running 4 tests
 test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
-
+test retirement_call_effect_in_condition_invalidates_post_loop_use ... ok
 test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
-thread 'retirement_call_effect_in_condition_invalidates_post_loop_use' (1852) panicked at crates\keld-lifecycle\tests\control_flow.rs:67:5:
-[
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD1009",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    126,
-                ),
-                end: BytePos(
-                    146,
-                ),
-            },
-            message: "function retirement behavior is missing from its declared effects",
-        },
-        secondary: [],
-        help: Some(
-            "add the retired parameter to the function's `retires` clause",
-        ),
-    },
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD1003",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    144,
-                ),
-                end: BytePos(
-                    145,
-                ),
-            },
-            message: "this entity is not live on every path reaching the use",
-        },
-        secondary: [],
-        help: Some(
-            "keep the entity live on all paths or move the use into a proven-live branch",
-        ),
-    },
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD1003",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    158,
-                ),
-                end: BytePos(
-                    160,
-                ),
-            },
-            message: "this entity is not live on every path reaching the use",
-        },
-        secondary: [],
-        help: Some(
-            "keep the entity live on all paths or move the use into a proven-live branch",
-        ),
-    },
-]
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 test loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity ... ok
-test retirement_call_effect_in_condition_invalidates_post_loop_use ... FAILED
 
-failures:
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-failures:
-    retirement_call_effect_in_condition_invalidates_post_loop_use
-
-test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
-
-error: test failed, to rerun pass `-p keld-lifecycle --test control_flow`
  Downloading crates ...
+  Downloaded lazy_static v1.5.0
+  Downloaded shlex v2.0.1
+  Downloaded semver v1.0.28
+  Downloaded find-msvc-tools v0.1.10
   Downloaded llvm-sys v221.0.1
   Downloaded anyhow v1.0.104
-  Downloaded lazy_static v1.5.0
-  Downloaded find-msvc-tools v0.1.10
   Downloaded regex-lite v0.1.9
-  Downloaded semver v1.0.28
   Downloaded cc v1.4.2
   Downloaded libc v0.2.189
-  Downloaded shlex v2.0.1
    Compiling anyhow v1.0.104
-   Compiling find-msvc-tools v0.1.10
    Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.10
+   Compiling lazy_static v1.5.0
    Compiling libc v0.2.189
    Compiling semver v1.0.28
    Compiling cc v1.4.2
-   Compiling lazy_static v1.5.0
    Compiling regex-lite v0.1.9
    Compiling llvm-sys v221.0.1
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.11s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.29s
      Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
 
 running 8 tests
@@ -248,8 +165,8 @@ test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
 test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
 test source_surface_fixtures_extend_the_same_differential_schedule ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.21s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.18s
 
-interpreter=0 lifecycle=101 differential=0
+interpreter=0 lifecycle=0 differential=0
 
-exit_status=101
+exit_status=0
