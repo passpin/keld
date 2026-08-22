@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.43s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.38s
      Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
 
 running 0 tests
@@ -20,18 +20,19 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 4 tests
 test copying_a_reference_preserves_must_alias_provenance ... ok
 test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
-test identity_inequality_refines_the_valid_branch ... ok
 test identity_equality_refines_to_must_alias ... ok
+test identity_inequality_refines_the_valid_branch ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/control_flow.rs (target/debug/deps/control_flow-264b8427f90cd9ab)
 
-running 2 tests
+running 3 tests
 test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
 test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
+test loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/effects.rs (target/debug/deps/effects-5879779b632aa910)
 
@@ -39,8 +40,8 @@ running 5 tests
 test exact_declared_retirement_matches_inferred_behavior ... ok
 test broad_retirement_propagates_through_calls ... ok
 test entrypoint_applies_broad_liveness_barriers_without_declaring_public_effects ... ok
-test undeclared_and_redundant_retirement_effects_are_rejected ... ok
 test parameter_and_fresh_return_provenance_are_summarized ... ok
+test undeclared_and_redundant_retirement_effects_are_rejected ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -57,9 +58,9 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 5 tests
 test persistent_direct_reference_field_requires_a_link ... ok
+test unchecked_link_read_requires_when_resolution ... ok
 test resolved_link_reference_cannot_escape_its_when_scope ... ok
 test every_entity_operation_receives_a_proof_annotation ... ok
-test unchecked_link_read_requires_when_resolution ... ok
 test value_struct_direct_reference_field_also_requires_a_link ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -79,8 +80,8 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 4 tests
 test distinct_allocations_survive_exact_retirement ... ok
-test retiring_a_must_alias_makes_both_names_retired ... ok
 test retiring_one_may_alias_invalidates_the_other_parameter ... ok
+test retiring_a_must_alias_makes_both_names_retired ... ok
 test retirement_on_only_one_path_rejects_the_joined_use ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -92,7 +93,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
      Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
 
 running 0 tests
@@ -102,10 +103,10 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/control_flow.rs (target/debug/deps/control_flow-4631168b95e5fac0)
 
 running 7 tests
-test explicit_lifecycles_have_distinct_parented_ids ... ok
-test direct_entity_identity_condition_uses_branch_identity ... ok
-test nested_loop_control_targets_the_innermost_loop ... ok
 test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
+test explicit_lifecycles_have_distinct_parented_ids ... ok
+test nested_loop_control_targets_the_innermost_loop ... ok
+test direct_entity_identity_condition_uses_branch_identity ... ok
 test while_lowers_to_condition_scope_branch_and_back_edge ... ok
 test when_resolves_link_into_live_and_absent_blocks ... ok
 test stable_dump_contains_no_host_addresses_or_debug_format ... ok
@@ -117,10 +118,10 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 10 tests
 test call_arguments_are_materialized_left_to_right ... ok
 test assignment_materializes_identity_then_rhs_then_writes ... ok
-test boolean_operators_use_control_flow_and_one_phi ... ok
 test compound_assignment_reads_old_value_before_rhs ... ok
-test indexed_replacement_materializes_target_before_rhs ... ok
+test boolean_operators_use_control_flow_and_one_phi ... ok
 test nested_index_projections_preserve_index_evaluation_order ... ok
+test indexed_replacement_materializes_target_before_rhs ... ok
 test constructor_field_ids_do_not_reorder_source_evaluation ... ok
 test nested_remove_is_complete_before_outer_push ... ok
 test take_lowers_to_an_explicit_local_transfer ... ok
