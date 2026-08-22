@@ -27,6 +27,8 @@ jobs:
           $lastOutput = ''
           $report = '.github/native1-v2-report.txt'
           $workflow = '.github/workflows/native1-fix-v2.yml'
+          $helper = '.github/native1-fix-helper.py'
+          $trigger = '.github/native1-v2-trigger.txt'
 
           function Run-Checked([string]$name, [scriptblock]$command) {
             $script:stage = $name
@@ -51,13 +53,9 @@ jobs:
           }
 
           try {
-            Run-Checked 'configure Rust GNU target' {
-              rustup toolchain install 1.97.0 --profile minimal --component rustfmt clippy
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              rustup default 1.97.0
-            }
+            Run-Checked 'install Rust toolchain' { rustup toolchain install 1.97.0 --profile minimal --component rustfmt clippy }
+            Run-Checked 'install GNU target' { rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0 }
+            Run-Checked 'select Rust toolchain' { rustup default 1.97.0 }
 
             $stage = 'bootstrap pinned LLVM'
             $lockPath = '.tools\llvm\llvm-packages.lock.json'
@@ -84,159 +82,23 @@ jobs:
             Write-Host "DLLTOOL=$env:KELD_DLLTOOL"
             Write-Host "AR=$env:KELD_AR"
 
-            Run-Checked 'build Native-1 runtime' {
-              cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
-            }
+            Run-Checked 'build Native-1 runtime' { cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu }
             Copy-Item -LiteralPath target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll -Destination target\x86_64-pc-windows-gnu\release\keld_runtime_v1.normal.dll -Force
-            Run-Checked 'build Native-1 test runtime' {
-              cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu --features test-controls
-            }
+            Run-Checked 'build Native-1 test runtime' { cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu --features test-controls }
             Copy-Item -LiteralPath target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll -Destination target\x86_64-pc-windows-gnu\release\keld_runtime_v1_test.dll -Force
             Copy-Item -LiteralPath target\x86_64-pc-windows-gnu\release\keld_runtime_v1.normal.dll -Destination target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll -Force
 
-            $stage = 'add ordinary COFF override regression'
-            @'
-          from pathlib import Path
-
-          path = Path("crates/keld-native-backend/tests/native_int.rs")
-          source = path.read_text(encoding="utf-8")
-          marker = "#[test]\nfn native_program_rejects_runtime_abi_version_mismatch()"
-          assert marker in source, "regression insertion marker missing"
-          test = r'''#[test]
-          fn ordinary_coff_runtime_symbol_override_is_rejected() {
-              let (runtime_dll, import_library) = runtime_artifacts("ordinary-coff-override");
-              let directory = runtime_dll.parent().expect("runtime directory");
-              let llvm_prefix = std::env::var_os("LLVM_SYS_221_PREFIX")
-                  .map(PathBuf::from)
-                  .or_else(|| {
-                      Path::new(env!("CARGO_MANIFEST_DIR"))
-                          .parent()
-                          .and_then(Path::parent)
-                          .map(|root| root.join(".tools/llvm/22.1.8-mingw64"))
-                  })
-                  .expect("LLVM prefix");
-              let assembly = directory.join("runtime-override.s");
-              std::fs::write(
-                  &assembly,
-                  ".text\n.globl keld_rt_v1_print_int\nkeld_rt_v1_print_int:\n  ret\n",
-              )
-              .expect("runtime override assembly");
-              let object = directory.join("runtime-override.o");
-              let status = Command::new(llvm_prefix.join("bin/llvm-mc.exe"))
-                  .arg("-triple=x86_64-w64-windows-gnu")
-                  .arg("-filetype=obj")
-                  .arg("-o")
-                  .arg(&object)
-                  .arg(&assembly)
-                  .status()
-                  .expect("llvm-mc");
-              assert!(status.success(), "llvm-mc failed: {status}");
-
-              let ar = std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into());
-              let listing = Command::new(&ar)
-                  .args(["t", import_library.to_str().expect("import library path")])
-                  .output()
-                  .expect("ar list");
-              assert!(listing.status.success(), "ar list failed");
-              let first_member = String::from_utf8(listing.stdout)
-                  .expect("archive member names")
-                  .lines()
-                  .next()
-                  .expect("runtime import archive member")
-                  .to_owned();
-              let object_name = object
-                  .file_name()
-                  .and_then(|name| name.to_str())
-                  .expect("override object name");
-              let status = Command::new(&ar)
-                  .current_dir(directory)
-                  .arg("r")
-                  .arg(&import_library)
-                  .arg(object_name)
-                  .status()
-                  .expect("ar append");
-              assert!(status.success(), "ar append failed: {status}");
-              let status = Command::new(&ar)
-                  .current_dir(directory)
-                  .arg("mb")
-                  .arg(&first_member)
-                  .arg(&import_library)
-                  .arg(object_name)
-                  .status()
-                  .expect("ar move");
-              assert!(status.success(), "ar move failed: {status}");
-
-              let output = directory.join("ordinary-coff-override.exe");
-              let error = build_executable(
-                  &const_module(7),
-                  &metadata(),
-                  &request(
-                      &output,
-                      &runtime_dll,
-                      &import_library,
-                      OptimizationLevel::O0,
-                  ),
-              )
-              .expect_err("ordinary COFF runtime symbol override must be rejected");
-              assert!(matches!(error, BackendError::Toolchain(_)));
-              assert!(
-                  error
-                      .to_string()
-                      .contains("runtime import library must contain a COFF import")
-              );
-              assert!(!output.exists());
-          }
-
-          '''
-          path.write_text(source.replace(marker, test + marker, 1), encoding="utf-8")
-          '@ | python -
-            if ($LASTEXITCODE -ne 0) { throw 'regression insertion failed' }
+            Run-Checked 'add ordinary COFF override regression' { python .github/native1-fix-helper.py add-test }
             Run-Checked 'format RED regression' { cargo fmt --all }
+            Run-ExpectedFailure 'RED ordinary COFF override regression' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact }
 
-            Run-ExpectedFailure 'RED ordinary COFF override regression' {
-              cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact
-            }
-
-            $stage = 'apply minimal validator fix'
-            @'
-          from pathlib import Path
-
-          path = Path("crates/keld-native-backend/src/lib.rs")
-          source = path.read_text(encoding="utf-8")
-          old = '''    if coff_section_data(member, b".idata$6").is_none() {
-              return true;
-          }
-          '''
-          new = '''    if coff_section_data(member, b".idata$6").is_none() {
-              let Some(runtime_symbols) = coff_symbols_matching(member, |name, _section| {
-                  name.starts_with(b"keld_rt_v1_") || name.starts_with(b"__imp_keld_rt_v1_")
-              }) else {
-                  return true;
-              };
-              return runtime_symbols.is_empty();
-          }
-          '''
-          assert source.count(old) == 1, "validator patch target changed"
-          path.write_text(source.replace(old, new, 1), encoding="utf-8")
-          '@ | python -
-            if ($LASTEXITCODE -ne 0) { throw 'validator patch failed' }
+            Run-Checked 'apply minimal validator fix' { python .github/native1-fix-helper.py apply-fix }
             Run-Checked 'format GREEN fix' { cargo fmt --all }
-
-            Run-Checked 'GREEN ordinary COFF override regression' {
-              cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact
-            }
-            Run-Checked 'native backend regression suite' {
-              cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --tests
-            }
-            Run-Checked 'workspace debug tests' {
-              cargo test --workspace --all-targets --target x86_64-pc-windows-gnu
-            }
-            Run-Checked 'workspace release tests' {
-              cargo test --workspace --all-targets --release --target x86_64-pc-windows-gnu
-            }
-            Run-Checked 'workspace Clippy' {
-              cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings
-            }
+            Run-Checked 'GREEN ordinary COFF override regression' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --test native_int ordinary_coff_runtime_symbol_override_is_rejected -- --exact }
+            Run-Checked 'native backend regression suite' { cargo test -p keld-native-backend --target x86_64-pc-windows-gnu --tests }
+            Run-Checked 'workspace debug tests' { cargo test --workspace --all-targets --target x86_64-pc-windows-gnu }
+            Run-Checked 'workspace release tests' { cargo test --workspace --all-targets --release --target x86_64-pc-windows-gnu }
+            Run-Checked 'workspace Clippy' { cargo clippy --workspace --all-targets --all-features --target x86_64-pc-windows-gnu -- -D warnings }
             Run-Checked 'format check' { cargo fmt --all -- --check }
             Run-Checked 'diff check' { git diff --check }
 
@@ -244,14 +106,11 @@ jobs:
             if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report -Force }
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git rm $workflow
+            git rm $workflow $helper $trigger
             git add crates/keld-native-backend/src/lib.rs crates/keld-native-backend/tests/native_int.rs
-            git diff --cached --check
-            if ($LASTEXITCODE -ne 0) { throw 'staged diff check failed' }
-            git commit -m 'fix(native): reject ordinary COFF runtime overrides'
-            if ($LASTEXITCODE -ne 0) { throw 'fix commit failed' }
-            git push origin HEAD:fix/native1-ordinary-coff-runtime-override-v2
-            if ($LASTEXITCODE -ne 0) { throw 'fix push failed' }
+            Run-Checked 'staged diff check' { git diff --cached --check }
+            Run-Checked 'commit verified fix' { git commit -m 'fix(native): reject ordinary COFF runtime overrides' }
+            Run-Checked 'push verified fix' { git push origin HEAD:fix/native1-ordinary-coff-runtime-override-v2 }
           }
           catch {
             $message = ($_ | Out-String).Trim()
