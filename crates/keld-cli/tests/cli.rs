@@ -38,6 +38,8 @@ fn run_representative_programs_prints_only_the_main_result() {
         ("alias_distinct.keld", "20\n"),
         ("broad_retirement.keld", "40\n"),
         ("numeric_edges.keld", "0\n"),
+        ("control_flow_loop.keld", "8\n"),
+        ("control_flow_allocations.keld", "6\n"),
     ] {
         let output = keld()
             .args(["run", "--engine", "interpreter"])
@@ -84,10 +86,10 @@ fn check_is_silent_on_success_and_static_failures_have_stable_codes() {
         ),
         (
             "fail_unsupported.keld",
-            1,
-            19,
+            2,
+            5,
             "KLD0004",
-            "`while` is parsed but not supported by the bootstrap compiler",
+            "`match` is parsed but not supported by the bootstrap compiler",
             "remove this feature or use the currently supported bootstrap subset",
         ),
     ] {
@@ -227,6 +229,8 @@ fn native_engine_matches_representative_source_fixtures() {
         ("alias_distinct.keld", "20\n"),
         ("broad_retirement.keld", "40\n"),
         ("numeric_edges.keld", "0\n"),
+        ("control_flow_loop.keld", "8\n"),
+        ("control_flow_allocations.keld", "6\n"),
     ] {
         let output = keld()
             .args(["run", "--engine", "native"])

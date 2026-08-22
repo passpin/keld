@@ -1,5 +1,3 @@
-KELD_MINGW_GCC=C:\mingw64\bin\gcc.exe
-KELD_DLLTOOL=C:\mingw64\bin\dlltool.exe
 info: syncing channel updates for 1.97.0-x86_64-pc-windows-msvc
 info: latest update on 2026-07-09 for version 1.97.0 (2d8144b78 2026-07-07)
 info: downloading 5 components
@@ -61,106 +59,74 @@ installing mingw-w64-x86_64-zstd...
 installing mingw-w64-x86_64-llvm-libs...
 installing mingw-w64-x86_64-llvm-tools...
 installing mingw-w64-x86_64-llvm...
-LLVM_SYS_221_PREFIX=C:\msys64\mingw64
 llvm-config=22.1.8
     Updating crates.io index
-   Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
+   Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
-    Finished `release` profile [optimized] target(s) in 3.11s
-   Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
-   Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 2.42s
+    Finished `release` profile [optimized] target(s) in 3.46s
  Downloading crates ...
-  Downloaded cc v1.4.2
-  Downloaded lazy_static v1.5.0
-  Downloaded shlex v2.0.1
+  Downloaded find-msvc-tools v0.1.10
   Downloaded anyhow v1.0.104
   Downloaded llvm-sys v221.0.1
   Downloaded regex-lite v0.1.9
+  Downloaded shlex v2.0.1
+  Downloaded cc v1.4.2
   Downloaded semver v1.0.28
-  Downloaded find-msvc-tools v0.1.10
+  Downloaded lazy_static v1.5.0
   Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
-   Compiling anyhow v1.0.104
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
+   Compiling anyhow v1.0.104
    Compiling shlex v2.0.1
    Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
    Compiling find-msvc-tools v0.1.10
    Compiling lazy_static v1.5.0
    Compiling cc v1.4.2
    Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
-   Compiling semver v1.0.28
-   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
    Compiling regex-lite v0.1.9
+   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
    Compiling libc v0.2.189
+   Compiling semver v1.0.28
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
+   Compiling llvm-sys v221.0.1
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
-   Compiling llvm-sys v221.0.1
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.30s
-     Running tests\native_int.rs (target\x86_64-pc-windows-gnu\debug\deps\native_int-bd1993c1a563592e.exe)
+   Compiling keld-cli v0.1.0 (D:\a\keld\keld\crates\keld-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.07s
+     Running tests\cli.rs (target\x86_64-pc-windows-gnu\debug\deps\cli-1a4a08f7c532adb9.exe)
 
-running 25 tests
-test direct_list_operations_run_natively ... ok
-test entity_allocation_links_views_and_retirement_run_natively ... ok
-test invalid_ir_is_rejected_before_toolchain_access ... ok
-test frozen_site_schedule_controls_native_at_the_same_site_as_interpreter ... ok
-test invalid_runtime_dll_is_rejected_before_link ... ok
-test import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected ... ok
-test builds_and_runs_a_const_int_program ... ok
-test lowers_scalar_cfg_and_phi_at_both_optimization_levels ... ok
-test managed_call_modes_transfer_and_mutate_the_encoded_argument ... ok
-test mixed_runtime_import_heads_are_rejected ... ok
-test mixed_runtime_short_imports_are_rejected ... ok
-test managed_phi_transfers_the_selected_envelope_at_both_optimization_levels ... ok
-test ordinary_coff_runtime_symbol_override_is_rejected ... ok
-test native_program_rejects_runtime_abi_version_mismatch ... ok
-test reverse_order_phi_after_checked_predecessor_runs_at_both_optimization_levels ... ok
-test projected_list_receiver_runs_natively_at_both_optimization_levels ... ok
-test scalar_callee_fault_keeps_the_callee_location ... ok
-test scalar_calls_cover_owned_results_unit_calls_and_callee_faults ... ok
-test struct_construction_and_managed_field_copy_run_natively ... ok
-test scalar_faults_preserve_kind_span_and_unreachable_is_internal ... ok
-test test_runtime_reports_context_allocation_at_main_span ... ok
-test test_runtime_list_preferred_growth_failure_retries_exact_capacity ... ok
-test text_literals_copy_concat_and_queries_run_natively ... ok
-test test_runtime_allocation_controls_report_faults_at_the_current_instruction ... ok
-test scalar_numeric_operations_match_checked_interpreter_boundaries ... ok
+running 10 tests
+test impossible_list_capacity_is_a_capacity_runtime_fault ... ok
+test missing_source_is_a_static_read_failure ... ok
+test dump_ir_is_stable ... ok
 
-test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.08s
+thread 'check_is_silent_on_success_and_static_failures_have_stable_codes' (9012) panicked at crates\keld-cli\tests\cli.rs:99:9:
+assertion `left == right` failed: fail_unsupported.keld: 
+  left: Some(0)
+ right: Some(1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test check_is_silent_on_success_and_static_failures_have_stable_codes ... FAILED
+test deferred_containers_and_views_remain_outside_the_bootstrap_surface ... ok
+test run_representative_programs_prints_only_the_main_result ... ok
+test runtime_fault_and_command_misuse_have_distinct_exit_codes ... ok
+test native_engine_forwards_runtime_faults_with_interpreter_format ... ok
+test native_build_handles_unicode_paths_and_refuses_collisions ... ok
+test native_engine_matches_representative_source_fixtures ... ok
 
-   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.46s
-     Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
+failures:
 
-running 7 tests
-test allocation_schedule_includes_context_setup_failure ... ok
-test allocation_schedule_covers_preferred_and_exact_list_growth_failures ... ok
-test repeated_loop_concat_allocation_uses_one_static_site_with_three_attempts ... ok
-test every_executable_ir_variant_is_in_a_real_differential_fixture ... ok
-test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
-test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
-test source_surface_fixtures_extend_the_same_differential_schedule ... ok
+failures:
+    check_is_silent_on_success_and_static_failures_have_stable_codes
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.36s
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
 
-   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
-     Running tests\surface_audit.rs (target\x86_64-pc-windows-gnu\debug\deps\surface_audit-0cae7ad9bc3b1581.exe)
+error: test failed, to rerun pass `-p keld-cli --test cli`
 
-running 2 tests
-test every_ir_variant_has_a_named_source_or_ir_differential_fixture ... ok
-test native_surface_is_explicit_and_exhaustive ... ok
-
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-native_int=0 differential=0 surface_audit=0
-
-exit_status=0
+exit_status=101
