@@ -45,14 +45,14 @@ jobs:
         shell: bash
         run: |
           set +e
-          {
+          (
             cargo test -p keld-semantics
             first=$?
             cargo test -p keld-syntax
             second=$?
             if [ "$first" -ne 0 ]; then exit "$first"; fi
             exit "$second"
-          } > .control-flow-ci-last.txt 2>&1
+          ) > .control-flow-ci-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-ci-last.txt
