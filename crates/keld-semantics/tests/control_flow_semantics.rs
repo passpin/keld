@@ -27,7 +27,7 @@ return i
 
 #[test]
 fn while_condition_must_be_bool() {
-    let analysis = analyze_text("fn main() -> Int { while 1 { break } return 0 }\n");
+    let analysis = analyze_text("fn main() -> Int { while 1 { break }; return 0 }\n");
 
     assert!(
         analysis

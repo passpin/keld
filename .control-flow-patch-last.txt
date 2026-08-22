@@ -1,8 +1,3 @@
-Traceback (most recent call last):
-  File "/home/runner/work/keld/keld/.control-flow-apply.py", line 14, in <module>
-    replace(
-  File "/home/runner/work/keld/keld/.control-flow-apply.py", line 9, in replace
-    raise RuntimeError(f"{path}: expected one match, found {count}: {old[:80]!r}")
-RuntimeError: crates/keld-semantics/src/features.rs: expected one match, found 0: '        SyntaxKind::TypeParameterList => Some("generic"),\n        SyntaxKind::Wh'
+fixed while-condition test terminator
 
-exit_status=1
+exit_status=0
