@@ -1,19 +1,17 @@
 from pathlib import Path
 
 
-def replace(path: str, old: str, new: str) -> None:
-    file = Path(path)
-    text = file.read_text()
+def replace_once(text: str, old: str, new: str, label: str) -> str:
     count = text.count(old)
     if count != 1:
-        raise RuntimeError(f"{path}: expected one match, found {count}: {old[:120]!r}")
-    file.write_text(text.replace(old, new, 1))
-    print(f"updated {path}")
+        raise RuntimeError(f"{label}: expected one match, found {count}: {old[:120]!r}")
+    return text.replace(old, new, 1)
 
 
-verify = "crates/keld-lifecycle/src/verify.rs"
-replace(
-    verify,
+verify_path = Path("crates/keld-lifecycle/src/verify.rs")
+text = verify_path.read_text()
+text = replace_once(
+    text,
     '''struct Catalog {
     parameter: BTreeMap<LocalId, ProvenanceId>,
     value: Vec<Option<ProvenanceId>>,
@@ -29,10 +27,10 @@ replace(
     entities: Vec<Option<DefId>>,
 }
 ''',
+    "Catalog",
 )
-
-replace(
-    verify,
+text = replace_once(
+    text,
     '''    fn solve_fixed_point(&mut self) -> Vec<Option<AbstractState>> {
 ''',
     '''    fn join_at(&self, block: BlockId, states: &[AbstractState]) -> AbstractState {
@@ -101,21 +99,21 @@ replace(
 
     fn solve_fixed_point(&mut self) -> Vec<Option<AbstractState>> {
 ''',
+    "join_at insertion",
 )
-
-replace(
-    verify,
-    '''            let block = &self.function.blocks[block_index];
+block_prefix = '''            let block = &self.function.blocks[block_index];
             for (index, operation) in block.operations.iter().enumerate() {
-''',
-    '''            let block = &self.function.blocks[block_index];
+'''
+block_replacement = '''            let block = &self.function.blocks[block_index];
             self.clear_block_entity_values(&block.operations, &mut state);
             for (index, operation) in block.operations.iter().enumerate() {
-''',
-)
-
-replace(
-    verify,
+'''
+count = text.count(block_prefix)
+if count != 2:
+    raise RuntimeError(f"block transfer prefix: expected two matches, found {count}")
+text = text.replace(block_prefix, block_replacement)
+text = replace_once(
+    text,
     '''                    Some(existing) => {
                         let joined = AbstractState::join(
                             &[existing.clone(), successor_state],
@@ -132,22 +130,10 @@ replace(
                         (joined != *existing).then_some(joined)
                     }
 ''',
+    "fixed-point join",
 )
-
-# The same block prefix occurs a second time in replay; replace only that remaining occurrence.
-replace(
-    verify,
-    '''            let block = &self.function.blocks[block_index];
-            for (index, operation) in block.operations.iter().enumerate() {
-''',
-    '''            let block = &self.function.blocks[block_index];
-            self.clear_block_entity_values(&block.operations, &mut state);
-            for (index, operation) in block.operations.iter().enumerate() {
-''',
-)
-
-replace(
-    verify,
+text = replace_once(
+    text,
     '''    let mut resolve = BTreeMap::new();
     for block in &function.blocks {
         if let Terminator::ResolveLink { bind_local, .. } = block.terminator
@@ -201,10 +187,10 @@ replace(
     }
 }
 ''',
+    "catalog construction",
 )
-
-replace(
-    verify,
+text = replace_once(
+    text,
     '''fn entity_type(flow: &FlowModule, ty: keld_semantics::TypeId) -> Option<DefId> {
 ''',
     '''fn defined_value(operation: &FlowOp) -> Option<ValueId> {
@@ -282,11 +268,15 @@ fn successors(terminator: &Terminator) -> Vec<BlockId> {
 
 fn entity_type(flow: &FlowModule, ty: keld_semantics::TypeId) -> Option<DefId> {
 ''',
+    "graph helpers",
 )
+verify_path.write_text(text)
+print("updated lifecycle verifier with bounded merge provenance")
 
-provenance = "crates/keld-lifecycle/src/provenance.rs"
-replace(
-    provenance,
+provenance_path = Path("crates/keld-lifecycle/src/provenance.rs")
+text = provenance_path.read_text()
+text = replace_once(
+    text,
     '''    pub fn lifecycle(&self, provenance: ProvenanceId) -> Option<LifecycleFact> {
 ''',
     '''    pub fn install_merge(
@@ -299,7 +289,7 @@ replace(
             return;
         };
         let first_index = first_provenance.0 as usize;
-        let mut reference = first_state.refs[first_index];
+        let mut reference = first_state.refs[first_index].clone();
         let mut origin = first_state.origins[first_index].clone();
         let mut failure = first_state.failures[first_index];
         for (state, provenance) in &inputs[1..] {
@@ -322,4 +312,7 @@ replace(
 
     pub fn lifecycle(&self, provenance: ProvenanceId) -> Option<LifecycleFact> {
 ''',
+    "merge state helper",
 )
+provenance_path.write_text(text)
+print("updated abstract-state merge helper")
