@@ -65,20 +65,20 @@ llvm-config=22.1.8
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
-    Finished `release` profile [optimized] target(s) in 3.30s
+    Finished `release` profile [optimized] target(s) in 6.16s
  Downloading crates ...
   Downloaded lazy_static v1.5.0
   Downloaded shlex v2.0.1
-  Downloaded anyhow v1.0.104
   Downloaded regex-lite v0.1.9
   Downloaded find-msvc-tools v0.1.10
-  Downloaded llvm-sys v221.0.1
-  Downloaded libc v0.2.189
   Downloaded semver v1.0.28
+  Downloaded anyhow v1.0.104
+  Downloaded llvm-sys v221.0.1
   Downloaded cc v1.4.2
+  Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
-   Compiling anyhow v1.0.104
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
+   Compiling anyhow v1.0.104
    Compiling shlex v2.0.1
    Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
    Compiling find-msvc-tools v0.1.10
@@ -86,47 +86,35 @@ llvm-config=22.1.8
    Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
    Compiling cc v1.4.2
    Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
+   Compiling regex-lite v0.1.9
    Compiling lazy_static v1.5.0
    Compiling semver v1.0.28
-   Compiling regex-lite v0.1.9
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
-   Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
-   Compiling llvm-sys v221.0.1
+   Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
+   Compiling llvm-sys v221.0.1
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
    Compiling keld-cli v0.1.0 (D:\a\keld\keld\crates\keld-cli)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.51s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.96s
      Running tests\cli.rs (target\x86_64-pc-windows-gnu\debug\deps\cli-1a4a08f7c532adb9.exe)
 
 running 10 tests
 test impossible_list_capacity_is_a_capacity_runtime_fault ... ok
-test missing_source_is_a_static_read_failure ... ok
 test dump_ir_is_stable ... ok
-
-thread 'check_is_silent_on_success_and_static_failures_have_stable_codes' (1284) panicked at crates\keld-cli\tests\cli.rs:100:9:
-assertion `left == right` failed: fail_unsupported.keld
-  left: "D:\\a\\keld\\keld\\crates\\keld-cli\\tests\\fixtures\\fail_unsupported.keld:1:19: error[KLD0004]: `match` is parsed but not supported by the bootstrap compiler\n  --> `match` is parsed but not supported by the bootstrap compiler\n  = help: remove this feature or use the currently supported bootstrap subset\n"
- right: "D:\\a\\keld\\keld\\crates\\keld-cli\\tests\\fixtures\\fail_unsupported.keld:2:5: error[KLD0004]: `match` is parsed but not supported by the bootstrap compiler\n  --> `match` is parsed but not supported by the bootstrap compiler\n  = help: remove this feature or use the currently supported bootstrap subset\n"
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-test check_is_silent_on_success_and_static_failures_have_stable_codes ... FAILED
+test missing_source_is_a_static_read_failure ... ok
+test check_is_silent_on_success_and_static_failures_have_stable_codes ... ok
 test deferred_containers_and_views_remain_outside_the_bootstrap_surface ... ok
 test run_representative_programs_prints_only_the_main_result ... ok
 test runtime_fault_and_command_misuse_have_distinct_exit_codes ... ok
-test native_engine_forwards_runtime_faults_with_interpreter_format ... ok
 test native_build_handles_unicode_paths_and_refuses_collisions ... ok
+test native_engine_forwards_runtime_faults_with_interpreter_format ... ok
 test native_engine_matches_representative_source_fixtures ... ok
 
-failures:
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.45s
 
-failures:
-    check_is_silent_on_success_and_static_failures_have_stable_codes
 
-test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
-
-error: test failed, to rerun pass `-p keld-cli --test cli`
-
-exit_status=101
+exit_status=0

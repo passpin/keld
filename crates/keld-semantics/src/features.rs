@@ -8,9 +8,15 @@ pub(crate) fn gate(root: &SyntaxNode, lexed: &Lexed, source: &SourceText) -> Vec
     let mut stack = root.child_nodes().rev().collect::<Vec<_>>();
     while let Some(node) = stack.pop() {
         if let Some(feature) = unsupported_feature(node, lexed, source) {
+            let span = if node.kind == SyntaxKind::MatchExpr {
+                direct_token_span(node, lexed, TokenKind::Keyword(Keyword::Match))
+                    .unwrap_or(node.span)
+            } else {
+                node.span
+            };
             let mut diagnostic = Diagnostic::error(
                 FEATURE_DIAGNOSTIC,
-                node.span,
+                span,
                 format!("`{feature}` is parsed but not supported by the bootstrap compiler"),
             );
             diagnostic.help = Some(
@@ -86,6 +92,20 @@ fn unsupported_feature<'a>(
         }
     }
     None
+}
+
+fn direct_token_span(
+    node: &SyntaxNode,
+    lexed: &Lexed,
+    expected: TokenKind,
+) -> Option<keld_source::Span> {
+    node.direct_token_ids().find_map(|id| {
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|index| lexed.tokens.get(index))
+            .filter(|token| token.kind == expected)
+            .map(|token| token.span)
+    })
 }
 
 fn has_direct_kind(node: &SyntaxNode, lexed: &Lexed, expected: TokenKind) -> bool {
