@@ -15,18 +15,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Apply queued edit and record failure
-        id: patch
         shell: pwsh
         run: |
-          if (-not (Test-Path .control-flow-apply.py)) {
-            "applied=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            exit 0
-          }
-
+          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
           & python .control-flow-apply.py *> .control-flow-patch-last.txt
           $status = $LASTEXITCODE
           "`nexit_status=$status" | Out-File -FilePath .control-flow-patch-last.txt -Append
-
           if ($status -ne 0) {
             git add .control-flow-patch-last.txt
             git config user.name "github-actions[bot]"
@@ -35,11 +29,9 @@ jobs:
             git push
             exit $status
           }
-
           git rm .control-flow-apply.py
-          "applied=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Run complete Task 7 Native-1 regression gate
+      - name: Run Task 8 CLI acceptance RED
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -47,11 +39,7 @@ jobs:
           Remove-Item $log -ErrorAction SilentlyContinue
 
           function Find-Tool([string]$name) {
-            $candidates = @(
-              "C:\mingw64\bin\$name",
-              "C:\msys64\mingw64\bin\$name"
-            )
-            foreach ($candidate in $candidates) {
+            foreach ($candidate in @("C:\mingw64\bin\$name", "C:\msys64\mingw64\bin\$name")) {
               if (Test-Path $candidate) { return $candidate }
             }
             $command = Get-Command $name -ErrorAction SilentlyContinue
@@ -63,37 +51,22 @@ jobs:
             $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
             $env:KELD_MINGW_GCC = Find-Tool 'gcc.exe'
             $env:KELD_DLLTOOL = Find-Tool 'dlltool.exe'
-            "KELD_MINGW_GCC=$env:KELD_MINGW_GCC" | Out-File $log -Append
-            "KELD_DLLTOOL=$env:KELD_DLLTOOL" | Out-File $log -Append
-
             rustup target add x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
 
             & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
             if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed: $LASTEXITCODE" }
-
             $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
             $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
             $llvmVersion = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
-            "LLVM_SYS_221_PREFIX=$env:LLVM_SYS_221_PREFIX" | Out-File $log -Append
             "llvm-config=$llvmVersion" | Out-File $log -Append
             if ($llvmVersion -ne '22.1.8') { throw "LLVM version mismatch: $llvmVersion" }
 
             cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "production runtime build failed: $LASTEXITCODE" }
-            cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
-            if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
 
-            cargo test -p keld-native-backend --test native_int -- --nocapture *>> $log
-            $nativeInt = $LASTEXITCODE
-            cargo test -p keld-native-backend --test differential -- --nocapture *>> $log
-            $differential = $LASTEXITCODE
-            cargo test -p keld-native-backend --test surface_audit -- --nocapture *>> $log
-            $surface = $LASTEXITCODE
-            "native_int=$nativeInt differential=$differential surface_audit=$surface" | Out-File $log -Append
-            if ($nativeInt -ne 0) { $status = $nativeInt }
-            elseif ($differential -ne 0) { $status = $differential }
-            else { $status = $surface }
+            cargo test -p keld-cli --test cli -- --nocapture *>> $log
+            $status = $LASTEXITCODE
           }
           catch {
             $_ | Out-String | Out-File $log -Append
@@ -101,7 +74,6 @@ jobs:
           }
 
           "`nexit_status=$status" | Out-File $log -Append
-
           git add -A
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
@@ -110,5 +82,4 @@ jobs:
             git commit -m "ci: record Control Flow-1 verification [skip ci]"
             git push
           }
-
           exit $status
