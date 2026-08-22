@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.42s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.37s
      Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
 
 running 0 tests
@@ -79,7 +79,7 @@ failures:
 
 ---- loop_carried_allocation_uses_a_stable_distinct_merge_provenance stdout ----
 
-thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3052) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:185:10:
+thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3036) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:185:10:
 loop-carried previous identity remains available at the comparison
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
@@ -91,7 +91,7 @@ test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 
 error: test failed, to rerun pass `-p keld-lifecycle --test provenance_facts`
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
      Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
 
 running 0 tests
@@ -115,13 +115,13 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 10 tests
 test call_arguments_are_materialized_left_to_right ... ok
-test boolean_operators_use_control_flow_and_one_phi ... ok
 test assignment_materializes_identity_then_rhs_then_writes ... ok
+test boolean_operators_use_control_flow_and_one_phi ... ok
 test compound_assignment_reads_old_value_before_rhs ... ok
 test nested_index_projections_preserve_index_evaluation_order ... ok
-test constructor_field_ids_do_not_reorder_source_evaluation ... ok
-test indexed_replacement_materializes_target_before_rhs ... ok
 test nested_remove_is_complete_before_outer_push ... ok
+test indexed_replacement_materializes_target_before_rhs ... ok
+test constructor_field_ids_do_not_reorder_source_evaluation ... ok
 test take_lowers_to_an_explicit_local_transfer ... ok
 test struct_field_replacement_is_not_an_entity_view_write ... ok
 

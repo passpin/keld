@@ -169,6 +169,37 @@ impl AbstractState {
         joined
     }
 
+    pub fn install_merge(
+        &mut self,
+        target: ProvenanceId,
+        inputs: &[(&Self, ProvenanceId)],
+        fallback_cause: keld_source::Span,
+    ) {
+        let Some((first_state, first_provenance)) = inputs.first().copied() else {
+            return;
+        };
+        let first_index = first_provenance.0 as usize;
+        let mut reference = first_state.refs[first_index].clone();
+        let mut origin = first_state.origins[first_index].clone();
+        let mut failure = first_state.failures[first_index];
+        for (state, provenance) in &inputs[1..] {
+            let index = provenance.0 as usize;
+            origin.union_with(&state.origins[index]);
+            reference = join_ref(&reference, &state.refs[index], fallback_cause);
+            failure = join_failure(failure, state.failures[index], &reference);
+        }
+        if let RefState::Live { lifecycle, .. } = reference {
+            reference = RefState::Live {
+                lifecycle,
+                provenance: target,
+            };
+        }
+        let target_index = target.0 as usize;
+        self.refs[target_index] = reference;
+        self.origins[target_index] = origin;
+        self.failures[target_index] = failure;
+    }
+
     pub fn lifecycle(&self, provenance: ProvenanceId) -> Option<LifecycleFact> {
         match self.refs.get(provenance.0 as usize) {
             Some(RefState::Live { lifecycle, .. }) => Some(*lifecycle),

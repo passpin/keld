@@ -126,6 +126,7 @@ struct Catalog {
     parameter: BTreeMap<LocalId, ProvenanceId>,
     value: Vec<Option<ProvenanceId>>,
     resolve: BTreeMap<BlockId, ProvenanceId>,
+    merge: BTreeMap<(BlockId, LocalId), ProvenanceId>,
     entities: Vec<Option<DefId>>,
 }
 
@@ -236,6 +237,70 @@ impl Analyzer<'_> {
         }
     }
 
+    fn join_at(&self, block: BlockId, states: &[AbstractState]) -> AbstractState {
+        let mut joined = AbstractState::join(states, self.function.span);
+        for (&(merge_block, local), &merge_provenance) in &self.catalog.merge {
+            if merge_block != block {
+                continue;
+            }
+            let local_index = local.0 as usize;
+            let references = states
+                .iter()
+                .map(|state| state.locals[local_index])
+                .collect::<Vec<_>>();
+            let Some(first) = references.first().copied().flatten() else {
+                joined.locals[local_index] = None;
+                continue;
+            };
+            if references.iter().any(Option::is_none) {
+                joined.locals[local_index] = None;
+                continue;
+            }
+            let references = references
+                .into_iter()
+                .map(Option::unwrap)
+                .collect::<Vec<_>>();
+            if references.iter().all(|reference| *reference == first) {
+                joined.locals[local_index] = Some(first);
+                continue;
+            }
+            if references
+                .iter()
+                .any(|reference| reference.entity != first.entity)
+            {
+                joined.locals[local_index] = None;
+                continue;
+            }
+            let inputs = states
+                .iter()
+                .zip(&references)
+                .map(|(state, reference)| (state, reference.provenance))
+                .collect::<Vec<_>>();
+            joined.install_merge(merge_provenance, &inputs, self.function.span);
+            joined.locals[local_index] = Some(RefValue {
+                provenance: merge_provenance,
+                entity: first.entity,
+            });
+        }
+        joined
+    }
+
+    fn clear_block_entity_values(&self, operations: &[FlowOp], state: &mut AbstractState) {
+        for operation in operations {
+            let Some(value) = defined_value(operation) else {
+                continue;
+            };
+            if self
+                .catalog
+                .value
+                .get(value.0 as usize)
+                .is_some_and(Option::is_some)
+            {
+                state.values[value.0 as usize] = None;
+            }
+        }
+    }
+
     fn solve_fixed_point(&mut self) -> Vec<Option<AbstractState>> {
         let block_count = self.function.blocks.len();
         let mut incoming = vec![None; block_count];
@@ -252,6 +317,7 @@ impl Analyzer<'_> {
                 continue;
             };
             let block = &self.function.blocks[block_index];
+            self.clear_block_entity_values(&block.operations, &mut state);
             for (index, operation) in block.operations.iter().enumerate() {
                 let index = u32::try_from(index).expect("flow operation index fits in u32");
                 self.operation(block_id, index, operation, &mut state);
@@ -264,9 +330,9 @@ impl Analyzer<'_> {
                 let next_state = match incoming[successor_index].as_ref() {
                     None => Some(successor_state),
                     Some(existing) => {
-                        let joined = AbstractState::join(
+                        let joined = self.join_at(
+                            successor,
                             &[existing.clone(), successor_state],
-                            self.function.span,
                         );
                         (joined != *existing).then_some(joined)
                     }
@@ -298,6 +364,7 @@ impl Analyzer<'_> {
             let block_id =
                 BlockId(u32::try_from(block_index).expect("flow block index fits in u32"));
             let block = &self.function.blocks[block_index];
+            self.clear_block_entity_values(&block.operations, &mut state);
             for (index, operation) in block.operations.iter().enumerate() {
                 let index = u32::try_from(index).expect("flow operation index fits in u32");
                 let previous = self
@@ -881,10 +948,31 @@ fn build_catalog(flow: &FlowModule, function: &FlowFunction) -> Catalog {
             resolve.insert(block.id, allocate(&mut entities, entity));
         }
     }
+
+    let mut predecessor_counts = vec![0_usize; function.blocks.len()];
+    for block in &function.blocks {
+        for successor in successors(&block.terminator) {
+            predecessor_counts[successor.0 as usize] += 1;
+        }
+    }
+    let mut merge = BTreeMap::new();
+    for block in &function.blocks {
+        if predecessor_counts[block.id.0 as usize] <= 1 {
+            continue;
+        }
+        for (index, ty) in function.local_types.iter().copied().enumerate() {
+            let Some(entity) = entity_type(flow, ty) else {
+                continue;
+            };
+            let local = LocalId(u32::try_from(index).expect("flow local index fits in u32"));
+            merge.insert((block.id, local), allocate(&mut entities, entity));
+        }
+    }
     Catalog {
         parameter,
         value,
         resolve,
+        merge,
         entities,
     }
 }
@@ -985,6 +1073,79 @@ fn validate_effects(
             "declared broad retirement does not occur",
             "remove the redundant `retires any` effect",
         ));
+    }
+}
+
+fn defined_value(operation: &FlowOp) -> Option<ValueId> {
+    match operation {
+        FlowOp::ConstInt { dst, .. }
+        | FlowOp::ConstBool { dst, .. }
+        | FlowOp::ConstText { dst, .. }
+        | FlowOp::ConstNoneLink { dst, .. }
+        | FlowOp::CopyLocal { dst, .. }
+        | FlowOp::TakeLocal { dst, .. }
+        | FlowOp::CopyStorage { dst, .. }
+        | FlowOp::ListNew { dst, .. }
+        | FlowOp::ListLength { dst, .. }
+        | FlowOp::ListIndex { dst, .. }
+        | FlowOp::ListGet { dst, .. }
+        | FlowOp::ListRemove { dst, .. }
+        | FlowOp::ListTryRemove { dst, .. }
+        | FlowOp::ListTryReserve { dst, .. }
+        | FlowOp::TextByteLength { dst, .. }
+        | FlowOp::TextIsEmpty { dst, .. }
+        | FlowOp::TextConcat { dst, .. }
+        | FlowOp::UnaryInt { dst, .. }
+        | FlowOp::BinaryInt { dst, .. }
+        | FlowOp::Not { dst, .. }
+        | FlowOp::Compare { dst, .. }
+        | FlowOp::Phi { dst, .. }
+        | FlowOp::ConstructStruct { dst, .. }
+        | FlowOp::AllocateEntity { dst, .. }
+        | FlowOp::EntityToLink { dst, .. }
+        | FlowOp::ReadStructField { dst, .. }
+        | FlowOp::ReadEntityField { dst, .. }
+        | FlowOp::ReadUncheckedLinkField { dst, .. } => Some(*dst),
+        FlowOp::Call { dst, .. } => *dst,
+        FlowOp::BeginLifecycle { .. }
+        | FlowOp::BeginCall { .. }
+        | FlowOp::ReserveArgument { .. }
+        | FlowOp::StoreLocal { .. }
+        | FlowOp::ListPush { .. }
+        | FlowOp::ListClear { .. }
+        | FlowOp::ListReserve { .. }
+        | FlowOp::BeginIndexedReplacement { .. }
+        | FlowOp::EndIndexedReplacement { .. }
+        | FlowOp::ListReplace { .. }
+        | FlowOp::ReplacePlace { .. }
+        | FlowOp::WriteEntityField { .. }
+        | FlowOp::Keep { .. }
+        | FlowOp::Retire { .. } => None,
+    }
+}
+
+fn successors(terminator: &Terminator) -> Vec<BlockId> {
+    match terminator {
+        Terminator::Goto(block)
+        | Terminator::ExitScopes {
+            next: ExitTarget::Goto(block),
+            ..
+        } => vec![*block],
+        Terminator::Branch {
+            then_block,
+            else_block,
+            ..
+        } => vec![*then_block, *else_block],
+        Terminator::BranchIdentity {
+            equal, not_equal, ..
+        } => vec![*equal, *not_equal],
+        Terminator::ResolveLink { live, absent, .. } => vec![*live, *absent],
+        Terminator::ExitScopes {
+            next: ExitTarget::Return(_),
+            ..
+        }
+        | Terminator::Return(_)
+        | Terminator::Unreachable => Vec::new(),
     }
 }
 

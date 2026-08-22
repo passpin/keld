@@ -1,10 +1,4 @@
-updated crates/keld-lifecycle/src/verify.rs
-updated crates/keld-lifecycle/src/verify.rs
-Traceback (most recent call last):
-  File "/home/runner/work/keld/keld/.control-flow-apply.py", line 106, in <module>
-    replace(
-  File "/home/runner/work/keld/keld/.control-flow-apply.py", line 9, in replace
-    raise RuntimeError(f"{path}: expected one match, found {count}: {old[:120]!r}")
-RuntimeError: crates/keld-lifecycle/src/verify.rs: expected one match, found 2: '            let block = &self.function.blocks[block_index];\n            for (index, operation) in block.operations.iter('
+updated lifecycle verifier with bounded merge provenance
+updated abstract-state merge helper
 
-exit_status=1
+exit_status=0
