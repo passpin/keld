@@ -649,6 +649,79 @@ fn coff_import_symbol(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(import_name[..end].to_vec())
 }
 
+struct CoffShortImport {
+    import_name: Vec<u8>,
+    dll_name: Vec<u8>,
+}
+
+fn coff_short_import(bytes: &[u8]) -> Result<Option<CoffShortImport>, ()> {
+    if bytes.get(..4) != Some([0, 0, 0xff, 0xff].as_slice()) {
+        return Ok(None);
+    }
+    if read_pe_u16(bytes, 6) != Some(0x8664) {
+        return Err(());
+    }
+    let data_size = usize::try_from(read_pe_u32(bytes, 12).ok_or(())?).map_err(|_| ())?;
+    let data_start = 20usize;
+    let data_end = data_start.checked_add(data_size).ok_or(())?;
+    if data_end != bytes.len() {
+        return Err(());
+    }
+    let data = bytes.get(data_start..data_end).ok_or(())?;
+    let name_end = data.iter().position(|byte| *byte == 0).ok_or(())?;
+    let dll_start = name_end.checked_add(1).ok_or(())?;
+    let dll_tail = data.get(dll_start..).ok_or(())?;
+    let dll_end = dll_tail.iter().position(|byte| *byte == 0).ok_or(())?;
+    if dll_end + dll_start + 1 != data.len() {
+        return Err(());
+    }
+    Ok(Some(CoffShortImport {
+        import_name: data[..name_end].to_vec(),
+        dll_name: dll_tail[..dll_end].to_vec(),
+    }))
+}
+
+fn validate_runtime_import_member(
+    member: &[u8],
+    abi_import: &[u8],
+    head_symbol: &[u8],
+    found_abi_import: &mut bool,
+) -> bool {
+    match coff_short_import(member) {
+        Ok(Some(import)) => {
+            let approved_dll = import.dll_name == RUNTIME_DLL_NAME.as_bytes();
+            if approved_dll && import.import_name == abi_import {
+                *found_abi_import = true;
+            }
+            return approved_dll;
+        }
+        Err(()) => return false,
+        Ok(None) => {}
+    }
+    if coff_section_data(member, b".idata$6").is_none() {
+        return true;
+    }
+    let Some(import_name) = coff_import_symbol(member) else {
+        return false;
+    };
+    let Some(head_references) = coff_symbols_matching(member, |name, section| {
+        section == 0 && name.starts_with(b"_head_")
+    }) else {
+        return false;
+    };
+    let head_matches = head_references.len() == 1 && head_references[0].as_slice() == head_symbol;
+    let import_defined =
+        coff_symbol_section(member, &import_name).is_some_and(|section| section > 0);
+    let mut import_pointer = b"__imp_".to_vec();
+    import_pointer.extend_from_slice(&import_name);
+    let import_pointer_defined =
+        coff_symbol_section(member, &import_pointer).is_some_and(|section| section > 0);
+    if import_name == abi_import && import_defined && import_pointer_defined {
+        *found_abi_import = true;
+    }
+    head_matches && import_defined && import_pointer_defined
+}
+
 fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
     let bytes = std::fs::read(path)?;
     let abi_import = b"keld_rt_v1_abi_version";
@@ -700,32 +773,8 @@ fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
     let mut found_abi_import = false;
     let mut runtime_imports_valid = true;
     let import_archive_valid = visit_gnu_archive(&bytes, |member| {
-        if coff_section_data(member, b".idata$6").is_none() {
-            return;
-        }
-        let Some(import_name) = coff_import_symbol(member) else {
+        if !validate_runtime_import_member(member, abi_import, head_symbol, &mut found_abi_import) {
             runtime_imports_valid = false;
-            return;
-        };
-        let Some(head_references) = coff_symbols_matching(member, |name, section| {
-            section == 0 && name.starts_with(b"_head_")
-        }) else {
-            runtime_imports_valid = false;
-            return;
-        };
-        let head_matches =
-            head_references.len() == 1 && head_references[0].as_slice() == head_symbol;
-        let import_defined =
-            coff_symbol_section(member, &import_name).is_some_and(|section| section > 0);
-        let mut import_pointer = b"__imp_".to_vec();
-        import_pointer.extend_from_slice(&import_name);
-        let import_pointer_defined =
-            coff_symbol_section(member, &import_pointer).is_some_and(|section| section > 0);
-        if !head_matches || !import_defined || !import_pointer_defined {
-            runtime_imports_valid = false;
-        }
-        if import_name == abi_import && import_defined && import_pointer_defined {
-            found_abi_import = true;
         }
     });
     if !archive_valid

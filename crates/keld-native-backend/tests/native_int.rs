@@ -1541,6 +1541,97 @@ fn mixed_runtime_import_heads_are_rejected() {
 }
 
 #[test]
+fn mixed_runtime_short_imports_are_rejected() {
+    let (runtime_dll, import_library) = runtime_artifacts("mixed-short-imports");
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let definition = directory.join("runtime.def");
+    let contents = std::fs::read_to_string(&definition).expect("runtime export definition");
+    let other_definition = directory.join("other-runtime.def");
+    let other_contents = contents
+        .replace("LIBRARY keld_runtime_v1.dll", "LIBRARY other_runtime.dll")
+        .lines()
+        .filter(|line| *line != "keld_rt_v1_abi_version")
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&other_definition, other_contents).expect("other runtime export definition");
+    let other_import = directory.join("libother_runtime.dll.a");
+    let llvm_prefix = std::env::var_os("LLVM_SYS_221_PREFIX")
+        .map(PathBuf::from)
+        .or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join(".tools/llvm/22.1.8-mingw64"))
+        })
+        .expect("LLVM prefix");
+    let status = Command::new(llvm_prefix.join("bin/llvm-dlltool.exe"))
+        .args([
+            "-m",
+            "i386:x86-64",
+            "-d",
+            other_definition.to_str().expect("other definition path"),
+            "-D",
+            "other_runtime.dll",
+            "-l",
+        ])
+        .arg(&other_import)
+        .status()
+        .expect("llvm-dlltool");
+    assert!(status.success(), "llvm-dlltool failed: {status}");
+
+    let ar = std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into());
+    let extracted = directory.join("short-import-members");
+    std::fs::create_dir_all(&extracted).expect("short import extraction directory");
+    let mut short_imports = Vec::new();
+    for occurrence in 4..=6 {
+        let status = Command::new(&ar)
+            .current_dir(&extracted)
+            .arg("xN")
+            .arg(occurrence.to_string())
+            .arg(other_import.to_str().expect("other import path"))
+            .arg("other_runtime.dll")
+            .status()
+            .expect("ar short import extract");
+        assert!(status.success(), "ar short import extract failed: {status}");
+        let extracted_member = extracted.join("other_runtime.dll");
+        let renamed = extracted.join(format!("short-{occurrence}.o"));
+        std::fs::rename(extracted_member, &renamed).expect("rename short import member");
+        short_imports.push(renamed);
+    }
+
+    let mut append = Command::new(llvm_prefix.join("bin/llvm-ar.exe"));
+    append
+        .current_dir(directory)
+        .args(["qS", import_library.to_str().expect("import library path")]);
+    for member in &short_imports {
+        append.arg(member);
+    }
+    let status = append.status().expect("ar short import append");
+    assert!(status.success(), "ar short import append failed: {status}");
+
+    let output = directory.join("mixed-short-imports.exe");
+    let error = build_executable(
+        &const_module(7),
+        &metadata(),
+        &request(
+            &output,
+            &runtime_dll,
+            &import_library,
+            OptimizationLevel::O0,
+        ),
+    )
+    .expect_err("mixed runtime short imports must be rejected");
+    assert!(matches!(error, BackendError::Toolchain(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("runtime import library must contain a COFF import")
+    );
+    assert!(!output.exists());
+}
+
+#[test]
 fn native_program_rejects_runtime_abi_version_mismatch() {
     let (runtime_dll, import_library) = test_runtime_artifacts("abi-mismatch");
     let directory = runtime_dll.parent().expect("runtime directory");
