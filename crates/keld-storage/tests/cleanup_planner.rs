@@ -85,6 +85,24 @@ fn divergent_successful_initialization_order_tracks_only_that_scope() {
 }
 
 #[test]
+fn cyclic_reinitialization_order_uses_bounded_outer_scope_tracking() {
+    let plan = plan_for_main(
+        "fn main() -> Int { var a: Text = \"a\"; var b: Text = \"b\"; var i = 0; while i < 2 { if i == 0 { let old_a = take a; let old_b = take b; a = \"a\"; b = \"b\" } else { let old_b = take b; let old_a = take a; b = \"b\"; a = \"a\" }; i = i + 1 }; return a.byte_length + b.byte_length }\n",
+    );
+
+    assert_eq!(
+        plan.tracked_scopes,
+        [StorageScopeId(0)].into_iter().collect()
+    );
+    assert!(
+        plan.drop_flags
+            .iter()
+            .all(|home| matches!(home, HomeId::Local(LocalId(0) | LocalId(1))))
+    );
+    assert!(plan.drop_flags.len() <= 2);
+}
+
+#[test]
 fn owned_temporary_loan_drops_after_the_call_succeeds() {
     let plan = plan_for_main(
         "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { return inspect(\"Keld\") }\n",
