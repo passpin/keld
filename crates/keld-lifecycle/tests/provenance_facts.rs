@@ -210,7 +210,7 @@ fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
 #[test]
 fn loop_carried_nonfresh_identity_is_may_alias_before_refinement() {
     let module = verified(
-        "entity Item { value: Int }\nfn inspect(left: Item, right: Item, choose_right: Bool) -> Bool { var carried = left; var i = 0; while i < 1 { if choose_right { carried = right }; i = i + 1 }; return carried == left }\nfn main() -> Int { return 0 }\n",
+        "entity Item { value: Int }\nfn inspect(left: Item, right: Item, choose_right: Bool) -> Int { var carried = left; var i = 0; while i < 1 { if choose_right { carried = right }; i = i + 1 }; if carried == left { return 1 } else { return 0 } }\nfn main() -> Int { return 0 }\n",
     );
     let function = function_id(&module, "inspect");
     let function_data = &module.flow.functions[function.0 as usize];

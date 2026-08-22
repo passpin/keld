@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.84s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.29s
      Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
 
 running 0 tests
@@ -20,8 +20,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 4 tests
 test copying_a_reference_preserves_must_alias_provenance ... ok
 test identity_inequality_refines_the_valid_branch ... ok
-test identity_equality_refines_to_must_alias ... ok
 test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
+test identity_equality_refines_to_must_alias ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -29,8 +29,8 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 3 tests
 test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
-test loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity ... ok
 test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
+test loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -72,28 +72,31 @@ test copied_entity_locals_publish_must_alias_parameter_origins ... ok
 test fresh_same_type_allocations_publish_must_distinct_origins ... ok
 test inequality_branch_publishes_must_distinct_parameters ... ok
 test retirement_summaries_remain_exact_and_broad ... ok
-test loop_carried_allocation_uses_a_stable_distinct_merge_provenance ... ok
-test repeated_when_resolution_forgets_prior_iteration_identity_refinement ... ok
 test unrefined_same_type_parameters_publish_may_alias ... ok
-test loop_carried_nonfresh_identity_is_may_alias_before_refinement ... FAILED
+test repeated_when_resolution_forgets_prior_iteration_identity_refinement ... ok
+test loop_carried_nonfresh_identity_is_may_alias_before_refinement ... ok
+test loop_carried_allocation_uses_a_stable_distinct_merge_provenance ... ok
 
-failures:
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
----- loop_carried_nonfresh_identity_is_may_alias_before_refinement stdout ----
+     Running tests/retirement.rs (target/debug/deps/retirement-3a6a827e14dbfa96)
 
-thread 'loop_carried_nonfresh_identity_is_may_alias_before_refinement' (3050) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:221:10:
-post-loop identity comparison exists
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+running 4 tests
+test distinct_allocations_survive_exact_retirement ... ok
+test retiring_a_must_alias_makes_both_names_retired ... ok
+test retiring_one_may_alias_invalidates_the_other_parameter ... ok
+test retirement_on_only_one_path_rejects_the_joined_use ... ok
 
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-failures:
-    loop_carried_nonfresh_identity_is_may_alias_before_refinement
+   Doc-tests keld_lifecycle
 
-test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 0 tests
 
-error: test failed, to rerun pass `-p keld-lifecycle --test provenance_facts`
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
      Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
 
 running 0 tests
@@ -145,4 +148,4 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 
-exit_status=101
+exit_status=0
