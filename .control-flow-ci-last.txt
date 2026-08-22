@@ -11,7 +11,7 @@ info: downloading 5 components
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
    Compiling keld-ir v0.1.0 (/home/runner/work/keld/keld/crates/keld-ir)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.59s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.89s
      Running unittests src/lib.rs (target/debug/deps/keld_ir-8f3ddd73b088b2c1)
 
 running 3 tests
@@ -47,8 +47,8 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/entity_liveness_validation.rs (target/debug/deps/entity_liveness_validation-466d359e59b6e9af)
 
 running 6 tests
-test direct_double_retire_is_rejected ... ok
 test retirement_before_an_entry_backedge_is_rejected ... ok
+test direct_double_retire_is_rejected ... ok
 test copy_alias_use_after_retire_is_rejected ... ok
 test identity_retired_on_one_predecessor_is_not_live_after_the_join ... ok
 test retiring_one_parameter_does_not_retire_an_independent_entity_parameter ... ok
@@ -60,8 +60,8 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 5 tests
 test plain_entity_field_assignment_keeps_the_write_instruction ... ok
-test managed_entity_field_replacement_is_a_closed_non_failing_transaction ... ok
 test entity_fields_are_lowered_to_closed_access_windows ... ok
+test managed_entity_field_replacement_is_a_closed_non_failing_transaction ... ok
 test lifecycle_edges_and_identity_branches_become_executable_operations ... ok
 test resolved_link_edges_and_phi_inputs_validate_as_edge_definitions ... ok
 
@@ -70,8 +70,8 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/review_adversarial.rs (target/debug/deps/review_adversarial-f15cd03d47a56275)
 
 running 2 tests
-test projected_list_remove_is_rejected_while_entity_view_is_open ... ok
 test projected_list_push_is_rejected_while_entity_view_is_open ... ok
+test projected_list_remove_is_rejected_while_entity_view_is_open ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -79,41 +79,41 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 39 tests
 test aggregate_construction_must_not_consume_a_loan_field ... ok
-test a_loan_register_cannot_be_moved_or_dropped ... ok
 test a_loan_register_cannot_be_taken ... ok
+test a_loan_register_cannot_be_moved_or_dropped ... ok
 test const_text_destination_must_be_an_owned_home ... ok
-test calls_require_live_managed_arguments_and_projected_bases ... ok
 test conditional_drop_accepts_a_maybe_live_home ... ok
+test calls_require_live_managed_arguments_and_projected_bases ... ok
 test consuming_call_must_not_consume_a_loan_register ... ok
 test displaced_values_must_be_dropped_after_replacement ... ok
-test entity_field_write_must_not_consume_a_loan_register ... ok
 test entity_construction_must_not_consume_a_loan_field ... ok
 test compiler_produced_register_categories_validate ... ok
 test entity_field_replacement_registers_must_match_the_selected_field ... ok
+test list_get_lowers_to_a_valid_optional_result ... ok
 test entity_results_must_use_entity_flow_registers ... ok
 test indexed_replacement_requires_displaced_cleanup ... ok
-test list_get_lowers_to_a_valid_optional_result ... ok
+test entity_field_write_must_not_consume_a_loan_register ... ok
 test list_push_must_not_consume_a_loan_register ... ok
 test list_replacement_must_not_consume_a_loan_register ... ok
+test managed_construction_results_must_not_be_loans ... ok
 test list_read_and_structural_operations_require_a_live_home ... ok
 test managed_entity_field_read_destination_must_be_a_loan ... ok
-test managed_construction_results_must_not_be_loans ... ok
 test managed_entity_fields_must_not_use_write_field_ir ... ok
-test managed_home_cannot_return_live_without_cleanup ... ok
 test managed_field_and_list_reads_must_produce_loans ... ok
-test managed_phi_inputs_must_be_live_on_each_predecessor ... ok
+test managed_home_cannot_return_live_without_cleanup ... ok
 test managed_parameter_roles_follow_their_parameter_modes ... ok
-test managed_phi_inputs_must_match_the_destination_role ... ok
-test managed_return_register_must_be_live ... ok
+test managed_phi_inputs_must_be_live_on_each_predecessor ... ok
 test managed_return_is_also_an_exhaustive_live_use ... ok
+test managed_return_register_must_be_live ... ok
+test managed_phi_inputs_must_match_the_destination_role ... ok
 test managed_struct_field_read_destination_must_be_a_loan ... ok
 test managed_take_destination_must_be_a_home ... ok
+test plain_results_must_not_be_managed_homes ... ok
 test moved_home_cannot_be_dropped_twice ... ok
 test maybe_live_managed_return_register_must_be_live ... ok
-test plain_results_must_not_be_managed_homes ... ok
+test projected_call_source_index_must_be_an_int ... ok
 test projected_call_source_must_resolve_to_the_argument_type ... ok
 test struct_field_replacement_must_not_consume_a_loan_register ... ok
-test projected_call_source_index_must_be_an_int ... ok
 test text_read_requires_a_live_managed_home ... ok
 test text_compare_and_concat_require_live_managed_homes ... ok
 test tracked_scope_cleanup_must_name_the_register_scope ... ok
@@ -141,7 +141,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
    Compiling keld-runtime v0.1.0 (/home/runner/work/keld/keld/crates/keld-runtime)
    Compiling stats_alloc v0.1.10
    Compiling keld-interpreter v0.1.0 (/home/runner/work/keld/keld/crates/keld-interpreter)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.85s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.67s
      Running unittests src/lib.rs (target/debug/deps/keld_interpreter-349a9858a852d3f3)
 
 running 8 tests
@@ -149,8 +149,8 @@ test cleanup::tests::cleanup_scratch_does_not_grow_for_a_wide_list ... ok
 test cleanup::tests::cleanup_scratch_growth_uses_the_fallible_path ... ok
 test cleanup::tests::nested_optional_envelopes_clean_the_managed_payload_once ... ok
 test cleanup::tests::cleanup_handles_maximum_depth_nested_lists_without_growing_scratch ... ok
-test value::tests::nested_some_none_peels_copies_and_compares_by_shape ... ok
 test value::tests::optional_envelope_rejects_every_malformed_shape ... ok
+test value::tests::nested_some_none_peels_copies_and_compares_by_shape ... ok
 test value::tests::optional_link_remains_a_link_payload_beneath_the_envelope ... ok
 test frame::tests::register_installation_rejects_a_malformed_optional_envelope ... ok
 
@@ -160,8 +160,8 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 7 tests
 test heap_text_constant_allocation_failure_is_reported_as_allocation_fault ... ok
-test loan_phi_place_copy_allocation_failure_is_reported ... ok
 test heap_text_copy_allocation_failure_is_reported_as_allocation_fault ... ok
+test loan_phi_place_copy_allocation_failure_is_reported ... ok
 test nested_indexed_loan_place_allocation_failure_is_reported ... ok
 test projected_replacement_place_failure_is_reported_before_commit ... ok
 test successful_heap_text_constant_and_copy_preserve_bytes_and_length ... ok
@@ -181,14 +181,14 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 11 tests
 test locals_drop_in_reverse_successful_initialization_order ... ok
 test inline_and_heap_text_use_the_same_home_cleanup_rules ... ok
-test fields_and_list_elements_drop_in_reverse_order_iteratively ... ok
 test entity_field_replacement_cleans_displaced_then_installed_text ... ok
+test fields_and_list_elements_drop_in_reverse_order_iteratively ... ok
 test moved_and_uninitialized_homes_are_skipped ... ok
 test nested_text_cleanup_is_iterative_and_preserves_reverse_success_order ... ok
-test nested_entity_field_replacement_preserves_recursive_reverse_cleanup ... ok
 test maybe_live_home_drops_only_on_the_initialized_path ... ok
-test owned_temporary_loan_drops_after_the_call_closes ... ok
 test optional_try_remove_result_cleans_present_element ... ok
+test owned_temporary_loan_drops_after_the_call_closes ... ok
+test nested_entity_field_replacement_preserves_recursive_reverse_cleanup ... ok
 test reinitialized_home_becomes_the_newest_cleanup ... ok
 
 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -227,25 +227,25 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 23 tests
 test clear_pops_elements_without_releasing_list_storage ... ok
 test failed_indexed_rhs_evaluation_does_not_install_a_replacement ... ok
-test copyable_index_read_returns_the_element ... ok
 test clear_destroys_elements_in_reverse_index_order ... ok
+test copyable_index_read_returns_the_element ... ok
 test get_returns_none_without_fault_and_does_not_change_the_list ... ok
 test clear_executes_after_a_list_allocation_failure_injection ... ok
-test injected_push_growth_failure_is_reported_as_allocation ... ok
 test indexed_replacement_installs_before_cleaning_the_old_value ... ok
+test injected_push_growth_failure_is_reported_as_allocation ... ok
 test nonempty_minimum_capacity_retry_meets_the_exact_requirement ... ok
 test nonempty_reservation_guarantees_exactly_the_next_additional_pushes ... ok
 test preferred_growth_failure_retries_minimum_capacity ... ok
 test push_reports_allocation_only_after_minimum_retry_fails ... ok
 test remove_and_clear_preserve_capacity ... ok
+test negative_and_equal_length_indices_fault_with_bounds ... ok
 test reserve_accounts_for_length_when_the_list_has_spare_capacity ... ok
 test reserve_negative_and_unaddressable_sizes_are_capacity_faults ... ok
 test successful_try_reserve_guarantees_the_next_n_pushes_do_not_grow ... ok
-test negative_and_equal_length_indices_fault_with_bounds ... ok
 test try_remove_invalid_returns_none_and_preserves_storage_and_values ... ok
 test nested_list_indexing_replacement_and_bounds_are_checked ... ok
-test reserve_and_try_reserve_execute_through_the_ir ... ok
 test try_reserve_failure_returns_false_and_preserves_list ... ok
+test reserve_and_try_reserve_execute_through_the_ir ... ok
 test try_remove_success_returns_owned_element_and_closes_the_gap ... ok
 test text_element_can_be_loaned_but_not_bound_as_owned ... ok
 
@@ -284,9 +284,9 @@ test empty_list_can_be_created_and_transferred_to_a_consuming_parameter ... ok
 test direct_managed_entity_field_push_updates_the_field ... ok
 test consuming_parameter_returns_the_same_owned_list ... ok
 test direct_managed_struct_field_remove_updates_the_field ... ok
-test empty_text_reports_is_empty ... ok
-test list_push_increases_length ... ok
 test empty_list_length_is_zero ... ok
+test list_push_increases_length ... ok
+test empty_text_reports_is_empty ... ok
 test list_copy_is_independent_from_the_source ... ok
 test list_remove_reports_bounds_fault ... ok
 test list_remove_returns_and_removes_the_element ... ok
@@ -296,21 +296,21 @@ test loaned_text_projection_can_be_concatenated ... ok
 test loaned_text_projection_can_be_compared ... ok
 test managed_entity_field_can_be_structurally_loaned_to_a_function ... ok
 test managed_struct_field_can_be_loaned_to_a_function ... ok
-test managed_struct_field_can_be_structurally_loaned_to_a_function ... ok
 test managed_struct_field_can_be_constructed_and_read ... ok
+test managed_struct_field_can_be_structurally_loaned_to_a_function ... ok
 test nested_lists_transfer_copy_and_remove ... ok
 test owned_temporary_managed_field_read_is_a_loan ... ok
 test nested_owned_temporary_managed_field_reads_stay_loans ... ok
-test nested_text_lists_copy_independently_and_loan_projected_elements ... ok
 test read_loan_of_heap_text_does_not_allocate_or_copy ... ok
+test nested_text_lists_copy_independently_and_loan_projected_elements ... ok
 test owned_list_results_flow_through_binding_call_push_field_and_return ... ok
-test retirement_during_pending_entity_field_access_is_rejected_before_interpretation ... ok
 test text_concat_is_owned_and_utf8_byte_exact ... ok
 test structural_loan_mutates_the_callers_list ... ok
-test text_equality_is_exact_and_non_normalizing ... ok
+test retirement_during_pending_entity_field_access_is_rejected_before_interpretation ... ok
 test text_copy_and_take_keep_single_home_rules ... ok
-test text_literal_reports_byte_length ... ok
+test text_equality_is_exact_and_non_normalizing ... ok
 test text_equality_matches_inline_and_heap_storage_by_bytes ... ok
+test text_literal_reports_byte_length ... ok
 test two_read_parameters_can_share_one_source_place ... ok
 
 test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s

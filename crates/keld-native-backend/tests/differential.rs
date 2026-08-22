@@ -784,6 +784,26 @@ fn module_surface(module: &Module) -> (BTreeSet<&'static str>, BTreeSet<&'static
 }
 
 #[test]
+fn repeated_loop_concat_allocation_uses_one_static_site_with_three_attempts() {
+    let (_, source) = fixture("control_flow_allocations.keld");
+    let (module, _) = compile_fixture(&source);
+    let (result, events) = interpreter_run(&module, &[]);
+    assert_eq!(result, Observation::Returned(6));
+
+    let concat = events
+        .iter()
+        .filter(|event| event.phase == AllocationPhase::Concat)
+        .collect::<Vec<_>>();
+    assert_eq!(concat.len(), 3, "{events:#?}");
+    let site_id = concat[0].site_id;
+    assert!(concat.iter().all(|event| event.site_id == site_id), "{concat:#?}");
+    assert_eq!(
+        concat.iter().map(|event| event.attempt).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+}
+
+#[test]
 fn every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2() {
     for fixture_name in [
         "cyclic_graph.keld",
@@ -794,6 +814,8 @@ fn every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2() 
         "numeric_edges.keld",
         "runtime_div_zero.keld",
         "runtime_capacity.keld",
+        "control_flow_loop.keld",
+        "control_flow_allocations.keld",
     ] {
         let (path, source) = fixture(fixture_name);
         run_differential_case(fixture_name.trim_end_matches(".keld"), &path, &source);
@@ -810,6 +832,14 @@ fn source_surface_fixtures_extend_the_same_differential_schedule() {
 
 fn source_surface_cases() -> &'static [(&'static str, &'static str)] {
     &[
+        (
+            "control_flow_loop_surface",
+            include_str!("../../keld-cli/tests/fixtures/control_flow_loop.keld"),
+        ),
+        (
+            "control_flow_allocations_surface",
+            include_str!("../../keld-cli/tests/fixtures/control_flow_allocations.keld"),
+        ),
         (
             "text_surface",
             "fn main() -> Int { let value = \"K\" + \"한\"; if value == \"K한\" { if value.is_empty { return 0 } else { return value.byte_length } } else { return 0 } }\n",
@@ -953,6 +983,8 @@ fn every_executable_ir_variant_is_in_a_real_differential_fixture() {
         "numeric_edges.keld",
         "runtime_div_zero.keld",
         "runtime_capacity.keld",
+        "control_flow_loop.keld",
+        "control_flow_allocations.keld",
     ] {
         let (_, source) = fixture(fixture_name);
         let (module, _) = compile_fixture(&source);
