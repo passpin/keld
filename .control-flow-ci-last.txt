@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.75s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
      Running tests/control_flow.rs (target/debug/deps/control_flow-264b8427f90cd9ab)
 
 running 2 tests
@@ -19,7 +19,7 @@ failures:
 
 ---- retirement_on_one_loop_exit_rejects_post_loop_use stdout ----
 
-thread 'retirement_on_one_loop_exit_rejects_post_loop_use' (2739) panicked at crates/keld-lifecycle/tests/control_flow.rs:42:5:
+thread 'retirement_on_one_loop_exit_rejects_post_loop_use' (2929) panicked at crates/keld-lifecycle/tests/control_flow.rs:42:5:
 [
     Diagnostic {
         code: DiagnosticCode(
@@ -49,8 +49,8 @@ thread 'retirement_on_one_loop_exit_rejects_post_loop_use' (2739) panicked at cr
 
 ---- loop_analysis_reaches_entity_operations_and_publishes_facts stdout ----
 
-thread 'loop_analysis_reaches_entity_operations_and_publishes_facts' (2738) panicked at crates/keld-lifecycle/tests/control_flow.rs:33:5:
-test must contain an entity operation
+thread 'loop_analysis_reaches_entity_operations_and_publishes_facts' (2928) panicked at crates/keld-lifecycle/tests/control_flow.rs:20:13:
+entity operation block BlockId(3) must be reachable
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
