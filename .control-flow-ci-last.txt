@@ -11,33 +11,53 @@ info: downloading 5 components
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
    Compiling keld-ir v0.1.0 (/home/runner/work/keld/keld/crates/keld-ir)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.22s
-     Running tests/control_flow.rs (target/debug/deps/control_flow-653fd54a9c37437f)
+error[E0063]: missing field `locals` in initializer of `Function`
+ --> crates/keld-ir/tests/allocation_schedule.rs:9:17
+  |
+9 |     let first = Function {
+  |                 ^^^^^^^^ missing `locals`
 
-running 3 tests
-test validator_still_rejects_duplicate_ssa_definitions ... ok
-test validator_accepts_a_minimal_valid_cycle ... ok
-test source_loop_lowers_to_valid_cyclic_executable_ir ... ok
+error[E0063]: missing field `locals` in initializer of `Function`
+  --> crates/keld-ir/tests/entity_liveness_validation.rs:97:25
+   |
+97 |         functions: vec![Function {
+   |                         ^^^^^^^^ missing `locals`
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error[E0063]: missing field `locals` in initializer of `Function`
+  --> crates/keld-ir/tests/allocation_schedule.rs:38:18
+   |
+38 |     let second = Function {
+   |                  ^^^^^^^^ missing `locals`
 
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates/keld-ir/tests/entity_liveness_validation.rs:153:25
+    |
+153 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates/keld-ir/tests/entity_liveness_validation.rs:240:25
+    |
+240 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `keld-ir` (test "allocation_schedule") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `keld-ir` (test "entity_liveness_validation") due to 3 previous errors
  Downloading crates ...
   Downloaded stats_alloc v0.1.10
    Compiling keld-runtime v0.1.0 (/home/runner/work/keld/keld/crates/keld-runtime)
    Compiling stats_alloc v0.1.10
    Compiling keld-interpreter v0.1.0 (/home/runner/work/keld/keld/crates/keld-interpreter)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.37s
-     Running tests/control_flow.rs (target/debug/deps/control_flow-be5f502e8575b564)
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates/keld-interpreter/tests/allocation_faults.rs:132:25
+    |
+132 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
 
-running 6 tests
-test explicit_iteration_lifecycle_exits_before_the_next_iteration ... ok
-test repeated_managed_allocation_fixture_executes_to_six ... ok
-test break_and_continue_fixture_executes_to_eight ... ok
-test zero_iteration_loop_skips_its_body ... ok
-test nested_break_and_continue_target_the_innermost_loop ... ok
-test while_condition_is_re_evaluated_after_each_backedge ... ok
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `keld-interpreter` (test "allocation_faults") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
 
-test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-exit_status=0
+exit_status=101
