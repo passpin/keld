@@ -68,139 +68,155 @@ llvm-config=22.1.8
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 3.93s
+    Finished `release` profile [optimized] target(s) in 4.15s
  Downloading crates ...
-  Downloaded regex-lite v0.1.9
   Downloaded shlex v2.0.1
+  Downloaded anyhow v1.0.104
   Downloaded lazy_static v1.5.0
   Downloaded semver v1.0.28
-  Downloaded anyhow v1.0.104
   Downloaded find-msvc-tools v0.1.10
   Downloaded llvm-sys v221.0.1
+  Downloaded regex-lite v0.1.9
   Downloaded cc v1.4.2
   Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
    Compiling anyhow v1.0.104
    Compiling find-msvc-tools v0.1.10
-   Compiling shlex v2.0.1
    Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
-   Compiling cc v1.4.2
+   Compiling shlex v2.0.1
    Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
-   Compiling regex-lite v0.1.9
+   Compiling cc v1.4.2
    Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
    Compiling semver v1.0.28
-   Compiling libc v0.2.189
    Compiling lazy_static v1.5.0
+   Compiling regex-lite v0.1.9
+   Compiling libc v0.2.189
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
-   Compiling llvm-sys v221.0.1
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
+   Compiling llvm-sys v221.0.1
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-error[E0063]: missing field `locals` in initializer of `Function`
-  --> crates\keld-native-backend\tests\native_int.rs:24:25
-   |
-24 |         functions: vec![Function {
-   |                         ^^^^^^^^ missing `locals`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.03s
+     Running tests\native_int.rs (target\x86_64-pc-windows-gnu\debug\deps\native_int-bd1993c1a563592e.exe)
 
-error[E0063]: missing field `locals` in initializer of `Function`
-  --> crates\keld-native-backend\tests\native_int.rs:54:25
-   |
-54 |         functions: vec![Function {
-   |                         ^^^^^^^^ missing `locals`
+running 25 tests
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:266:25
-    |
-266 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'direct_list_operations_run_natively' (2008) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:361:25
-    |
-361 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'entity_allocation_links_views_and_retirement_run_natively' (4180) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:483:25
-    |
-483 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'builds_and_runs_a_const_int_program' (8712) panicked at crates\keld-native-backend\tests\native_int.rs:972:5:
+build keld-native-ffi first: "D:\\a\\keld\\keld\\target/x86_64-pc-windows-gnu/release\\keld_runtime_v1.dll"
+test builds_and_runs_a_const_int_program ... FAILED
+test direct_list_operations_run_natively ... FAILED
+test entity_allocation_links_views_and_retirement_run_natively ... FAILED
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:590:25
-    |
-590 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected' (6856) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:692:25
-    |
-692 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'invalid_runtime_dll_is_rejected_before_link' (8880) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test invalid_ir_is_rejected_before_toolchain_access ... ok
+test invalid_runtime_dll_is_rejected_before_link ... FAILED
+test import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected ... FAILED
 
-error[E0063]: missing field `locals` in initializer of `Function`
-   --> crates\keld-native-backend\tests\native_int.rs:781:25
-    |
-781 |         functions: vec![Function {
-    |                         ^^^^^^^^ missing `locals`
+thread 'lowers_scalar_cfg_and_phi_at_both_optimization_levels' (6824) panicked at crates\keld-native-backend\tests\native_int.rs:1194:5:
+build keld-native-ffi first: "D:\\a\\keld\\keld\\target/x86_64-pc-windows-gnu/release\\keld_runtime_v1.dll"
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2177:20
-     |
-2177 |     let identity = Function {
-     |                    ^^^^^^^^ missing `locals`
+thread 'managed_call_modes_transfer_and_mutate_the_encoded_argument' (4988) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2191:16
-     |
-2191 |     let main = Function {
-     |                ^^^^^^^^ missing `locals`
+thread 'managed_phi_transfers_the_selected_envelope_at_both_optimization_levels' (8264) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test managed_call_modes_transfer_and_mutate_the_encoded_argument ... FAILED
+test managed_phi_transfers_the_selected_envelope_at_both_optimization_levels ... FAILED
+test lowers_scalar_cfg_and_phi_at_both_optimization_levels ... FAILED
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2238:16
-     |
-2238 |     let unit = Function {
-     |                ^^^^^^^^ missing `locals`
+thread 'mixed_runtime_import_heads_are_rejected' (4488) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2252:16
-     |
-2252 |     let main = Function {
-     |                ^^^^^^^^ missing `locals`
+thread 'mixed_runtime_short_imports_are_rejected' (3332) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test mixed_runtime_import_heads_are_rejected ... FAILED
+test mixed_runtime_short_imports_are_rejected ... FAILED
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2305:18
-     |
-2305 |     let callee = Function {
-     |                  ^^^^^^^^ missing `locals`
+thread 'ordinary_coff_runtime_symbol_override_is_rejected' (6880) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2339:16
-     |
-2339 |     let main = Function {
-     |                ^^^^^^^^ missing `locals`
+thread 'projected_list_receiver_runs_natively_at_both_optimization_levels' (5380) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test projected_list_receiver_runs_natively_at_both_optimization_levels ... FAILED
+test ordinary_coff_runtime_symbol_override_is_rejected ... FAILED
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2391:18
-     |
-2391 |     let callee = Function {
-     |                  ^^^^^^^^ missing `locals`
+thread 'reverse_order_phi_after_checked_predecessor_runs_at_both_optimization_levels' (2796) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
 
-error[E0063]: missing field `locals` in initializer of `Function`
-    --> crates\keld-native-backend\tests\native_int.rs:2427:16
-     |
-2427 |     let main = Function {
-     |                ^^^^^^^^ missing `locals`
+thread 'scalar_callee_fault_keeps_the_callee_location' (7792) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test scalar_callee_fault_keeps_the_callee_location ... FAILED
+test reverse_order_phi_after_checked_predecessor_runs_at_both_optimization_levels ... FAILED
 
-For more information about this error, try `rustc --explain E0063`.
-error: could not compile `keld-native-backend` (test "native_int") due to 16 previous errors
+thread 'scalar_calls_cover_owned_results_unit_calls_and_callee_faults' (8028) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+
+thread 'scalar_faults_preserve_kind_span_and_unreachable_is_internal' (8372) panicked at crates\keld-native-backend\tests\native_int.rs:1771:5:
+build keld-native-ffi first: "D:\\a\\keld\\keld\\target/x86_64-pc-windows-gnu/release\\keld_runtime_v1.dll"
+test scalar_faults_preserve_kind_span_and_unreachable_is_internal ... FAILED
+test scalar_calls_cover_owned_results_unit_calls_and_callee_faults ... FAILED
+
+thread 'scalar_numeric_operations_match_checked_interpreter_boundaries' (6908) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+
+thread 'struct_construction_and_managed_field_copy_run_natively' (6916) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test struct_construction_and_managed_field_copy_run_natively ... FAILED
+test scalar_numeric_operations_match_checked_interpreter_boundaries ... FAILED
+test native_program_rejects_runtime_abi_version_mismatch ... ok
+test test_runtime_list_preferred_growth_failure_retries_exact_capacity ... ok
+
+thread 'text_literals_copy_concat_and_queries_run_natively' (1132) panicked at crates\keld-native-backend\tests\native_int.rs:139:5:
+build keld-native-ffi first: D:\a\keld\keld\target/x86_64-pc-windows-gnu/release/keld_runtime_v1.dll
+test text_literals_copy_concat_and_queries_run_natively ... FAILED
+test frozen_site_schedule_controls_native_at_the_same_site_as_interpreter ... ok
+test test_runtime_reports_context_allocation_at_main_span ... ok
+test test_runtime_allocation_controls_report_faults_at_the_current_instruction ... ok
+
+failures:
+
+failures:
+    builds_and_runs_a_const_int_program
+    direct_list_operations_run_natively
+    entity_allocation_links_views_and_retirement_run_natively
+    import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected
+    invalid_runtime_dll_is_rejected_before_link
+    lowers_scalar_cfg_and_phi_at_both_optimization_levels
+    managed_call_modes_transfer_and_mutate_the_encoded_argument
+    managed_phi_transfers_the_selected_envelope_at_both_optimization_levels
+    mixed_runtime_import_heads_are_rejected
+    mixed_runtime_short_imports_are_rejected
+    ordinary_coff_runtime_symbol_override_is_rejected
+    projected_list_receiver_runs_natively_at_both_optimization_levels
+    reverse_order_phi_after_checked_predecessor_runs_at_both_optimization_levels
+    scalar_callee_fault_keeps_the_callee_location
+    scalar_calls_cover_owned_results_unit_calls_and_callee_faults
+    scalar_faults_preserve_kind_span_and_unreachable_is_internal
+    scalar_numeric_operations_match_checked_interpreter_boundaries
+    struct_construction_and_managed_field_copy_run_natively
+    text_literals_copy_concat_and_queries_run_natively
+
+test result: FAILED. 6 passed; 19 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s
+
+error: test failed, to rerun pass `-p keld-native-backend --test native_int`
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.63s
      Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
 
 running 7 tests
@@ -212,7 +228,7 @@ test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
 test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
 test source_surface_fixtures_extend_the_same_differential_schedule ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.56s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.28s
 
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
