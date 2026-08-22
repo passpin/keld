@@ -1,3 +1,6 @@
-match feature diagnostic now points at the match keyword span
+Traceback (most recent call last):
+  File "D:\a\keld\keld\.control-flow-apply.py", line 127, in <module>
+    raise RuntimeError("text_surface insertion point changed")
+RuntimeError: text_surface insertion point changed
 
-exit_status=0
+exit_status=1
