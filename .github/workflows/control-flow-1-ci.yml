@@ -24,7 +24,7 @@ jobs:
           fi
 
           set +e
-          git apply --index --verbose .control-flow-apply.patch > .control-flow-patch-last.txt 2>&1
+          git apply --index --verbose --recount .control-flow-apply.patch > .control-flow-patch-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-patch-last.txt
