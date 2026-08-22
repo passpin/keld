@@ -1,0 +1,282 @@
+diff --git a/crates/keld-semantics/src/features.rs b/crates/keld-semantics/src/features.rs
+--- a/crates/keld-semantics/src/features.rs
++++ b/crates/keld-semantics/src/features.rs
+@@ -31,9 +31,6 @@ fn unsupported_feature<'a>(
+         SyntaxKind::EnumDecl => Some("enum"),
+         SyntaxKind::ExternFunctionDecl => Some("extern"),
+         SyntaxKind::TypeParameterList => Some("generic"),
+-        SyntaxKind::WhileStmt => Some("while"),
+-        SyntaxKind::BreakStmt => Some("break"),
+-        SyntaxKind::ContinueStmt => Some("continue"),
+         SyntaxKind::MatchExpr => Some("match"),
+         SyntaxKind::RaisesClause => Some("raises"),
+         SyntaxKind::TryStmt => Some("try"),
+diff --git a/crates/keld-semantics/src/hir.rs b/crates/keld-semantics/src/hir.rs
+--- a/crates/keld-semantics/src/hir.rs
++++ b/crates/keld-semantics/src/hir.rs
+@@ -77,6 +77,12 @@ pub struct HirIf {
+     pub else_block: Option<HirBlock>,
+ }
+ 
++#[derive(Clone, Debug)]
++pub struct HirWhile {
++    pub condition: HirExpr,
++    pub body: HirBlock,
++}
++
+ #[derive(Clone, Debug)]
+ pub struct HirWhen {
+     pub link: HirExpr,
+@@ -201,6 +207,9 @@ pub enum HirStmtKind {
+     },
+     Expr(HirExpr),
+     If(HirIf),
++    While(HirWhile),
++    Break,
++    Continue,
+     When(HirWhen),
+     Lifecycle(HirLifecycle),
+     Keep {
+diff --git a/crates/keld-semantics/src/check.rs b/crates/keld-semantics/src/check.rs
+--- a/crates/keld-semantics/src/check.rs
++++ b/crates/keld-semantics/src/check.rs
+@@ -4,8 +4,8 @@ use crate::symbols::{FunctionSignature, RetirementSignature};
+ use crate::{
+     BindingMutability, CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp,
+     HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle, HirLifecycleId, HirPlace,
+-    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, ParameterIndex, TypeId, TypeKind,
+-    TypeStore,
++    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, HirWhile, LocalId, ParameterIndex, TypeId,
++    TypeKind, TypeStore,
+ };
+@@ -21,6 +21,7 @@ const CONDITION_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0107");
+ const FEATURE_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0004");
+ const RETURN_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0111");
++const LOOP_CONTROL_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0112");
+ const CONSTANT_FAULT_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0120");
+ const INTEGER_RANGE_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0121");
+@@ -49,6 +50,7 @@ struct BodyChecker<'analyzer, 'source, 'syntax> {
+     local_types: Vec<TypeId>,
+     local_mutability: Vec<BindingMutability>,
+     suppressed_constant_faults: u16,
++    loop_depth: usize,
+ }
+@@ -78,6 +80,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
+             local_types,
+             local_mutability: vec![BindingMutability::Let; signature.parameters.len()],
+             suppressed_constant_faults: 0,
++            loop_depth: 0,
+         }
+     }
+@@ -94,7 +97,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
+             },
+             |node| self.check_block(node, &mut environment),
+         );
+-        let definitely_returns = body_node.is_some_and(block_definitely_returns);
++        let definitely_returns = block_definitely_returns(&body);
+         if self.signature.return_type != TypeStore::UNIT && !definitely_returns {
+@@ -211,6 +214,25 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
+                 HirStmtKind::Expr(checked.hir)
+             }),
+             SyntaxKind::IfStmt => Some(self.check_if(node, environment)),
++            SyntaxKind::WhileStmt => Some(self.check_while(node, environment)),
++            SyntaxKind::BreakStmt => {
++                if self.loop_depth == 0 {
++                    self.error(
++                        LOOP_CONTROL_DIAGNOSTIC,
++                        node.span,
++                        "`break` is only valid inside a while loop".to_owned(),
++                    );
++                }
++                Some(HirStmtKind::Break)
++            }
++            SyntaxKind::ContinueStmt => {
++                if self.loop_depth == 0 {
++                    self.error(
++                        LOOP_CONTROL_DIAGNOSTIC,
++                        node.span,
++                        "`continue` is only valid inside a while loop".to_owned(),
++                    );
++                }
++                Some(HirStmtKind::Continue)
++            }
+             SyntaxKind::WhenStmt => Some(self.check_when(node, environment)),
+             SyntaxKind::LifecycleStmt => Some(self.check_lifecycle(node, environment)),
+@@ -362,6 +384,39 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
+         HirStmtKind::Return(Some(checked.hir))
+     }
+ 
++    fn check_while(&mut self, node: &SyntaxNode, environment: &Environment) -> HirStmtKind {
++        let condition = if let Some(expression) = expression_child(node) {
++            let checked = self.check_expression(expression, None, &mut environment.clone());
++            if checked.hir.ty != TypeStore::BOOL && checked.hir.ty != TypeStore::ERROR {
++                self.error(
++                    CONDITION_DIAGNOSTIC,
++                    expression.span,
++                    "while condition must have type Bool".to_owned(),
++                );
++            }
++            checked.hir
++        } else {
++            Self::error_expression(node.span)
++        };
++
++        let body = if let Some(block) = direct_child(node, SyntaxKind::Block) {
++            self.loop_depth = self.loop_depth.saturating_add(1);
++            let body = self.check_block(block, &mut environment.clone());
++            self.loop_depth = self.loop_depth.saturating_sub(1);
++            body
++        } else {
++            HirBlock {
++                statements: Vec::new(),
++                span: node.span,
++            }
++        };
++
++        HirStmtKind::While(HirWhile { condition, body })
++    }
++
+     fn check_if(&mut self, node: &SyntaxNode, environment: &Environment) -> HirStmtKind {
+@@ -1647,6 +1702,12 @@ fn collect_block_calls(block: &HirBlock, calls: &mut BTreeSet<FunctionId>) {
+                     collect_block_calls(block, calls);
+                 }
+             }
++            HirStmtKind::While(value) => {
++                collect_expr_calls(&value.condition, calls);
++                collect_block_calls(&value.body, calls);
++            }
++            HirStmtKind::Break | HirStmtKind::Continue => {}
+             HirStmtKind::When(value) => {
+                 collect_expr_calls(&value.link, calls);
+@@ -1868,12 +1929,12 @@ fn decode_string_literal(text: &str) -> Option<String> {
+     Some(output)
+ }
+ 
+-fn block_definitely_returns(block: &SyntaxNode) -> bool {
++fn block_definitely_returns(block: &HirBlock) -> bool {
+     block
+-        .child_nodes()
+-        .filter(|child| is_statement(child.kind))
++        .statements
++        .iter()
+         .any(statement_definitely_returns)
+ }
+ 
+-fn statement_definitely_returns(statement: &SyntaxNode) -> bool {
+-    match statement.kind {
+-        SyntaxKind::ReturnStmt => true,
+-        SyntaxKind::LifecycleStmt => {
+-            direct_child(statement, SyntaxKind::Block).is_some_and(block_definitely_returns)
+-        }
+-        SyntaxKind::IfStmt => {
+-            let expressions = statement
+-                .child_nodes()
+-                .filter(|child| is_expression(child.kind))
+-                .count();
+-            let blocks = statement
+-                .child_nodes()
+-                .filter(|child| child.kind == SyntaxKind::Block)
+-                .collect::<Vec<_>>();
+-            blocks.len() > expressions && blocks.iter().all(|block| block_definitely_returns(block))
+-        }
+-        SyntaxKind::WhenStmt => {
+-            let blocks = statement
+-                .child_nodes()
+-                .filter(|child| child.kind == SyntaxKind::Block)
+-                .collect::<Vec<_>>();
+-            blocks.len() == 2 && blocks.iter().all(|block| block_definitely_returns(block))
+-        }
++fn statement_definitely_returns(statement: &HirStmt) -> bool {
++    match &statement.kind {
++        HirStmtKind::Return(_) => true,
++        HirStmtKind::Lifecycle(value) => block_definitely_returns(&value.body),
++        HirStmtKind::If(value) => {
++            block_definitely_returns(&value.then_block)
++                && value
++                    .else_block
++                    .as_ref()
++                    .is_some_and(block_definitely_returns)
++        }
++        HirStmtKind::When(value) => {
++            block_definitely_returns(&value.live)
++                && value.absent.as_ref().is_some_and(block_definitely_returns)
++        }
++        HirStmtKind::While(value) => {
++            matches!(value.condition.kind, HirExprKind::Bool(true))
++                && !block_has_break_for_current_loop(&value.body)
++        }
+         _ => false,
+     }
+ }
++
++fn block_has_break_for_current_loop(block: &HirBlock) -> bool {
++    block.statements.iter().any(|statement| match &statement.kind {
++        HirStmtKind::Break => true,
++        HirStmtKind::While(_) => false,
++        HirStmtKind::If(value) => {
++            block_has_break_for_current_loop(&value.then_block)
++                || value
++                    .else_block
++                    .as_ref()
++                    .is_some_and(block_has_break_for_current_loop)
++        }
++        HirStmtKind::When(value) => {
++            block_has_break_for_current_loop(&value.live)
++                || value
++                    .absent
++                    .as_ref()
++                    .is_some_and(block_has_break_for_current_loop)
++        }
++        HirStmtKind::Lifecycle(value) => block_has_break_for_current_loop(&value.body),
++        _ => false,
++    })
++}
+diff --git a/crates/keld-semantics/tests/feature_gate.rs b/crates/keld-semantics/tests/feature_gate.rs
+--- a/crates/keld-semantics/tests/feature_gate.rs
++++ b/crates/keld-semantics/tests/feature_gate.rs
+@@ -27,11 +27,6 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
+     let cases = [
+         ("use game.io\nfn main() -> Int { return 0 }\n", "use"),
+         ("enum E { A }\nfn main() -> Int { return 0 }\n", "enum"),
+-        (
+-            "fn main() -> Int { while true { break }; return 0 }\n",
+-            "while",
+-        ),
+-        ("fn main() -> Int { break; return 0 }\n", "break"),
+-        ("fn main() -> Int { continue; return 0 }\n", "continue"),
+         ("fn main() -> Int { match 0 { _ => 0 } }\n", "match"),
+         (
+@@ -72,15 +67,20 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
+ }
+ 
+ #[test]
+ fn outer_unsupported_construct_suppresses_child_feature_cascades() {
+-    let analysis = analyze_text("fn main() -> Int { while true { var x = 0; break }; return 0 }\n");
++    let analysis = analyze_text(
++        "fn main() -> Int { try { try { return 0 } handle Error as inner { return 0 } } handle Error as outer { return 0 } }\n",
++    );
+     let feature_diagnostics = analysis
+         .diagnostics
+         .iter()
+         .filter(|diagnostic| diagnostic.code.0 == "KLD0004")
+         .collect::<Vec<_>>();
+ 
+     assert_eq!(feature_diagnostics.len(), 1, "{:#?}", analysis.diagnostics);
+-    assert!(feature_diagnostics[0].primary.message.contains("while"));
++    assert!(feature_diagnostics[0].primary.message.contains("try"));
+ }
+diff --git a/crates/keld-semantics/tests/control_flow_semantics.rs b/crates/keld-semantics/tests/control_flow_semantics.rs
+--- a/crates/keld-semantics/tests/control_flow_semantics.rs
++++ b/crates/keld-semantics/tests/control_flow_semantics.rs
+@@ -67,10 +67,10 @@ fn while_is_preserved_in_typed_hir() {
+         panic!("expected while HIR, got {:#?}", while_statement.kind);
+     };
+     assert_eq!(while_.condition.ty, TypeStore::BOOL);
+-    assert!(matches!(while_.condition.kind, HirExprKind::Binary { .. }));
++    assert!(matches!(&while_.condition.kind, HirExprKind::Binary { .. }));
+     assert!(matches!(
+-        while_.body.statements[0].kind,
++        &while_.body.statements[0].kind,
+         HirStmtKind::CompoundAssign { .. }
+     ));
+ }
