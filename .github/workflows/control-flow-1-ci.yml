@@ -14,17 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply queued patch and record failure
+      - name: Apply queued edit and record failure
         id: patch
         shell: bash
         run: |
-          if [ ! -f .control-flow-apply.patch ]; then
+          if [ ! -f .control-flow-apply.py ]; then
             echo "applied=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           set +e
-          git apply --index --verbose --recount .control-flow-apply.patch > .control-flow-patch-last.txt 2>&1
+          python3 .control-flow-apply.py > .control-flow-patch-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-patch-last.txt
@@ -33,12 +33,15 @@ jobs:
             git add .control-flow-patch-last.txt
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "ci: record Control Flow-1 patch failure [skip ci]"
+            git commit -m "ci: record Control Flow-1 edit failure [skip ci]"
             git push
             exit "$status"
           fi
 
-          git rm .control-flow-apply.patch
+          git rm .control-flow-apply.py
+          if [ -f .control-flow-apply.patch ]; then
+            git rm .control-flow-apply.patch
+          fi
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
       - name: Run semantics tests and record result
