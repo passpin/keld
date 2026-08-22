@@ -111,3 +111,13 @@ fn direct_break_makes_true_loop_may_fallthrough() {
         analysis.diagnostics
     );
 }
+
+#[test]
+fn recursion_hidden_inside_loop_is_still_deferred() {
+    let analysis = analyze_text(
+        "fn recurse(flag: Bool) -> Int { while flag { return recurse(flag) }; return 0 }\nfn main() -> Int { return 0 }\n",
+    );
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code.0 == "KLD0004" && diagnostic.primary.message.contains("recursive")
+    }), "{:#?}", analysis.diagnostics);
+}
