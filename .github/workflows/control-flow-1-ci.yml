@@ -41,11 +41,11 @@ jobs:
           git rm .control-flow-apply.py
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run Task 2 Flow RED/GREEN gate
+      - name: Run Task 2 full Flow gate
         shell: bash
         run: |
           set +e
-          cargo test -p keld-flow --test control_flow --test storage_scopes > .control-flow-ci-last.txt 2>&1
+          cargo test -p keld-flow > .control-flow-ci-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-ci-last.txt
