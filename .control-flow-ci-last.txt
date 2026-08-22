@@ -8,7 +8,23 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.33s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.43s
+     Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/alias_refinement.rs (target/debug/deps/alias_refinement-d93f25fb9d4a9b2a)
+
+running 4 tests
+test copying_a_reference_preserves_must_alias_provenance ... ok
+test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
+test identity_inequality_refines_the_valid_branch ... ok
+test identity_equality_refines_to_must_alias ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
      Running tests/control_flow.rs (target/debug/deps/control_flow-264b8427f90cd9ab)
 
 running 2 tests
@@ -16,6 +32,48 @@ test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
 test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/effects.rs (target/debug/deps/effects-5879779b632aa910)
+
+running 5 tests
+test exact_declared_retirement_matches_inferred_behavior ... ok
+test broad_retirement_propagates_through_calls ... ok
+test entrypoint_applies_broad_liveness_barriers_without_declaring_public_effects ... ok
+test undeclared_and_redundant_retirement_effects_are_rejected ... ok
+test parameter_and_fresh_return_provenance_are_summarized ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle_order.rs (target/debug/deps/lifecycle_order-23aa07c280287d71)
+
+running 3 tests
+test keep_rejects_dynamic_parameter_lifecycle ... ok
+test keep_requires_a_strict_ancestor_not_the_same_lifecycle ... ok
+test keep_moves_a_known_inner_entity_to_an_active_ancestor ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/links_and_escape.rs (target/debug/deps/links_and_escape-5872168d1fcdff15)
+
+running 5 tests
+test persistent_direct_reference_field_requires_a_link ... ok
+test resolved_link_reference_cannot_escape_its_when_scope ... ok
+test every_entity_operation_receives_a_proof_annotation ... ok
+test unchecked_link_read_requires_when_resolution ... ok
+test value_struct_direct_reference_field_also_requires_a_link ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/provenance_facts.rs (target/debug/deps/provenance_facts-13d60d03dc414bbb)
+
+running 5 tests
+test copied_entity_locals_publish_must_alias_parameter_origins ... ok
+test fresh_same_type_allocations_publish_must_distinct_origins ... ok
+test inequality_branch_publishes_must_distinct_parameters ... ok
+test retirement_summaries_remain_exact_and_broad ... ok
+test unrefined_same_type_parameters_publish_may_alias ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/retirement.rs (target/debug/deps/retirement-3a6a827e14dbfa96)
 
@@ -26,6 +84,64 @@ test retiring_one_may_alias_invalidates_the_other_parameter ... ok
 test retirement_on_only_one_path_rejects_the_joined_use ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keld_lifecycle
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/control_flow.rs (target/debug/deps/control_flow-4631168b95e5fac0)
+
+running 7 tests
+test explicit_lifecycles_have_distinct_parented_ids ... ok
+test direct_entity_identity_condition_uses_branch_identity ... ok
+test nested_loop_control_targets_the_innermost_loop ... ok
+test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
+test while_lowers_to_condition_scope_branch_and_back_edge ... ok
+test when_resolves_link_into_live_and_absent_blocks ... ok
+test stable_dump_contains_no_host_addresses_or_debug_format ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/evaluation_order.rs (target/debug/deps/evaluation_order-4719371b9af8e836)
+
+running 10 tests
+test call_arguments_are_materialized_left_to_right ... ok
+test assignment_materializes_identity_then_rhs_then_writes ... ok
+test boolean_operators_use_control_flow_and_one_phi ... ok
+test compound_assignment_reads_old_value_before_rhs ... ok
+test indexed_replacement_materializes_target_before_rhs ... ok
+test nested_index_projections_preserve_index_evaluation_order ... ok
+test constructor_field_ids_do_not_reorder_source_evaluation ... ok
+test nested_remove_is_complete_before_outer_push ... ok
+test take_lowers_to_an_explicit_local_transfer ... ok
+test struct_field_replacement_is_not_an_entity_view_write ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_scopes.rs (target/debug/deps/storage_scopes-100cf5075b4b9787)
+
+running 3 tests
+test return_exits_storage_scopes_inside_out ... ok
+test branch_locals_exit_before_the_merge ... ok
+test continue_exits_iteration_storage_and_lifecycle_before_back_edge ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests keld_flow
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 
 exit_status=0
