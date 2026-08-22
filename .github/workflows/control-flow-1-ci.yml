@@ -14,13 +14,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply queued patch
+      - name: Apply queued patch and record failure
+        id: patch
         shell: bash
         run: |
-          if [ -f .control-flow-apply.patch ]; then
-            git apply --index .control-flow-apply.patch
-            git rm .control-flow-apply.patch
+          if [ ! -f .control-flow-apply.patch ]; then
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          set +e
+          git apply --index --verbose .control-flow-apply.patch > .control-flow-patch-last.txt 2>&1
+          status=$?
+          set -e
+          printf '\nexit_status=%s\n' "$status" >> .control-flow-patch-last.txt
+
+          if [ "$status" -ne 0 ]; then
+            git add .control-flow-patch-last.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "ci: record Control Flow-1 patch failure [skip ci]"
+            git push
+            exit "$status"
+          fi
+
+          git rm .control-flow-apply.patch
+          echo "applied=true" >> "$GITHUB_OUTPUT"
 
       - name: Run semantics tests and record result
         shell: bash
@@ -35,7 +54,11 @@ jobs:
           if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "ci: record Control Flow-1 verification [skip ci]"
+            if [ "${{ steps.patch.outputs.applied }}" = "true" ]; then
+              git commit -m "feat(semantics): type check while control flow [skip ci]"
+            else
+              git commit -m "ci: record Control Flow-1 verification [skip ci]"
+            fi
             git push
           fi
 
