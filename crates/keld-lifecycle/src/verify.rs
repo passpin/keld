@@ -306,6 +306,14 @@ impl Analyzer<'_> {
         let mut incoming = vec![None; block_count];
         incoming[self.function.entry.0 as usize] = Some(self.initial_state());
 
+        let mut predecessors = vec![Vec::<BlockId>::new(); block_count];
+        for block in &self.function.blocks {
+            for successor in successors(&block.terminator) {
+                predecessors[successor.0 as usize].push(block.id);
+            }
+        }
+        let mut edge_states = BTreeMap::<(BlockId, BlockId), AbstractState>::new();
+
         let mut queue = VecDeque::from([self.function.entry]);
         let mut queued = vec![false; block_count];
         queued[self.function.entry.0 as usize] = true;
@@ -323,24 +331,59 @@ impl Analyzer<'_> {
                 self.operation(block_id, index, operation, &mut state);
             }
 
+            let mut produced = BTreeMap::<BlockId, Vec<AbstractState>>::new();
             for (successor, successor_state) in
                 self.terminator(block_id, &block.terminator, state)
             {
-                let successor_index = successor.0 as usize;
-                let next_state = match incoming[successor_index].as_ref() {
-                    None => Some(successor_state),
-                    Some(existing) => {
-                        let joined = self.join_at(
-                            successor,
-                            &[existing.clone(), successor_state],
-                        );
-                        (joined != *existing).then_some(joined)
+                produced
+                    .entry(successor)
+                    .or_default()
+                    .push(successor_state);
+            }
+
+            for successor in successors(&block.terminator) {
+                let key = (block_id, successor);
+                let next_edge = produced.remove(&successor).map(|states| {
+                    if states.len() == 1 {
+                        states.into_iter().next().expect("one edge state")
+                    } else {
+                        self.join_at(successor, &states)
                     }
+                });
+                let edge_changed = match next_edge {
+                    Some(next_edge) => {
+                        if edge_states.get(&key) == Some(&next_edge) {
+                            false
+                        } else {
+                            edge_states.insert(key, next_edge);
+                            true
+                        }
+                    }
+                    None => edge_states.remove(&key).is_some(),
                 };
-                let Some(next_state) = next_state else {
+                if !edge_changed {
                     continue;
+                }
+
+                let successor_index = successor.0 as usize;
+                let mut states = predecessors[successor_index]
+                    .iter()
+                    .filter_map(|predecessor| {
+                        edge_states.get(&(*predecessor, successor)).cloned()
+                    })
+                    .collect::<Vec<_>>();
+                if successor == self.function.entry {
+                    states.push(self.initial_state());
+                }
+                let next_incoming = match states.len() {
+                    0 => None,
+                    1 => states.into_iter().next(),
+                    _ => Some(self.join_at(successor, &states)),
                 };
-                incoming[successor_index] = Some(next_state);
+                if incoming[successor_index] == next_incoming {
+                    continue;
+                }
+                incoming[successor_index] = next_incoming;
                 if !queued[successor_index] {
                     queue.push_back(successor);
                     queued[successor_index] = true;

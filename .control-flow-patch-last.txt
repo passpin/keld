@@ -1,4 +1,3 @@
-updated lifecycle verifier with bounded merge provenance
-updated abstract-state merge helper
+recomputed successor inputs from current CFG edge states
 
 exit_status=0
