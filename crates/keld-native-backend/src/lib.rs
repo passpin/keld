@@ -699,7 +699,12 @@ fn validate_runtime_import_member(
         Ok(None) => {}
     }
     if coff_section_data(member, b".idata$6").is_none() {
-        return true;
+        let Some(runtime_symbols) = coff_symbols_matching(member, |name, _section| {
+            name.starts_with(b"keld_rt_v1_") || name.starts_with(b"__imp_keld_rt_v1_")
+        }) else {
+            return true;
+        };
+        return runtime_symbols.is_empty();
     }
     let Some(import_name) = coff_import_symbol(member) else {
         return false;
