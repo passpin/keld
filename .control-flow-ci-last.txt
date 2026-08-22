@@ -8,58 +8,24 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.33s
      Running tests/control_flow.rs (target/debug/deps/control_flow-264b8427f90cd9ab)
 
 running 2 tests
-test retirement_on_one_loop_exit_rejects_post_loop_use ... FAILED
-test loop_analysis_reaches_entity_operations_and_publishes_facts ... FAILED
+test loop_analysis_reaches_entity_operations_and_publishes_facts ... ok
+test retirement_on_one_loop_exit_rejects_post_loop_use ... ok
 
-failures:
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
----- retirement_on_one_loop_exit_rejects_post_loop_use stdout ----
+     Running tests/retirement.rs (target/debug/deps/retirement-3a6a827e14dbfa96)
 
-thread 'retirement_on_one_loop_exit_rejects_post_loop_use' (2929) panicked at crates/keld-lifecycle/tests/control_flow.rs:42:5:
-[
-    Diagnostic {
-        code: DiagnosticCode(
-            "KLD1009",
-        ),
-        severity: Error,
-        primary: Label {
-            span: Span {
-                source: SourceId(
-                    0,
-                ),
-                start: BytePos(
-                    78,
-                ),
-                end: BytePos(
-                    80,
-                ),
-            },
-            message: "declared parameter retirement does not occur",
-        },
-        secondary: [],
-        help: Some(
-            "remove the redundant parameter from the `retires` clause",
-        ),
-    },
-]
+running 4 tests
+test distinct_allocations_survive_exact_retirement ... ok
+test retiring_a_must_alias_makes_both_names_retired ... ok
+test retiring_one_may_alias_invalidates_the_other_parameter ... ok
+test retirement_on_only_one_path_rejects_the_joined_use ... ok
 
----- loop_analysis_reaches_entity_operations_and_publishes_facts stdout ----
-
-thread 'loop_analysis_reaches_entity_operations_and_publishes_facts' (2928) panicked at crates/keld-lifecycle/tests/control_flow.rs:20:13:
-entity operation block BlockId(3) must be reachable
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 
-failures:
-    loop_analysis_reaches_entity_operations_and_publishes_facts
-    retirement_on_one_loop_exit_rejects_post_loop_use
-
-test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-error: test failed, to rerun pass `-p keld-lifecycle --test control_flow`
-
-exit_status=101
+exit_status=0

@@ -214,64 +214,99 @@ struct Analyzer<'module> {
 
 impl Analyzer<'_> {
     fn run(&mut self) {
-        let reachable = reachable_blocks(self.function);
-        let mut indegree = vec![0_usize; self.function.blocks.len()];
-        for block in &self.function.blocks {
-            if !reachable.contains(&block.id) {
-                continue;
-            }
-            for successor in successors(&block.terminator) {
-                if reachable.contains(&successor) {
-                    indegree[successor.0 as usize] += 1;
-                }
-            }
-        }
+        let replay_diagnostics = self.diagnose;
+        self.diagnose = false;
+        let incoming = self.solve_fixed_point();
+        let solved_inference = self.inference.clone();
 
-        let mut incoming = vec![Vec::<AbstractState>::new(); self.function.blocks.len()];
-        incoming[self.function.entry.0 as usize].push(self.initial_state());
-        let mut queue = VecDeque::from([self.function.entry]);
-        while let Some(block_id) = queue.pop_front() {
-            let states = &incoming[block_id.0 as usize];
-            if states.is_empty() {
-                self.complete_predecessor(block_id, &mut indegree, &mut queue);
-                continue;
-            }
-            self.reachable_blocks.insert(block_id);
-            let block = &self.function.blocks[block_id.0 as usize];
-            let mut state = AbstractState::join(states, self.function.span);
-            for (index, operation) in block.operations.iter().enumerate() {
-                let index = u32::try_from(index).expect("flow operation index fits in u32");
-                if self.diagnose {
-                    let previous = self
-                        .entity_facts
-                        .insert((block_id, index), EntityOperationFacts::project(&state));
-                    debug_assert!(previous.is_none(), "operation facts are recorded once");
-                }
-                self.operation(block_id, index, operation, &mut state);
-            }
-            for (successor, successor_state) in self.terminator(block_id, &block.terminator, state)
-            {
-                if !reachable.contains(&successor) {
-                    continue;
-                }
-                incoming[successor.0 as usize].push(successor_state);
-            }
-            self.complete_predecessor(block_id, &mut indegree, &mut queue);
+        self.reachable_blocks = incoming
+            .iter()
+            .enumerate()
+            .filter_map(|(index, state)| {
+                state.as_ref().map(|_| {
+                    BlockId(u32::try_from(index).expect("flow block index fits in u32"))
+                })
+            })
+            .collect();
+
+        if replay_diagnostics {
+            self.diagnose = true;
+            self.replay_converged_states(&incoming);
+            self.inference = solved_inference;
         }
     }
 
-    fn complete_predecessor(
-        &self,
-        block: BlockId,
-        indegree: &mut [usize],
-        queue: &mut VecDeque<BlockId>,
-    ) {
-        for successor in successors(&self.function.blocks[block.0 as usize].terminator) {
-            let count = &mut indegree[successor.0 as usize];
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                queue.push_back(successor);
+    fn solve_fixed_point(&mut self) -> Vec<Option<AbstractState>> {
+        let block_count = self.function.blocks.len();
+        let mut incoming = vec![None; block_count];
+        incoming[self.function.entry.0 as usize] = Some(self.initial_state());
+
+        let mut queue = VecDeque::from([self.function.entry]);
+        let mut queued = vec![false; block_count];
+        queued[self.function.entry.0 as usize] = true;
+
+        while let Some(block_id) = queue.pop_front() {
+            let block_index = block_id.0 as usize;
+            queued[block_index] = false;
+            let Some(mut state) = incoming[block_index].clone() else {
+                continue;
+            };
+            let block = &self.function.blocks[block_index];
+            for (index, operation) in block.operations.iter().enumerate() {
+                let index = u32::try_from(index).expect("flow operation index fits in u32");
+                self.operation(block_id, index, operation, &mut state);
             }
+
+            for (successor, successor_state) in
+                self.terminator(block_id, &block.terminator, state)
+            {
+                let successor_index = successor.0 as usize;
+                let next_state = match incoming[successor_index].as_ref() {
+                    None => Some(successor_state),
+                    Some(existing) => {
+                        let joined = AbstractState::join(
+                            &[existing.clone(), successor_state],
+                            self.function.span,
+                        );
+                        (joined != *existing).then_some(joined)
+                    }
+                };
+                let Some(next_state) = next_state else {
+                    continue;
+                };
+                incoming[successor_index] = Some(next_state);
+                if !queued[successor_index] {
+                    queue.push_back(successor);
+                    queued[successor_index] = true;
+                }
+            }
+        }
+
+        incoming
+    }
+
+    fn replay_converged_states(&mut self, incoming: &[Option<AbstractState>]) {
+        self.sink = DiagnosticSink::default();
+        self.proofs.clear();
+        self.entity_facts.clear();
+        self.next_proof = 0;
+
+        for (block_index, incoming_state) in incoming.iter().enumerate() {
+            let Some(mut state) = incoming_state.clone() else {
+                continue;
+            };
+            let block_id =
+                BlockId(u32::try_from(block_index).expect("flow block index fits in u32"));
+            let block = &self.function.blocks[block_index];
+            for (index, operation) in block.operations.iter().enumerate() {
+                let index = u32::try_from(index).expect("flow operation index fits in u32");
+                let previous = self
+                    .entity_facts
+                    .insert((block_id, index), EntityOperationFacts::project(&state));
+                debug_assert!(previous.is_none(), "operation facts are recorded once");
+                self.operation(block_id, index, operation, &mut state);
+            }
+            let _ = self.terminator(block_id, &block.terminator, state);
         }
     }
 
@@ -957,43 +992,6 @@ fn entity_type(flow: &FlowModule, ty: keld_semantics::TypeId) -> Option<DefId> {
     match flow.types.kind(ty) {
         TypeKind::EntityRef(entity) => Some(*entity),
         _ => None,
-    }
-}
-
-fn reachable_blocks(function: &FlowFunction) -> BTreeSet<BlockId> {
-    let mut reachable = BTreeSet::new();
-    let mut stack = vec![function.entry];
-    while let Some(block) = stack.pop() {
-        if !reachable.insert(block) {
-            continue;
-        }
-        stack.extend(successors(&function.blocks[block.0 as usize].terminator));
-    }
-    reachable
-}
-
-fn successors(terminator: &Terminator) -> Vec<BlockId> {
-    match terminator {
-        Terminator::Goto(block)
-        | Terminator::ExitScopes {
-            next: ExitTarget::Goto(block),
-            ..
-        } => vec![*block],
-        Terminator::Branch {
-            then_block,
-            else_block,
-            ..
-        } => vec![*then_block, *else_block],
-        Terminator::BranchIdentity {
-            equal, not_equal, ..
-        } => vec![*equal, *not_equal],
-        Terminator::ResolveLink { live, absent, .. } => vec![*live, *absent],
-        Terminator::ExitScopes {
-            next: ExitTarget::Return(_),
-            ..
-        }
-        | Terminator::Return(_)
-        | Terminator::Unreachable => Vec::new(),
     }
 }
 

@@ -1,3 +1,4 @@
-implemented structured Flow loop lowering
+replaced DAG lifecycle analysis with solve/replay fixed point
+made abstract states comparable for fixed-point convergence
 
 exit_status=0

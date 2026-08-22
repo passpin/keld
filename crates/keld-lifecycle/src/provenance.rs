@@ -33,7 +33,7 @@ pub(crate) enum FailureKind {
     Retired,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AbstractState {
     pub locals: Vec<Option<RefValue>>,
     pub values: Vec<Option<RefValue>>,
