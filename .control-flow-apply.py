@@ -118,14 +118,15 @@ path.write_text(text + append)
 # Add a condition-allocation case to the established O0/O2 differential corpus.
 path = Path("crates/keld-native-backend/tests/differential.rs")
 text = path.read_text()
-needle = '''        (\n            "text_surface",\n            "fn main() -> Int { let value = \\"K\\" + \\"한\\"; if value == \\"K한\\" { if value.is_empty { return 0 } else { return value.byte_length } } else { return 0 } }\\n",\n        ),\n'''
-# Python string escaping above is intentionally strict; fall back to the literal repo text shape.
-if needle not in text:
-    needle = '''        (\n            "text_surface",\n            "fn main() -> Int { let value = \\"K\\" + \\"한\\"; if value == \\"K한\\" { if value.is_empty { return 0 } else { return value.byte_length } } else { return 0 } }\\n",\n        ),\n'''.replace('\\\\"', '\\"')
-condition_case = '''        (\n            "control_flow_condition_allocation_surface",\n            "fn main() -> Int { var i = 0; while !(\\"abcdefghijklmnopqrstuvwxyz\\" + \\"!\\").is_empty && i < 2 { i += 1 }; return i }\\n",\n        ),\n'''
-if text.count(needle) != 1:
-    raise RuntimeError("text_surface insertion point changed")
-text = text.replace(needle, condition_case + needle, 1)
+anchor = '        (\n            "text_surface",\n'
+condition_case = r'''        (
+            "control_flow_condition_allocation_surface",
+            "fn main() -> Int { var i = 0; while !(\"abcdefghijklmnopqrstuvwxyz\" + \"!\").is_empty && i < 2 { i += 1 }; return i }\n",
+        ),
+'''
+if text.count(anchor) != 1:
+    raise RuntimeError("text_surface label anchor changed")
+text = text.replace(anchor, condition_case + anchor, 1)
 
 marker = '''#[test]\nfn every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2() {\n'''
 focused = r'''#[test]
