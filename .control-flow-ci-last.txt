@@ -6,7 +6,7 @@ info: downloading 5 components
    Compiling keld-numeric v0.1.0 (/home/runner/work/keld/keld/crates/keld-numeric)
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.59s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.55s
      Running unittests src/lib.rs (target/debug/deps/keld_semantics-6735a99730213fe1)
 
 running 0 tests
@@ -17,8 +17,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 7 tests
 test break_in_nested_loop_does_not_make_outer_true_loop_fallthrough ... ok
-test literal_true_loop_without_direct_break_is_non_fallthrough ... ok
 test direct_break_makes_true_loop_may_fallthrough ... ok
+test literal_true_loop_without_direct_break_is_non_fallthrough ... ok
 test loop_control_outside_loop_is_rejected ... ok
 test while_condition_must_be_bool ... FAILED
 test while_break_and_continue_are_not_feature_gated ... ok
@@ -28,7 +28,7 @@ failures:
 
 ---- while_condition_must_be_bool stdout ----
 
-thread 'while_condition_must_be_bool' (2678) panicked at crates/keld-semantics/tests/control_flow_semantics.rs:32:5:
+thread 'while_condition_must_be_bool' (2643) panicked at crates/keld-semantics/tests/control_flow_semantics.rs:32:5:
 [
     Diagnostic {
         code: DiagnosticCode(
