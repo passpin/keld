@@ -7,33 +7,28 @@ info: downloading 5 components
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-error[E0004]: non-exhaustive patterns: `&HirStmtKind::While(_)`, `&HirStmtKind::Break` and `&HirStmtKind::Continue` not covered
-   --> crates/keld-flow/src/lower.rs:122:15
-    |
-122 |         match &statement.kind {
-    |               ^^^^^^^^^^^^^^^ patterns `&HirStmtKind::While(_)`, `&HirStmtKind::Break` and `&HirStmtKind::Continue` not covered
-    |
-note: `HirStmtKind` defined here
-   --> crates/keld-semantics/src/hir.rs:222:1
-    |
-222 | pub enum HirStmtKind {
-    | ^^^^^^^^^^^^^^^^^^^^
-...
-242 |     While(HirWhile),
-    |     ----- not covered
-243 |     Break,
-    |     ----- not covered
-244 |     Continue,
-    |     -------- not covered
-    = note: the matched value is of type `&HirStmtKind`
-help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern, a match arm with multiple or-patterns as shown, or multiple match arms
-    |
-237 ~             },
-238 +             &HirStmtKind::While(_) | &HirStmtKind::Break | &HirStmtKind::Continue => todo!()
-    |
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.26s
+     Running tests/control_flow.rs (target/debug/deps/control_flow-4631168b95e5fac0)
 
-For more information about this error, try `rustc --explain E0004`.
-error: could not compile `keld-flow` (lib) due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
+running 7 tests
+test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
+test explicit_lifecycles_have_distinct_parented_ids ... ok
+test nested_loop_control_targets_the_innermost_loop ... ok
+test direct_entity_identity_condition_uses_branch_identity ... ok
+test while_lowers_to_condition_scope_branch_and_back_edge ... ok
+test when_resolves_link_into_live_and_absent_blocks ... ok
+test stable_dump_contains_no_host_addresses_or_debug_format ... ok
 
-exit_status=101
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/storage_scopes.rs (target/debug/deps/storage_scopes-100cf5075b4b9787)
+
+running 3 tests
+test return_exits_storage_scopes_inside_out ... ok
+test continue_exits_iteration_storage_and_lifecycle_before_back_edge ... ok
+test branch_locals_exit_before_the_merge ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+exit_status=0

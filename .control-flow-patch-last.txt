@@ -1,4 +1,3 @@
-added Flow loop CFG tests
-added Flow loop cleanup test
+implemented structured Flow loop lowering
 
 exit_status=0
