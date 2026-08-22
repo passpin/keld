@@ -224,3 +224,30 @@ fn struct_field_replacement_is_not_an_entity_view_write() {
             .any(|operation| matches!(operation, FlowOp::WriteEntityField { .. }))
     );
 }
+
+
+#[test]
+fn local_compound_assignment_reads_updates_and_stores_the_local() {
+    let flow = lower_text_for_test("fn main() -> Int { var i = 1; i += 2; return i }\n").unwrap();
+    let ops = flow.function_named("main").unwrap().linear_ops();
+
+    let compound_store = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| match operation {
+            FlowOp::StoreLocal { local, .. } if local.0 == 0 => Some(index),
+            _ => None,
+        })
+        .nth(1)
+        .expect("compound assignment must store the updated local");
+    let read = ops[..compound_store]
+        .iter()
+        .rposition(|operation| matches!(operation, FlowOp::CopyLocal { local, .. } if local.0 == 0))
+        .expect("compound assignment must read the old local value");
+    let calculation = ops[..compound_store]
+        .iter()
+        .rposition(|operation| matches!(operation, FlowOp::BinaryInt { .. }))
+        .expect("compound assignment must calculate the updated value");
+
+    assert!(read < calculation && calculation < compound_store);
+}
