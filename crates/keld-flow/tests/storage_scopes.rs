@@ -1,4 +1,4 @@
-use keld_flow::{ExitTarget, StorageScopeId, Terminator, lower_text_for_test};
+use keld_flow::{ExitTarget, FlowOp, StorageScopeId, Terminator, lower_text_for_test};
 use keld_semantics::LocalId;
 
 #[test]
@@ -45,4 +45,31 @@ fn return_exits_storage_scopes_inside_out() {
         exit.windows(2)
             .all(|pair| { main.storage_scope_parents[pair[0].0 as usize] == Some(pair[1]) })
     );
+}
+
+
+#[test]
+fn continue_exits_iteration_storage_and_lifecycle_before_back_edge() {
+    let flow = lower_text_for_test(
+        "entity E { value: Int }\nfn main() -> Int { var i = 0; while i < 2 { lifecycle iteration { let e = E(value: i); i += 1; continue } }; return i }\n",
+    )
+    .expect("loop lifecycle reaches Flow");
+    let main = flow.function_named("main").expect("main exists");
+    let lifecycle = main
+        .linear_ops()
+        .into_iter()
+        .find_map(|operation| match operation {
+            FlowOp::BeginLifecycle { lifecycle, .. } => Some(*lifecycle),
+            _ => None,
+        })
+        .expect("iteration lifecycle exists");
+
+    assert!(main.blocks.iter().any(|block| matches!(
+        &block.terminator,
+        Terminator::ExitScopes {
+            storage_scopes,
+            lifecycles,
+            next: ExitTarget::Goto(_),
+        } if !storage_scopes.is_empty() && lifecycles == &[lifecycle]
+    )), "continue must clean both lexical storage and the iteration lifecycle");
 }

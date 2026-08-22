@@ -87,3 +87,103 @@ fn stable_dump_contains_no_host_addresses_or_debug_format() {
     assert!(!first.contains("0x"));
     assert!(!first.contains("FlowOp"));
 }
+
+
+#[test]
+fn while_lowers_to_condition_scope_branch_and_back_edge() {
+    let flow = lower_text_for_test(
+        "fn main() -> Int { var i = 0; while i < 3 { i += 1 }; return i }\n",
+    )
+    .expect("loop source reaches Flow");
+    let function = flow.function_named("main").expect("main exists");
+
+    let (branch_block, body, exit) = function
+        .blocks
+        .iter()
+        .find_map(|block| match &block.terminator {
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => Some((block.id, *then_block, *else_block)),
+            _ => None,
+        })
+        .expect("while condition branch exists");
+
+    let condition = function
+        .blocks
+        .iter()
+        .find(|block| matches!(
+            &block.terminator,
+            Terminator::ExitScopes {
+                storage_scopes,
+                lifecycles,
+                next: ExitTarget::Goto(target),
+            } if *target == branch_block && storage_scopes.len() == 1 && lifecycles.is_empty()
+        ))
+        .expect("condition full-expression exits its child scope");
+
+    assert_ne!(condition.storage_scope, function.blocks[branch_block.0 as usize].storage_scope);
+    assert_eq!(
+        function.blocks[branch_block.0 as usize].storage_scope,
+        function.blocks[exit.0 as usize].storage_scope
+    );
+    assert!(matches!(
+        &function.blocks[body.0 as usize].terminator,
+        Terminator::ExitScopes {
+            next: ExitTarget::Goto(target),
+            ..
+        } if *target == condition.id
+    ));
+}
+
+#[test]
+fn nested_loop_control_targets_the_innermost_loop() {
+    let flow = lower_text_for_test(
+        "fn main() -> Int { var outer = 0; while outer < 2 { outer += 1; var inner = 0; while inner < 3 { inner += 1; if inner == 1 { continue }; break } }; return outer }\n",
+    )
+    .expect("nested loops reach Flow");
+    let function = flow.function_named("main").expect("main exists");
+
+    let mut loops = function
+        .blocks
+        .iter()
+        .filter_map(|branch| {
+            let Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } = &branch.terminator
+            else {
+                return None;
+            };
+            let condition = function.blocks.iter().find(|candidate| matches!(
+                &candidate.terminator,
+                Terminator::ExitScopes {
+                    storage_scopes,
+                    lifecycles,
+                    next: ExitTarget::Goto(target),
+                } if *target == branch.id && storage_scopes.len() == 1 && lifecycles.is_empty()
+            ))?;
+            Some((branch.id, condition.id, *then_block, *else_block))
+        })
+        .collect::<Vec<_>>();
+    loops.sort_by_key(|(branch, ..)| branch.0);
+    assert_eq!(loops.len(), 2, "{:#?}", function.blocks);
+
+    let (_, inner_condition, _, inner_exit) = loops[1];
+    assert!(function.blocks.iter().any(|block| matches!(
+        &block.terminator,
+        Terminator::ExitScopes {
+            next: ExitTarget::Goto(target),
+            ..
+        } if *target == inner_condition
+    )), "inner continue must jump to inner condition");
+    assert!(function.blocks.iter().any(|block| matches!(
+        &block.terminator,
+        Terminator::ExitScopes {
+            next: ExitTarget::Goto(target),
+            ..
+        } if *target == inner_exit
+    )), "inner break must jump to inner exit");
+}

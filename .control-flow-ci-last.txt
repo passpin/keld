@@ -6,7 +6,7 @@ info: downloading 5 components
    Compiling keld-numeric v0.1.0 (/home/runner/work/keld/keld/crates/keld-numeric)
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.91s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.05s
      Running unittests src/lib.rs (target/debug/deps/keld_semantics-6735a99730213fe1)
 
 running 0 tests
@@ -16,12 +16,12 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/control_flow_semantics.rs (target/debug/deps/control_flow_semantics-719ca6d4360aeb42)
 
 running 8 tests
-test break_in_nested_loop_does_not_make_outer_true_loop_fallthrough ... ok
 test literal_true_loop_without_direct_break_is_non_fallthrough ... ok
+test break_in_nested_loop_does_not_make_outer_true_loop_fallthrough ... ok
 test direct_break_makes_true_loop_may_fallthrough ... ok
 test loop_control_outside_loop_is_rejected ... ok
-test recursion_hidden_inside_loop_is_still_deferred ... ok
 test while_condition_must_be_bool ... ok
+test recursion_hidden_inside_loop_is_still_deferred ... ok
 test while_break_and_continue_are_not_feature_gated ... ok
 test while_is_preserved_in_typed_hir ... ok
 
@@ -32,11 +32,11 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 8 tests
 test constant_fault_detection_respects_short_circuit_evaluation ... ok
 test else_if_conditions_are_preserved_as_nested_hir ... ok
-test constructor_and_call_arguments_keep_source_evaluation_order ... ok
 test constant_faults_and_int_range_errors_are_compile_time_diagnostics ... ok
+test unary_min_magnitude_and_int_constants_lower_to_exact_hir_values ... ok
+test constructor_and_call_arguments_keep_source_evaluation_order ... ok
 test non_unit_functions_must_return_on_every_structured_path ... ok
 test requires_exactly_one_zero_parameter_int_main_without_retirement_effects ... ok
-test unary_min_magnitude_and_int_constants_lower_to_exact_hir_values ... ok
 test unchecked_link_field_access_remains_marked_for_proof_analysis ... ok
 
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -55,28 +55,28 @@ test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 21 tests
 test classifies_managed_types_and_structural_duplicability ... ok
-test bootstrap_assignment_exclusions_are_focused ... ok
 test get_rejects_single_home_elements ... ok
 test condition_type_error_is_focused_and_ordering_requires_ints ... ok
+test bootstrap_assignment_exclusions_are_focused ... ok
 test managed_struct_field_replacement_requires_a_var_base ... ok
 test parses_text_list_and_general_optional_types ... ok
-test records_consuming_parameters_and_uninitialized_vars ... ok
 test indexed_list_diagnostics_are_focused ... ok
-test rejects_self_and_mutual_by_value_layout_cycles_but_links_break_cycles ... ok
+test records_consuming_parameters_and_uninitialized_vars ... ok
 test resolves_entity_names_as_refs_and_link_fields_as_links ... ok
 test semantic_ids_follow_source_order_not_lookup_order ... ok
+test rejects_self_and_mutual_by_value_layout_cycles_but_links_break_cycles ... ok
+test types_copy_as_an_explicit_structural_operation ... ok
 test type_errors_use_stable_focused_codes ... ok
 test types_complete_list_operations ... ok
-test types_copy_as_an_explicit_structural_operation ... ok
-test types_empty_list_constructor_from_expected_type ... ok
 test types_list_length_as_a_checked_property ... ok
 test types_list_push_with_an_element_type ... ok
+test types_empty_list_constructor_from_expected_type ... ok
 test types_list_remove_returns_the_element_type ... ok
-test types_text_literal_and_byte_length ... ok
 test types_take_as_an_explicit_owned_expression ... ok
+test types_text_literal_and_byte_length ... ok
 test by_value_layout_depth_over_256_is_rejected_iteratively ... ok
 
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Doc-tests keld_semantics
 
@@ -85,7 +85,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.50s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
      Running unittests src/lib.rs (target/debug/deps/keld_syntax-831e1737ca89708d)
 
 running 0 tests
@@ -95,15 +95,15 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/lexer.rs (target/debug/deps/lexer-1cd600e2c260a19a)
 
 running 10 tests
-test all_reserved_words_are_keywords ... ok
 test explicit_semicolon_is_the_only_non_synthetic_term ... ok
 test every_statement_ending_token_qualifies_a_newline ... ok
+test all_reserved_words_are_keywords ... ok
 test every_non_ending_operator_suppresses_a_newline ... ok
 test identifier_and_wildcard_boundaries_match_the_grammar ... ok
-test lexing_is_lossless_and_every_source_byte_has_one_owner ... ok
 test lexical_errors_are_diagnostic_and_lossless ... ok
-test punctuation_uses_longest_matching ... ok
+test lexing_is_lossless_and_every_source_byte_has_one_owner ... ok
 test strings_and_comments_preserve_normalized_source ... ok
+test punctuation_uses_longest_matching ... ok
 test virtual_terminators_follow_depth_and_previous_token_rules ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -112,15 +112,15 @@ test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 
 running 8 tests
 test accepts_every_expression_and_pattern_family ... ok
-test accepts_every_top_level_form_and_type_clause ... ok
 test accepts_every_statement_family ... ok
+test accepts_every_top_level_form_and_type_clause ... ok
 test parses_shift_below_addition_and_above_comparison ... ok
 test typed_ast_wrappers_project_the_immutable_tree ... ok
 test virtual_terms_before_else_and_handle_are_accepted ... ok
 test accepts_the_maximum_supported_recursive_depth ... ok
 test accepts_maximum_unary_type_pattern_and_block_depths ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
      Running tests/parser_recovery.rs (target/debug/deps/parser_recovery-0eb6848368e06ebe)
 
@@ -128,13 +128,13 @@ running 8 tests
 test arbitrary_error_tokens_never_prevent_forward_progress ... ok
 test recovers_at_term_and_keeps_the_following_function ... ok
 test missing_closing_delimiters_are_diagnosed_without_panicking ... ok
+test rejects_comparison_and_equality_chaining_without_losing_tokens ... ok
 test recovers_delimited_lists_at_comma_or_closing_delimiter ... ok
 test rejects_positional_arguments_after_named_arguments ... ok
-test rejects_comparison_and_equality_chaining_without_losing_tokens ... ok
 test depth_257_is_recovered_as_an_error_node ... ok
 test every_recursive_grammar_family_rejects_depth_257 ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
    Doc-tests keld_syntax
 

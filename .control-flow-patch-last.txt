@@ -1,3 +1,4 @@
-fixed while-condition test terminator
+added Flow loop CFG tests
+added Flow loop cleanup test
 
 exit_status=0
