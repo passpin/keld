@@ -22,7 +22,7 @@ jobs:
 
       - name: Configure Rust and GNU target
         run: |
-          rustup toolchain install 1.97.0 --profile minimal --component rustfmt clippy
+          rustup toolchain install 1.97.0 --profile minimal --component rustfmt --component clippy
           rustup target add x86_64-pc-windows-gnu --toolchain 1.97.0
           rustup default 1.97.0
 
@@ -76,6 +76,7 @@ jobs:
             throw 'RED failed for an unrelated reason instead of reproducing the validator gap.'
           }
           Write-Host 'RED confirmed: the current validator accepts the ordinary COFF runtime definition.'
+          exit 0
 
       - name: Apply minimal validator fix
         run: |
