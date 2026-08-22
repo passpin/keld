@@ -69,8 +69,18 @@ jobs:
             rustup target add x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
 
-            . ./scripts/activate-llvm.ps1 *>> $log
-            if ($LASTEXITCODE -ne 0) { throw "LLVM activation failed: $LASTEXITCODE" }
+            # The repository lock remains authoritative for local/release bootstrap.
+            # GitHub's runner is occasionally challenged by mirror.msys2.org, so CI
+            # consumes the signed current MSYS2 packages and verifies the frozen LLVM version.
+            & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed: $LASTEXITCODE" }
+
+            $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
+            $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+            $llvmVersion = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+            "LLVM_SYS_221_PREFIX=$env:LLVM_SYS_221_PREFIX" | Out-File $log -Append
+            "llvm-config=$llvmVersion" | Out-File $log -Append
+            if ($llvmVersion -ne '22.1.8') { throw "LLVM version mismatch: $llvmVersion" }
 
             cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
