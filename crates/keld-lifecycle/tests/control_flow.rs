@@ -58,18 +58,25 @@ fn loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity() {
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
 }
 
-
 #[test]
 fn retirement_call_effect_in_condition_invalidates_post_loop_use() {
     let result = verify_text_for_test(
-        "entity E { value: Int }\nfn retire_and_false(e: E) -> Bool retires e { retire e; return false }\nfn inspect(e: E) -> Int { while retire_and_false(e) { }; return e.value }\nfn main() -> Int { return 0 }\n",
+        "entity E { value: Int }\nfn retire_and_false(e: E) -> Bool retires e { retire e; return false }\nfn inspect(e: E) -> Int retires e { while retire_and_false(e) { }; return e.value }\nfn main() -> Int { return 0 }\n",
     );
     assert!(
         result
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code.0 == "KLD1001"),
+            .any(|diagnostic| diagnostic.code.0 == "KLD1003"),
         "{:#?}",
+        result.diagnostics
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code.0 != "KLD1009"),
+        "the propagated condition effect is declared: {:#?}",
         result.diagnostics
     );
 }
