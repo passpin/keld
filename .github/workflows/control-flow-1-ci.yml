@@ -39,7 +39,7 @@ jobs:
           git rm .control-flow-apply.py
           "applied=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      - name: Run Task 7 Native-1 differential gate
+      - name: Run complete Task 7 Native-1 regression gate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -69,9 +69,6 @@ jobs:
             rustup target add x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "rustup target add failed: $LASTEXITCODE" }
 
-            # The repository lock remains authoritative for local/release bootstrap.
-            # GitHub's runner is occasionally challenged by mirror.msys2.org, so CI
-            # consumes the signed current MSYS2 packages and verifies the frozen LLVM version.
             & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
             if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed: $LASTEXITCODE" }
 
@@ -85,8 +82,16 @@ jobs:
             cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
 
+            cargo test -p keld-native-backend --test native_int -- --nocapture *>> $log
+            $nativeInt = $LASTEXITCODE
             cargo test -p keld-native-backend --test differential -- --nocapture *>> $log
-            $status = $LASTEXITCODE
+            $differential = $LASTEXITCODE
+            cargo test -p keld-native-backend --test surface_audit -- --nocapture *>> $log
+            $surface = $LASTEXITCODE
+            "native_int=$nativeInt differential=$differential surface_audit=$surface" | Out-File $log -Append
+            if ($nativeInt -ne 0) { $status = $nativeInt }
+            elseif ($differential -ne 0) { $status = $differential }
+            else { $status = $surface }
           }
           catch {
             $_ | Out-String | Out-File $log -Append
