@@ -8,7 +8,7 @@ info: downloading 5 components
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.37s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.08s
      Running unittests src/lib.rs (target/debug/deps/keld_lifecycle-1194e192cfa79c9b)
 
 running 0 tests
@@ -19,8 +19,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 4 tests
 test copying_a_reference_preserves_must_alias_provenance ... ok
-test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
 test identity_inequality_refines_the_valid_branch ... ok
+test impossible_identity_edge_does_not_block_the_reachable_merge ... ok
 test identity_equality_refines_to_must_alias ... ok
 
 test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
@@ -79,8 +79,305 @@ failures:
 
 ---- loop_carried_allocation_uses_a_stable_distinct_merge_provenance stdout ----
 
-thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3036) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:185:10:
-loop-carried previous identity remains available at the comparison
+thread 'loop_carried_allocation_uses_a_stable_distinct_merge_provenance' (3141) panicked at crates/keld-lifecycle/tests/provenance_facts.rs:185:5:
+carried/current refs missing: previous=None, current=Some(EntityReferenceFact { definition: DefId(0), provenance: ProvenanceId(2) })
+block=FlowBlock {
+    id: BlockId(
+        5,
+    ),
+    storage_scope: StorageScopeId(
+        3,
+    ),
+    operations: [
+        CopyLocal {
+            dst: ValueId(
+                10,
+            ),
+            local: LocalId(
+                1,
+            ),
+            span: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    149,
+                ),
+                end: BytePos(
+                    158,
+                ),
+            },
+        },
+        CopyLocal {
+            dst: ValueId(
+                11,
+            ),
+            local: LocalId(
+                3,
+            ),
+            span: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    161,
+                ),
+                end: BytePos(
+                    169,
+                ),
+            },
+        },
+    ],
+    terminator: BranchIdentity {
+        lhs: ValueId(
+            10,
+        ),
+        rhs: ValueId(
+            11,
+        ),
+        equal: BlockId(
+            9,
+        ),
+        not_equal: BlockId(
+            8,
+        ),
+    },
+}
+facts=EntityOperationFacts {
+    local_references: [
+        Some(
+            EntityReferenceFact {
+                definition: DefId(
+                    0,
+                ),
+                provenance: ProvenanceId(
+                    0,
+                ),
+            },
+        ),
+        None,
+        None,
+        Some(
+            EntityReferenceFact {
+                definition: DefId(
+                    0,
+                ),
+                provenance: ProvenanceId(
+                    2,
+                ),
+            },
+        ),
+    ],
+    value_references: [
+        Some(
+            EntityReferenceFact {
+                definition: DefId(
+                    0,
+                ),
+                provenance: ProvenanceId(
+                    0,
+                ),
+            },
+        ),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(
+            EntityReferenceFact {
+                definition: DefId(
+                    0,
+                ),
+                provenance: ProvenanceId(
+                    2,
+                ),
+            },
+        ),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ],
+    origins: [
+        EntityOriginFact {
+            parameters: {
+                0,
+            },
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: true,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {
+                0,
+            },
+            fresh: true,
+            broad: false,
+        },
+        EntityOriginFact {
+            parameters: {},
+            fresh: false,
+            broad: false,
+        },
+    ],
+    reference_states: [
+        Live {
+            lifecycle: Dynamic,
+            provenance: ProvenanceId(
+                0,
+            ),
+        },
+        OutOfScope,
+        Live {
+            lifecycle: Known(
+                LifecycleId(
+                    0,
+                ),
+            ),
+            provenance: ProvenanceId(
+                2,
+            ),
+        },
+        OutOfScope,
+        OutOfScope,
+        OutOfScope,
+        OutOfScope,
+        OutOfScope,
+        OutOfScope,
+        Invalidated {
+            cause: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    27,
+                ),
+                end: BytePos(
+                    278,
+                ),
+            },
+        },
+        OutOfScope,
+    ],
+    equivalence_classes: [
+        {
+            ProvenanceId(
+                0,
+            ),
+        },
+        {
+            ProvenanceId(
+                1,
+            ),
+        },
+        {
+            ProvenanceId(
+                2,
+            ),
+        },
+        {
+            ProvenanceId(
+                3,
+            ),
+        },
+        {
+            ProvenanceId(
+                4,
+            ),
+        },
+        {
+            ProvenanceId(
+                5,
+            ),
+        },
+        {
+            ProvenanceId(
+                6,
+            ),
+        },
+        {
+            ProvenanceId(
+                7,
+            ),
+        },
+        {
+            ProvenanceId(
+                8,
+            ),
+        },
+        {
+            ProvenanceId(
+                9,
+            ),
+        },
+        {
+            ProvenanceId(
+                10,
+            ),
+        },
+    ],
+    distinct_pairs: {
+        (
+            ProvenanceId(
+                0,
+            ),
+            ProvenanceId(
+                2,
+            ),
+        ),
+    },
+}
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 
@@ -91,7 +388,7 @@ test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 
 error: test failed, to rerun pass `-p keld-lifecycle --test provenance_facts`
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
      Running unittests src/lib.rs (target/debug/deps/keld_flow-face1378d493b180)
 
 running 0 tests
@@ -101,13 +398,13 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/control_flow.rs (target/debug/deps/control_flow-4631168b95e5fac0)
 
 running 7 tests
-test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
 test explicit_lifecycles_have_distinct_parented_ids ... ok
+test return_from_nested_lifecycle_has_an_explicit_exit_edge ... ok
 test nested_loop_control_targets_the_innermost_loop ... ok
 test direct_entity_identity_condition_uses_branch_identity ... ok
-test while_lowers_to_condition_scope_branch_and_back_edge ... ok
 test when_resolves_link_into_live_and_absent_blocks ... ok
 test stable_dump_contains_no_host_addresses_or_debug_format ... ok
+test while_lowers_to_condition_scope_branch_and_back_edge ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
@@ -116,12 +413,12 @@ test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 10 tests
 test call_arguments_are_materialized_left_to_right ... ok
 test assignment_materializes_identity_then_rhs_then_writes ... ok
-test boolean_operators_use_control_flow_and_one_phi ... ok
 test compound_assignment_reads_old_value_before_rhs ... ok
+test boolean_operators_use_control_flow_and_one_phi ... ok
 test nested_index_projections_preserve_index_evaluation_order ... ok
-test nested_remove_is_complete_before_outer_push ... ok
-test indexed_replacement_materializes_target_before_rhs ... ok
 test constructor_field_ids_do_not_reorder_source_evaluation ... ok
+test indexed_replacement_materializes_target_before_rhs ... ok
+test nested_remove_is_complete_before_outer_push ... ok
 test take_lowers_to_an_explicit_local_transfer ... ok
 test struct_field_replacement_is_not_an_entity_view_write ... ok
 
