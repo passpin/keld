@@ -152,6 +152,48 @@ fn inequality_branch_publishes_must_distinct_parameters() {
 }
 
 #[test]
+fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
+    let module = verified(
+        "entity Item { value: Int }\nfn inspect(seed: Item) -> Int { var previous = seed; var i = 0; while i < 2 { let current = Item(value: i); if i == 1 { if previous != current { retire current; return previous.value } else { return 99 } }; previous = current; i = i + 1 }; return -1 }\nfn main() -> Int { lifecycle level { let seed = Item(value: 7); return inspect(seed) } }\n",
+    );
+    let function = function_id(&module, "inspect");
+    let function_data = &module.flow.functions[function.0 as usize];
+    let identity_block = function_data
+        .blocks
+        .iter()
+        .find(|block| matches!(block.terminator, Terminator::BranchIdentity { .. }))
+        .expect("loop body compares previous and current identities");
+    let copied_locals = identity_block
+        .operations
+        .iter()
+        .filter_map(|operation| match operation {
+            FlowOp::CopyLocal { local, .. } => Some(*local),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copied_locals.len(), 2, "{:#?}", identity_block.operations);
+    let last_copy = identity_block
+        .operations
+        .iter()
+        .rposition(|operation| matches!(operation, FlowOp::CopyLocal { .. }))
+        .unwrap();
+    let facts = module
+        .entity_facts_at(function, identity_block.id, u32::try_from(last_copy).unwrap())
+        .expect("identity block publishes facts before its final copy");
+    let previous = facts
+        .local_reference(copied_locals[0])
+        .expect("loop-carried previous identity remains available at the comparison");
+    let current = facts
+        .local_reference(copied_locals[1])
+        .expect("current iteration allocation remains available at the comparison");
+
+    assert_eq!(
+        facts.alias_relation(previous, current),
+        AliasRelation::MustDistinct
+    );
+}
+
+#[test]
 fn retirement_summaries_remain_exact_and_broad() {
     let module = verified(
         "entity Enemy {\nhealth: Int\n}\nentity World {\ntarget: link Enemy?\n}\nfn exact(enemy: Enemy) retires enemy { retire enemy }\nfn broad(world: World) retires any Enemy { when world.target as enemy { retire enemy } }\nfn main() -> Int { return 0 }\n",
