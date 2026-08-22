@@ -41,14 +41,14 @@ jobs:
           git rm .control-flow-apply.py
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run Task 6 IR and interpreter RED/GREEN gate
+      - name: Run complete Task 6 IR and interpreter gate
         shell: bash
         run: |
           set +e
           (
-            cargo test -p keld-ir --test control_flow
+            cargo test -p keld-ir
             first=$?
-            cargo test -p keld-interpreter --test control_flow
+            cargo test -p keld-interpreter
             second=$?
             if [ "$first" -ne 0 ]; then exit "$first"; fi
             exit "$second"
