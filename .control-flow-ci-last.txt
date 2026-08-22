@@ -9,7 +9,7 @@ info: downloading 5 components
    Compiling keld-flow v0.1.0 (/home/runner/work/keld/keld/crates/keld-flow)
    Compiling keld-lifecycle v0.1.0 (/home/runner/work/keld/keld/crates/keld-lifecycle)
    Compiling keld-storage v0.1.0 (/home/runner/work/keld/keld/crates/keld-storage)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.71s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.35s
      Running tests/cleanup_planner.rs (target/debug/deps/cleanup_planner-2523eb781e564b7a)
 
 running 6 tests
@@ -25,27 +25,33 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
      Running tests/control_flow.rs (target/debug/deps/control_flow-a335100353c9ac2a)
 
 running 4 tests
+test loop_body_local_is_reinitialized_and_cleaned_on_each_backedge ... ok
 test zero_iteration_loop_does_not_initialize_outer_home ... ok
-test loop_body_local_is_reinitialized_and_cleaned_on_each_backedge ... FAILED
-test loop_exit_preserves_maybe_live_for_outer_moved_home ... ok
 test assignment_after_possible_move_repairs_loop_carried_home ... ok
+test loop_exit_preserves_maybe_live_for_outer_moved_home ... ok
 
-failures:
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
----- loop_body_local_is_reinitialized_and_cleaned_on_each_backedge stdout ----
+     Running tests/home_verifier.rs (target/debug/deps/home_verifier-1e135bb2f113e17d)
 
-thread 'loop_body_local_is_reinitialized_and_cleaned_on_each_backedge' (2952) panicked at crates/keld-storage/tests/control_flow.rs:28:5:
-assertion `left == right` failed
-  left: [ReplaceMaybeLive]
- right: [Initialize]
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+running 15 tests
+test a_moved_home_cannot_be_taken_again ... ok
+test borrowed_parameter_cannot_be_returned_as_owned ... ok
+test consuming_call_requires_take_for_a_named_argument ... ok
+test a_branch_move_produces_maybe_live_at_the_join ... ok
+test let_cannot_be_rebound_as_a_whole_value ... ok
+test consuming_parameter_can_return_an_explicit_take ... ok
+test explicit_copy_leaves_the_source_live ... ok
+test entity_managed_field_assignment_requires_transfer ... ok
+test list_push_requires_explicit_transfer_for_named_single_home_elements ... ok
+test managed_struct_field_read_is_not_an_implicit_copy ... ok
+test moved_var_can_be_reinitialized_before_return ... ok
+test named_single_home_assignment_is_not_implicitly_a_copy ... ok
+test struct_construction_requires_transfer_for_managed_fields ... ok
+test text_named_assignment_is_not_an_implicit_copy ... ok
+test nested_text_lists_allow_whole_transfer_and_reject_partial_moves ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
 
-failures:
-    loop_body_local_is_reinitialized_and_cleaned_on_each_backedge
-
-test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-error: test failed, to rerun pass `-p keld-storage --test control_flow`
-
-exit_status=101
+exit_status=0
