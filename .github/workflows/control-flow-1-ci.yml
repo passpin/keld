@@ -14,24 +14,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply queued edit
+      - name: Apply queued Task 8 edits
         shell: pwsh
         run: |
-          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
-          & python .control-flow-apply.py *> .control-flow-patch-last.txt
-          $status = $LASTEXITCODE
-          "`nexit_status=$status" | Out-File -FilePath .control-flow-patch-last.txt -Append
-          if ($status -ne 0) {
-            git add .control-flow-patch-last.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "ci: record Control Flow-1 edit failure [skip ci]"
-            git push
-            exit $status
+          $ErrorActionPreference = 'Stop'
+          foreach ($script in @('.control-flow-apply.py', '.control-flow-docs-apply.py')) {
+            if (-not (Test-Path $script)) { continue }
+            & python $script *>> .control-flow-patch-last.txt
+            if ($LASTEXITCODE -ne 0) { throw "$script failed: $LASTEXITCODE" }
+            git rm $script
           }
-          git rm .control-flow-apply.py
 
-      - name: Run Task 8 CLI and milestone acceptance
+      - name: Run complete Task 8 acceptance gate
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -65,12 +59,16 @@ jobs:
             cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "production runtime build failed: $LASTEXITCODE" }
 
-            cargo test -p keld-cli --test cli -- --nocapture *>> $log
+            cargo test -p keld-cli --test cli --test milestone_acceptance -- --nocapture *>> $log
             $cli = $LASTEXITCODE
-            cargo test -p keld-cli --test milestone_acceptance -- --nocapture *>> $log
-            $milestone = $LASTEXITCODE
-            "cli=$cli milestone_acceptance=$milestone" | Out-File $log -Append
-            if ($cli -ne 0) { $status = $cli } else { $status = $milestone }
+            cargo test -p keld-semantics -- --nocapture *>> $log
+            $semantics = $LASTEXITCODE
+            cargo test -p keld-ir -- --nocapture *>> $log
+            $ir = $LASTEXITCODE
+            "cli_milestone=$cli semantics=$semantics ir=$ir" | Out-File $log -Append
+            if ($cli -ne 0) { $status = $cli }
+            elseif ($semantics -ne 0) { $status = $semantics }
+            else { $status = $ir }
           }
           catch {
             $_ | Out-String | Out-File $log -Append
