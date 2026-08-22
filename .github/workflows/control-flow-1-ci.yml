@@ -41,18 +41,11 @@ jobs:
           git rm .control-flow-apply.py
           echo "applied=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run Task 3 full lifecycle gate
+      - name: Run Task 5 storage RED/GREEN gate
         shell: bash
         run: |
           set +e
-          (
-            cargo test -p keld-lifecycle
-            first=$?
-            cargo test -p keld-flow
-            second=$?
-            if [ "$first" -ne 0 ]; then exit "$first"; fi
-            exit "$second"
-          ) > .control-flow-ci-last.txt 2>&1
+          cargo test -p keld-storage --test home_verifier --test cleanup_planner --test control_flow > .control-flow-ci-last.txt 2>&1
           status=$?
           set -e
           printf '\nexit_status=%s\n' "$status" >> .control-flow-ci-last.txt
