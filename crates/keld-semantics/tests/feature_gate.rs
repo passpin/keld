@@ -29,12 +29,6 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
     let cases = [
         ("use game.io\nfn main() -> Int { return 0 }\n", "use"),
         ("enum E { A }\nfn main() -> Int { return 0 }\n", "enum"),
-        (
-            "fn main() -> Int { while true { break }; return 0 }\n",
-            "while",
-        ),
-        ("fn main() -> Int { break; return 0 }\n", "break"),
-        ("fn main() -> Int { continue; return 0 }\n", "continue"),
         ("fn main() -> Int { match 0 { _ => 0 } }\n", "match"),
         (
             "struct Box[T] { value: T }\nfn main() -> Int { return 0 }\n",
@@ -78,7 +72,9 @@ fn every_deferred_construct_has_one_focused_feature_diagnostic() {
 
 #[test]
 fn outer_unsupported_construct_suppresses_child_feature_cascades() {
-    let analysis = analyze_text("fn main() -> Int { while true { var x = 0; break }; return 0 }\n");
+    let analysis = analyze_text(
+        "fn main() -> Int { try { try { return 0 } handle Error as inner { return 0 } } handle Error as outer { return 0 } }\n",
+    );
     let feature_diagnostics = analysis
         .diagnostics
         .iter()
@@ -86,7 +82,7 @@ fn outer_unsupported_construct_suppresses_child_feature_cascades() {
         .collect::<Vec<_>>();
 
     assert_eq!(feature_diagnostics.len(), 1, "{:#?}", analysis.diagnostics);
-    assert!(feature_diagnostics[0].primary.message.contains("while"));
+    assert!(feature_diagnostics[0].primary.message.contains("try"));
 }
 
 #[test]

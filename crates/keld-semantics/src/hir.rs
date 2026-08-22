@@ -92,6 +92,12 @@ pub struct HirIf {
 }
 
 #[derive(Clone, Debug)]
+pub struct HirWhile {
+    pub condition: HirExpr,
+    pub body: HirBlock,
+}
+
+#[derive(Clone, Debug)]
 pub struct HirWhen {
     pub link: HirExpr,
     pub binding: LocalId,
@@ -233,6 +239,9 @@ pub enum HirStmtKind {
     },
     Expr(HirExpr),
     If(HirIf),
+    While(HirWhile),
+    Break,
+    Continue,
     When(HirWhen),
     Lifecycle(HirLifecycle),
     Keep {

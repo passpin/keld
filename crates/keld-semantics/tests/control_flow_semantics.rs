@@ -66,9 +66,9 @@ fn while_is_preserved_in_typed_hir() {
         panic!("expected while HIR, got {:#?}", while_statement.kind);
     };
     assert_eq!(while_.condition.ty, TypeStore::BOOL);
-    assert!(matches!(while_.condition.kind, HirExprKind::Binary { .. }));
+    assert!(matches!(&while_.condition.kind, HirExprKind::Binary { .. }));
     assert!(matches!(
-        while_.body.statements[0].kind,
+        &while_.body.statements[0].kind,
         HirStmtKind::CompoundAssign { .. }
     ));
 }

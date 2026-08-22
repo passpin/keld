@@ -6,14 +6,61 @@ info: downloading 5 components
    Compiling keld-numeric v0.1.0 (/home/runner/work/keld/keld/crates/keld-numeric)
    Compiling keld-syntax v0.1.0 (/home/runner/work/keld/keld/crates/keld-syntax)
    Compiling keld-semantics v0.1.0 (/home/runner/work/keld/keld/crates/keld-semantics)
-error[E0599]: no variant, associated function, or constant named `While` found for enum `HirStmtKind` in the current scope
-  --> crates/keld-semantics/tests/control_flow_semantics.rs:65:22
-   |
-65 |     let HirStmtKind::While(while_) = &while_statement.kind else {
-   |                      ^^^^^ variant, associated function, or constant not found in `HirStmtKind`
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.59s
+     Running unittests src/lib.rs (target/debug/deps/keld_semantics-6735a99730213fe1)
 
-For more information about this error, try `rustc --explain E0599`.
-error: could not compile `keld-semantics` (test "control_flow_semantics") due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/control_flow_semantics.rs (target/debug/deps/control_flow_semantics-719ca6d4360aeb42)
+
+running 7 tests
+test break_in_nested_loop_does_not_make_outer_true_loop_fallthrough ... ok
+test literal_true_loop_without_direct_break_is_non_fallthrough ... ok
+test direct_break_makes_true_loop_may_fallthrough ... ok
+test loop_control_outside_loop_is_rejected ... ok
+test while_condition_must_be_bool ... FAILED
+test while_break_and_continue_are_not_feature_gated ... ok
+test while_is_preserved_in_typed_hir ... ok
+
+failures:
+
+---- while_condition_must_be_bool stdout ----
+
+thread 'while_condition_must_be_bool' (2678) panicked at crates/keld-semantics/tests/control_flow_semantics.rs:32:5:
+[
+    Diagnostic {
+        code: DiagnosticCode(
+            "KLD0003",
+        ),
+        severity: Error,
+        primary: Label {
+            span: Span {
+                source: SourceId(
+                    0,
+                ),
+                start: BytePos(
+                    37,
+                ),
+                end: BytePos(
+                    43,
+                ),
+            },
+            message: "expected a statement terminator after a statement",
+        },
+        secondary: [],
+        help: None,
+    },
+]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    while_condition_must_be_bool
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p keld-semantics --test control_flow_semantics`
 
 exit_status=101

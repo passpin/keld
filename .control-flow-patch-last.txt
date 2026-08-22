@@ -1,3 +1,26 @@
-error: corrupt patch at .control-flow-apply.patch:52
+Checking patch crates/keld-semantics/src/features.rs...
+Hunk #1 succeeded at 34 (offset 3 lines).
+Checking patch crates/keld-semantics/src/hir.rs...
+Hunk #1 succeeded at 91 (offset 14 lines).
+Hunk #2 succeeded at 239 (offset 32 lines).
+Checking patch crates/keld-semantics/src/check.rs...
+Hunk #2 succeeded at 22 (offset 1 line).
+Hunk #3 succeeded at 55 (offset 5 lines).
+Hunk #4 succeeded at 81 (offset 1 line).
+Hunk #5 succeeded at 96 (offset -1 lines).
+Hunk #6 succeeded at 215 (offset 1 line).
+Hunk #7 succeeded at 390 (offset 6 lines).
+Hunk #8 succeeded at 1714 (offset 12 lines).
+Hunk #9 succeeded at 1923 (offset -6 lines).
+Checking patch crates/keld-semantics/tests/feature_gate.rs...
+Hunk #1 succeeded at 29 (offset 2 lines).
+Hunk #2 succeeded at 71 (offset 4 lines).
+Checking patch crates/keld-semantics/tests/control_flow_semantics.rs...
+Hunk #1 succeeded at 66 (offset -1 lines).
+Applied patch crates/keld-semantics/src/features.rs cleanly.
+Applied patch crates/keld-semantics/src/hir.rs cleanly.
+Applied patch crates/keld-semantics/src/check.rs cleanly.
+Applied patch crates/keld-semantics/tests/feature_gate.rs cleanly.
+Applied patch crates/keld-semantics/tests/control_flow_semantics.rs cleanly.
 
-exit_status=128
+exit_status=0

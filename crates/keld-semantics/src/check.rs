@@ -4,8 +4,8 @@ use crate::symbols::{FunctionSignature, RetirementSignature};
 use crate::{
     BindingMutability, CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp,
     HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle, HirLifecycleId, HirPlace,
-    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, LocalId, ParameterIndex, TypeId, TypeKind,
-    TypeStore,
+    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, HirWhile, LocalId, ParameterIndex, TypeId,
+    TypeKind, TypeStore,
 };
 use keld_numeric::{
     IntBinaryOp, IntUnaryOp, ParsedIntLiteral, eval_binary, eval_unary, parse_int_literal,
@@ -21,6 +21,7 @@ const TYPE_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0106");
 const CONDITION_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0107");
 const FEATURE_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0004");
 const RETURN_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0111");
+const LOOP_CONTROL_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0112");
 const CONSTANT_FAULT_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0120");
 const INTEGER_RANGE_DIAGNOSTIC: DiagnosticCode = DiagnosticCode("KLD0121");
 
@@ -54,6 +55,7 @@ struct BodyChecker<'analyzer, 'source, 'syntax> {
     local_types: Vec<TypeId>,
     local_mutability: Vec<BindingMutability>,
     suppressed_constant_faults: u16,
+    loop_depth: usize,
 }
 
 impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
@@ -79,6 +81,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             local_types,
             local_mutability: vec![BindingMutability::Let; signature.parameters.len()],
             suppressed_constant_faults: 0,
+            loop_depth: 0,
         }
     }
 
@@ -93,7 +96,7 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
             },
             |node| self.check_block(node, &mut environment),
         );
-        let definitely_returns = body_node.is_some_and(block_definitely_returns);
+        let definitely_returns = block_definitely_returns(&body);
         if self.signature.return_type != TypeStore::UNIT && !definitely_returns {
             let span = direct_child(self.signature.node, SyntaxKind::ReturnClause)
                 .map_or(self.signature.node.span, |clause| clause.span);
@@ -212,6 +215,27 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
                 HirStmtKind::Expr(checked.hir)
             }),
             SyntaxKind::IfStmt => Some(self.check_if(node, environment)),
+            SyntaxKind::WhileStmt => Some(self.check_while(node, environment)),
+            SyntaxKind::BreakStmt => {
+                if self.loop_depth == 0 {
+                    self.error(
+                        LOOP_CONTROL_DIAGNOSTIC,
+                        node.span,
+                        "`break` is only valid inside a while loop".to_owned(),
+                    );
+                }
+                Some(HirStmtKind::Break)
+            }
+            SyntaxKind::ContinueStmt => {
+                if self.loop_depth == 0 {
+                    self.error(
+                        LOOP_CONTROL_DIAGNOSTIC,
+                        node.span,
+                        "`continue` is only valid inside a while loop".to_owned(),
+                    );
+                }
+                Some(HirStmtKind::Continue)
+            }
             SyntaxKind::WhenStmt => Some(self.check_when(node, environment)),
             SyntaxKind::LifecycleStmt => Some(self.check_lifecycle(node, environment)),
             SyntaxKind::KeepStmt => self.check_keep(node, environment),
@@ -364,6 +388,36 @@ impl<'analyzer, 'source, 'syntax> BodyChecker<'analyzer, 'source, 'syntax> {
         let checked =
             self.check_expression(expression, Some(self.signature.return_type), environment);
         HirStmtKind::Return(Some(checked.hir))
+    }
+
+    fn check_while(&mut self, node: &SyntaxNode, environment: &Environment) -> HirStmtKind {
+        let condition = if let Some(expression) = expression_child(node) {
+            let checked = self.check_expression(expression, None, &mut environment.clone());
+            if checked.hir.ty != TypeStore::BOOL && checked.hir.ty != TypeStore::ERROR {
+                self.error(
+                    CONDITION_DIAGNOSTIC,
+                    expression.span,
+                    "while condition must have type Bool".to_owned(),
+                );
+            }
+            checked.hir
+        } else {
+            Self::error_expression(node.span)
+        };
+
+        let body = if let Some(block) = direct_child(node, SyntaxKind::Block) {
+            self.loop_depth = self.loop_depth.saturating_add(1);
+            let body = self.check_block(block, &mut environment.clone());
+            self.loop_depth = self.loop_depth.saturating_sub(1);
+            body
+        } else {
+            HirBlock {
+                statements: Vec::new(),
+                span: node.span,
+            }
+        };
+
+        HirStmtKind::While(HirWhile { condition, body })
     }
 
     fn check_if(&mut self, node: &SyntaxNode, environment: &Environment) -> HirStmtKind {
@@ -1660,6 +1714,11 @@ fn collect_block_calls(block: &HirBlock, calls: &mut BTreeSet<FunctionId>) {
                     collect_block_calls(block, calls);
                 }
             }
+            HirStmtKind::While(value) => {
+                collect_expr_calls(&value.condition, calls);
+                collect_block_calls(&value.body, calls);
+            }
+            HirStmtKind::Break | HirStmtKind::Continue => {}
             HirStmtKind::When(value) => {
                 collect_expr_calls(&value.link, calls);
                 collect_block_calls(&value.live, calls);
@@ -1864,37 +1923,55 @@ fn decode_string_literal(text: &str) -> Option<String> {
     Some(output)
 }
 
-fn block_definitely_returns(block: &SyntaxNode) -> bool {
+fn block_definitely_returns(block: &HirBlock) -> bool {
     block
-        .child_nodes()
-        .filter(|child| is_statement(child.kind))
+        .statements
+        .iter()
         .any(statement_definitely_returns)
 }
 
-fn statement_definitely_returns(statement: &SyntaxNode) -> bool {
-    match statement.kind {
-        SyntaxKind::ReturnStmt => true,
-        SyntaxKind::LifecycleStmt => {
-            direct_child(statement, SyntaxKind::Block).is_some_and(block_definitely_returns)
+fn statement_definitely_returns(statement: &HirStmt) -> bool {
+    match &statement.kind {
+        HirStmtKind::Return(_) => true,
+        HirStmtKind::Lifecycle(value) => block_definitely_returns(&value.body),
+        HirStmtKind::If(value) => {
+            block_definitely_returns(&value.then_block)
+                && value
+                    .else_block
+                    .as_ref()
+                    .is_some_and(block_definitely_returns)
         }
-        SyntaxKind::IfStmt => {
-            let expressions = statement
-                .child_nodes()
-                .filter(|child| is_expression(child.kind))
-                .count();
-            let blocks = statement
-                .child_nodes()
-                .filter(|child| child.kind == SyntaxKind::Block)
-                .collect::<Vec<_>>();
-            blocks.len() > expressions && blocks.iter().all(|block| block_definitely_returns(block))
+        HirStmtKind::When(value) => {
+            block_definitely_returns(&value.live)
+                && value.absent.as_ref().is_some_and(block_definitely_returns)
         }
-        SyntaxKind::WhenStmt => {
-            let blocks = statement
-                .child_nodes()
-                .filter(|child| child.kind == SyntaxKind::Block)
-                .collect::<Vec<_>>();
-            blocks.len() == 2 && blocks.iter().all(|block| block_definitely_returns(block))
+        HirStmtKind::While(value) => {
+            matches!(value.condition.kind, HirExprKind::Bool(true))
+                && !block_has_break_for_current_loop(&value.body)
         }
         _ => false,
     }
+}
+
+fn block_has_break_for_current_loop(block: &HirBlock) -> bool {
+    block.statements.iter().any(|statement| match &statement.kind {
+        HirStmtKind::Break => true,
+        HirStmtKind::While(_) => false,
+        HirStmtKind::If(value) => {
+            block_has_break_for_current_loop(&value.then_block)
+                || value
+                    .else_block
+                    .as_ref()
+                    .is_some_and(block_has_break_for_current_loop)
+        }
+        HirStmtKind::When(value) => {
+            block_has_break_for_current_loop(&value.live)
+                || value
+                    .absent
+                    .as_ref()
+                    .is_some_and(block_has_break_for_current_loop)
+        }
+        HirStmtKind::Lifecycle(value) => block_has_break_for_current_loop(&value.body),
+        _ => false,
+    })
 }
