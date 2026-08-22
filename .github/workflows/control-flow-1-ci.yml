@@ -1,0 +1,14 @@
+name: Control Flow 1 CI
+
+on:
+  push:
+    branches:
+      - feature/control-flow-1
+
+jobs:
+  semantics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run semantics tests
+        run: cargo test -p keld-semantics
