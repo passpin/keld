@@ -4,7 +4,7 @@ use keld_lifecycle::verify_text_for_test;
 #[test]
 fn loop_analysis_reaches_entity_operations_and_publishes_facts() {
     let result = verify_text_for_test(
-        "entity E { value: Int }\nfn read_many(e: E) -> Int { var i = 0; var total = 0; while i < 3 { total += e.value; i += 1 }; return total }\nfn main() -> Int { lifecycle level { let e = E(value: 2); return read_many(e) } }\n",
+        "entity E { value: Int }\nfn read_many(e: E) -> Int { var i = 0; var total = 0; while i < 3 { total = total + e.value; i = i + 1 }; return total }\nfn main() -> Int { lifecycle level { let e = E(value: 2); return read_many(e) } }\n",
     );
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     let module = result.module.expect("loop program verifies");
@@ -36,7 +36,7 @@ fn loop_analysis_reaches_entity_operations_and_publishes_facts() {
 #[test]
 fn retirement_on_one_loop_exit_rejects_post_loop_use() {
     let result = verify_text_for_test(
-        "entity E { value: Int }\nfn maybe_retire(e: E, retire_now: Bool) -> Int retires e { var i = 0; while i < 1 { if retire_now { retire e; break }; i += 1 }; return e.value }\nfn main() -> Int { return 0 }\n",
+        "entity E { value: Int }\nfn maybe_retire(e: E, retire_now: Bool) -> Int retires e { var i = 0; while i < 1 { if retire_now { retire e; break }; i = i + 1 }; return e.value }\nfn main() -> Int { return 0 }\n",
     );
 
     assert!(
