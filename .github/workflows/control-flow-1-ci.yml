@@ -14,24 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply queued edit and record failure
-        shell: pwsh
-        run: |
-          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
-          & python .control-flow-apply.py *> .control-flow-patch-last.txt
-          $status = $LASTEXITCODE
-          "`nexit_status=$status" | Out-File -FilePath .control-flow-patch-last.txt -Append
-          if ($status -ne 0) {
-            git add .control-flow-patch-last.txt
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "ci: record Control Flow-1 edit failure [skip ci]"
-            git push
-            exit $status
-          }
-          git rm .control-flow-apply.py
-
-      - name: Run Task 8 CLI acceptance RED
+      - name: Run Control Flow-1 self-review regressions
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
@@ -64,9 +47,19 @@ jobs:
 
             cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log
             if ($LASTEXITCODE -ne 0) { throw "production runtime build failed: $LASTEXITCODE" }
+            cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log
+            if ($LASTEXITCODE -ne 0) { throw "test runtime build failed: $LASTEXITCODE" }
 
-            cargo test -p keld-cli --test cli -- --nocapture *>> $log
-            $status = $LASTEXITCODE
+            cargo test -p keld-interpreter --test control_flow --test cleanup -- --nocapture *>> $log
+            $interpreter = $LASTEXITCODE
+            cargo test -p keld-lifecycle --test control_flow -- --nocapture *>> $log
+            $lifecycle = $LASTEXITCODE
+            cargo test -p keld-native-backend --test differential -- --nocapture *>> $log
+            $differential = $LASTEXITCODE
+            "interpreter=$interpreter lifecycle=$lifecycle differential=$differential" | Out-File $log -Append
+            if ($interpreter -ne 0) { $status = $interpreter }
+            elseif ($lifecycle -ne 0) { $status = $lifecycle }
+            else { $status = $differential }
           }
           catch {
             $_ | Out-String | Out-File $log -Append
