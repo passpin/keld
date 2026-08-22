@@ -68,40 +68,139 @@ llvm-config=22.1.8
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 4.29s
+    Finished `release` profile [optimized] target(s) in 3.93s
  Downloading crates ...
-  Downloaded find-msvc-tools v0.1.10
-  Downloaded anyhow v1.0.104
-  Downloaded lazy_static v1.5.0
-  Downloaded cc v1.4.2
-  Downloaded semver v1.0.28
-  Downloaded shlex v2.0.1
   Downloaded regex-lite v0.1.9
+  Downloaded shlex v2.0.1
+  Downloaded lazy_static v1.5.0
+  Downloaded semver v1.0.28
+  Downloaded anyhow v1.0.104
+  Downloaded find-msvc-tools v0.1.10
   Downloaded llvm-sys v221.0.1
+  Downloaded cc v1.4.2
   Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
    Compiling anyhow v1.0.104
    Compiling find-msvc-tools v0.1.10
-   Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
    Compiling shlex v2.0.1
-   Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
+   Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
    Compiling cc v1.4.2
-   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
-   Compiling libc v0.2.189
+   Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
    Compiling regex-lite v0.1.9
+   Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
    Compiling semver v1.0.28
+   Compiling libc v0.2.189
    Compiling lazy_static v1.5.0
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
+   Compiling llvm-sys v221.0.1
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
-   Compiling llvm-sys v221.0.1
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.81s
+error[E0063]: missing field `locals` in initializer of `Function`
+  --> crates\keld-native-backend\tests\native_int.rs:24:25
+   |
+24 |         functions: vec![Function {
+   |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+  --> crates\keld-native-backend\tests\native_int.rs:54:25
+   |
+54 |         functions: vec![Function {
+   |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:266:25
+    |
+266 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:361:25
+    |
+361 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:483:25
+    |
+483 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:590:25
+    |
+590 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:692:25
+    |
+692 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+   --> crates\keld-native-backend\tests\native_int.rs:781:25
+    |
+781 |         functions: vec![Function {
+    |                         ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2177:20
+     |
+2177 |     let identity = Function {
+     |                    ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2191:16
+     |
+2191 |     let main = Function {
+     |                ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2238:16
+     |
+2238 |     let unit = Function {
+     |                ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2252:16
+     |
+2252 |     let main = Function {
+     |                ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2305:18
+     |
+2305 |     let callee = Function {
+     |                  ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2339:16
+     |
+2339 |     let main = Function {
+     |                ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2391:18
+     |
+2391 |     let callee = Function {
+     |                  ^^^^^^^^ missing `locals`
+
+error[E0063]: missing field `locals` in initializer of `Function`
+    --> crates\keld-native-backend\tests\native_int.rs:2427:16
+     |
+2427 |     let main = Function {
+     |                ^^^^^^^^ missing `locals`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `keld-native-backend` (test "native_int") due to 16 previous errors
+   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
      Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
 
 running 7 tests
@@ -113,7 +212,18 @@ test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
 test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
 test source_surface_fixtures_extend_the_same_differential_schedule ... ok
 
-test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.60s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.56s
 
+   Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running tests\surface_audit.rs (target\x86_64-pc-windows-gnu\debug\deps\surface_audit-0cae7ad9bc3b1581.exe)
 
-exit_status=0
+running 2 tests
+test every_ir_variant_has_a_named_source_or_ir_differential_fixture ... ok
+test native_surface_is_explicit_and_exhaustive ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+native_int=101 differential=0 surface_audit=0
+
+exit_status=101
