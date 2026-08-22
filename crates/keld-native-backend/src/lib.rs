@@ -610,6 +610,20 @@ fn coff_symbol_matching(
     valid.then_some(head).flatten()
 }
 
+fn coff_symbols_matching(
+    bytes: &[u8],
+    mut matches: impl FnMut(&[u8], i16) -> bool,
+) -> Option<Vec<Vec<u8>>> {
+    let mut symbols = Vec::new();
+    let valid = visit_coff_symbols(bytes, |name, section| {
+        if matches(name, section) {
+            symbols.push(name.to_vec());
+        }
+        false
+    });
+    valid.then_some(symbols)
+}
+
 fn coff_head_symbol(bytes: &[u8]) -> Option<Vec<u8>> {
     coff_symbol_matching(bytes, |name, section| {
         section > 0 && name.starts_with(b"_head_")
@@ -629,10 +643,15 @@ fn section_starts_with_c_string(section: &[u8], wanted: &[u8]) -> bool {
         && section.get(wanted.len()) == Some(&0)
 }
 
+fn coff_import_symbol(bytes: &[u8]) -> Option<Vec<u8>> {
+    let import_name = coff_section_data(bytes, b".idata$6")?.get(2..)?;
+    let end = import_name.iter().position(|byte| *byte == 0)?;
+    Some(import_name[..end].to_vec())
+}
+
 fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
     let bytes = std::fs::read(path)?;
     let abi_import = b"keld_rt_v1_abi_version";
-    let abi_imp_symbol = b"__imp_keld_rt_v1_abi_version";
     let mut import_name_symbol = None;
     let archive_valid = visit_gnu_archive(&bytes, |member| {
         let Some(dll_name) = coff_section_data(member, b".idata$7") else {
@@ -648,16 +667,22 @@ fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
             path.display()
         )));
     };
+    let mut head_members_valid = true;
+    let mut approved_head_count = 0;
     let mut head_symbol = None;
     let head_archive_valid = visit_gnu_archive(&bytes, |member| {
         if coff_section_data(member, b".idata$2").is_none() {
             return;
         }
         let Some(candidate) = coff_head_symbol(member) else {
+            head_members_valid = false;
             return;
         };
         if coff_symbol_section(member, import_name_symbol) == Some(0) {
+            approved_head_count += 1;
             head_symbol = Some(candidate);
+        } else {
+            head_members_valid = false;
         }
     });
     let Some(head_symbol) = head_symbol.as_deref() else {
@@ -666,24 +691,49 @@ fn validate_runtime_import_library(path: &Path) -> Result<(), BackendError> {
             path.display()
         )));
     };
+    if !head_members_valid || approved_head_count != 1 {
+        return Err(BackendError::Toolchain(format!(
+            "runtime import library must contain a COFF import for {RUNTIME_DLL_NAME} and keld_rt_v1_abi_version: {}",
+            path.display()
+        )));
+    }
     let mut found_abi_import = false;
+    let mut runtime_imports_valid = true;
     let import_archive_valid = visit_gnu_archive(&bytes, |member| {
-        let Some(import_name) = coff_section_data(member, b".idata$6") else {
-            return;
-        };
-        if !section_starts_with_c_string(import_name.get(2..).unwrap_or_default(), abi_import) {
+        if coff_section_data(member, b".idata$6").is_none() {
             return;
         }
+        let Some(import_name) = coff_import_symbol(member) else {
+            runtime_imports_valid = false;
+            return;
+        };
+        let Some(head_references) = coff_symbols_matching(member, |name, section| {
+            section == 0 && name.starts_with(b"_head_")
+        }) else {
+            runtime_imports_valid = false;
+            return;
+        };
+        let head_matches =
+            head_references.len() == 1 && head_references[0].as_slice() == head_symbol;
         let import_defined =
-            coff_symbol_section(member, abi_import).is_some_and(|section| section > 0);
+            coff_symbol_section(member, &import_name).is_some_and(|section| section > 0);
+        let mut import_pointer = b"__imp_".to_vec();
+        import_pointer.extend_from_slice(&import_name);
         let import_pointer_defined =
-            coff_symbol_section(member, abi_imp_symbol).is_some_and(|section| section > 0);
-        let head_undefined = coff_symbol_section(member, head_symbol) == Some(0);
-        if import_defined && import_pointer_defined && head_undefined {
+            coff_symbol_section(member, &import_pointer).is_some_and(|section| section > 0);
+        if !head_matches || !import_defined || !import_pointer_defined {
+            runtime_imports_valid = false;
+        }
+        if import_name == abi_import && import_defined && import_pointer_defined {
             found_abi_import = true;
         }
     });
-    if !archive_valid || !head_archive_valid || !import_archive_valid || !found_abi_import {
+    if !archive_valid
+        || !head_archive_valid
+        || !import_archive_valid
+        || !runtime_imports_valid
+        || !found_abi_import
+    {
         return Err(BackendError::Toolchain(format!(
             "runtime import library must contain a COFF import for {RUNTIME_DLL_NAME} and keld_rt_v1_abi_version: {}",
             path.display()

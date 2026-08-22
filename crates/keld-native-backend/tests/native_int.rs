@@ -1454,6 +1454,93 @@ fn import_library_with_wrong_dll_name_hidden_by_benign_member_is_rejected() {
 }
 
 #[test]
+fn mixed_runtime_import_heads_are_rejected() {
+    let (runtime_dll, import_library) = runtime_artifacts("mixed-import-heads");
+    let directory = runtime_dll.parent().expect("runtime directory");
+    let definition = directory.join("runtime.def");
+    let contents = std::fs::read_to_string(&definition).expect("runtime export definition");
+    let other_definition = directory.join("other-runtime.def");
+    let other_contents = contents
+        .replace("LIBRARY keld_runtime_v1.dll", "LIBRARY other_runtime.dll")
+        .lines()
+        .filter(|line| *line != "keld_rt_v1_abi_version")
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&other_definition, other_contents).expect("other runtime export definition");
+    let other_import = directory.join("libother_runtime.dll.a");
+    let dlltool = std::env::var_os("KELD_DLLTOOL").unwrap_or_else(|| "dlltool".into());
+    let status = Command::new(&dlltool)
+        .args([
+            "--input-def",
+            other_definition.to_str().expect("other definition path"),
+            "--dllname",
+            "other_runtime.dll",
+            "--output-lib",
+        ])
+        .arg(&other_import)
+        .arg(&runtime_dll)
+        .status()
+        .expect("dlltool");
+    assert!(status.success(), "other dlltool failed: {status}");
+
+    let extracted = directory.join("other-members");
+    std::fs::create_dir_all(&extracted).expect("other archive extraction directory");
+    let status = Command::new(std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into()))
+        .current_dir(&extracted)
+        .args(["x", other_import.to_str().expect("other import path")])
+        .status()
+        .expect("ar extract");
+    assert!(status.success(), "ar extract failed: {status}");
+    let archive_members = Command::new(std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into()))
+        .args(["t", other_import.to_str().expect("other import path")])
+        .output()
+        .expect("ar list");
+    assert!(archive_members.status.success(), "ar list failed");
+    let remaining_imports = String::from_utf8(archive_members.stdout)
+        .expect("archive member names")
+        .lines()
+        .filter(|member| !member.ends_with("_h.o") && !member.ends_with("_t.o"))
+        .map(|member| extracted.join(member))
+        .collect::<Vec<_>>();
+    assert!(
+        remaining_imports.len() >= 2,
+        "other archive must provide remaining runtime imports"
+    );
+
+    let ar = std::env::var_os("KELD_AR").unwrap_or_else(|| "ar".into());
+    let mut append = Command::new(ar);
+    append
+        .current_dir(directory)
+        .args(["r", import_library.to_str().expect("import library path")]);
+    for member in &remaining_imports {
+        append.arg(member);
+    }
+    let status = append.status().expect("ar append");
+    assert!(status.success(), "ar append failed: {status}");
+
+    let output = directory.join("mixed-import-heads.exe");
+    let error = build_executable(
+        &const_module(7),
+        &metadata(),
+        &request(
+            &output,
+            &runtime_dll,
+            &import_library,
+            OptimizationLevel::O0,
+        ),
+    )
+    .expect_err("mixed runtime import heads must be rejected");
+    assert!(matches!(error, BackendError::Toolchain(_)));
+    assert!(
+        error
+            .to_string()
+            .contains("runtime import library must contain a COFF import")
+    );
+    assert!(!output.exists());
+}
+
+#[test]
 fn native_program_rejects_runtime_abi_version_mismatch() {
     let (runtime_dll, import_library) = test_runtime_artifacts("abi-mismatch");
     let directory = runtime_dll.parent().expect("runtime directory");
