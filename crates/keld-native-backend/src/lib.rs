@@ -924,6 +924,10 @@ fn managed_slot_name(function: &keld_ir::Function, register: Register) -> String
     }
 }
 
+fn scalar_local_slot_name(register: Register) -> String {
+    format!("%local{}", register.0)
+}
+
 fn escape_llvm_bytes(bytes: &[u8]) -> String {
     let mut escaped = String::new();
     for byte in bytes {
@@ -1019,6 +1023,16 @@ impl<'module> ScalarLowerer<'module> {
             .register_types
             .get(register.0 as usize)
             .is_some_and(is_managed_type)
+    }
+
+    fn is_scalar_local(&self, register: Register) -> bool {
+        self.function.locals.contains(&register)
+            && self
+                .function
+                .register_types
+                .get(register.0 as usize)
+                .and_then(scalar_type)
+                .is_some()
     }
 
     fn is_home_register(&self, register: Register) -> bool {
@@ -1527,6 +1541,24 @@ impl<'module> ScalarLowerer<'module> {
 
     fn emit_managed_slots(&mut self) {
         self.slots_emitted = true;
+        for local in &self.function.locals {
+            let Some(ty) = self
+                .function
+                .register_types
+                .get(local.0 as usize)
+                .and_then(scalar_type)
+            else {
+                continue;
+            };
+            let slot = scalar_local_slot_name(*local);
+            self.line(format!("{slot} = alloca {ty}"));
+            if self.function.parameters.contains(local) {
+                self.line(format!(
+                    "store {ty} {}, ptr {slot}",
+                    register_name(*local)
+                ));
+            }
+        }
         for (index, ty) in self.function.register_types.iter().enumerate() {
             let register = Register(
                 u32::try_from(index).expect("register index exceeds native register range"),
@@ -1996,23 +2028,35 @@ impl<'module> ScalarLowerer<'module> {
                     ));
                 } else {
                     let ty = self.value_type(*src)?;
-                    if ty == "i64" {
+                    let source = if self.is_scalar_local(*src) {
+                        let loaded = format!("%local_load_{}_{}", src.0, self.lines.len());
                         self.line(format!(
-                            "{} = add i64 0, {}",
-                            register_name(*dst),
-                            register_name(*src)
+                            "{loaded} = load {ty}, ptr {}",
+                            scalar_local_slot_name(*src)
+                        ));
+                        loaded
+                    } else {
+                        register_name(*src)
+                    };
+                    if self.is_scalar_local(*dst) {
+                        self.line(format!(
+                            "store {ty} {source}, ptr {}",
+                            scalar_local_slot_name(*dst)
+                        ));
+                    } else if ty == "i64" {
+                        self.line(format!(
+                            "{} = add i64 0, {source}",
+                            register_name(*dst)
                         ));
                     } else if ty == "i1" {
                         self.line(format!(
-                            "{} = xor i1 {}, false",
-                            register_name(*dst),
-                            register_name(*src)
+                            "{} = xor i1 {source}, false",
+                            register_name(*dst)
                         ));
                     } else {
                         self.line(format!(
-                            "{} = select i1 true, {ty} {}, {ty} zeroinitializer",
-                            register_name(*dst),
-                            register_name(*src)
+                            "{} = select i1 true, {ty} {source}, {ty} zeroinitializer",
+                            register_name(*dst)
                         ));
                     }
                 }

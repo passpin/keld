@@ -64,44 +64,44 @@ installing mingw-w64-x86_64-llvm...
 LLVM_SYS_221_PREFIX=C:\msys64\mingw64
 llvm-config=22.1.8
     Updating crates.io index
-   Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
+   Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
    Compiling keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Finished `release` profile [optimized] target(s) in 5.21s
+    Finished `release` profile [optimized] target(s) in 4.29s
  Downloading crates ...
   Downloaded find-msvc-tools v0.1.10
-  Downloaded lazy_static v1.5.0
   Downloaded anyhow v1.0.104
-  Downloaded llvm-sys v221.0.1
+  Downloaded lazy_static v1.5.0
+  Downloaded cc v1.4.2
   Downloaded semver v1.0.28
   Downloaded shlex v2.0.1
   Downloaded regex-lite v0.1.9
-  Downloaded cc v1.4.2
+  Downloaded llvm-sys v221.0.1
   Downloaded libc v0.2.189
    Compiling keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
    Compiling keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
    Compiling anyhow v1.0.104
-   Compiling shlex v2.0.1
    Compiling find-msvc-tools v0.1.10
    Compiling keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
-   Compiling semver v1.0.28
+   Compiling shlex v2.0.1
    Compiling keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
    Compiling cc v1.4.2
    Compiling keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
-   Compiling lazy_static v1.5.0
-   Compiling regex-lite v0.1.9
    Compiling libc v0.2.189
+   Compiling regex-lite v0.1.9
+   Compiling semver v1.0.28
+   Compiling lazy_static v1.5.0
    Compiling keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
    Compiling keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
    Compiling keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
-   Compiling llvm-sys v221.0.1
    Compiling keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
+   Compiling llvm-sys v221.0.1
    Compiling keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
    Compiling keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
    Compiling keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.04s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.81s
      Running tests\differential.rs (target\x86_64-pc-windows-gnu\debug\deps\differential-4176c49710b1975d.exe)
 
 running 7 tests
@@ -109,25 +109,11 @@ test allocation_schedule_includes_context_setup_failure ... ok
 test allocation_schedule_covers_preferred_and_exact_list_growth_failures ... ok
 test repeated_loop_concat_allocation_uses_one_static_site_with_three_attempts ... ok
 test every_executable_ir_variant_is_in_a_real_differential_fixture ... ok
-
-thread 'source_surface_fixtures_extend_the_same_differential_schedule' (8352) panicked at crates\keld-native-backend\tests\differential.rs:146:6:
-native differential build: Llvm("LLVM IR parsing failed: control_flow_loop_surface:79:3: error: multiple definition of local value named 'r18'\n  %r18 = add i64 0, %r7\n  ^\n")
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-test source_surface_fixtures_extend_the_same_differential_schedule ... FAILED
 test ir_only_surface_fixtures_extend_the_same_differential_schedule ... ok
+test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... ok
+test source_surface_fixtures_extend_the_same_differential_schedule ... ok
 
-thread 'every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2' (9064) panicked at crates\keld-native-backend\tests\differential.rs:146:6:
-native differential build: Llvm("LLVM IR parsing failed: control_flow_loop:79:3: error: multiple definition of local value named 'r18'\n  %r18 = add i64 0, %r7\n  ^\n")
-test every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2 ... FAILED
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.60s
 
-failures:
 
-failures:
-    every_source_fixture_has_a_shared_allocation_failure_schedule_at_o0_and_o2
-    source_surface_fixtures_extend_the_same_differential_schedule
-
-test result: FAILED. 5 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
-
-error: test failed, to rerun pass `-p keld-native-backend --test differential`
-
-exit_status=101
+exit_status=0
