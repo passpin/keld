@@ -78,4 +78,3 @@ fn main() -> Int {
 '''
 text = text.replace(marker, marker + addition, 1)
 path.write_text(text, encoding="utf-8")
-'''
