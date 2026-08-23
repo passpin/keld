@@ -77,3 +77,8 @@ jobs:
         run: |
           cargo test -p keld-native-backend --release --test language_runtime_compare -- --ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Text-content benchmark
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test language_text_content_compare -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
