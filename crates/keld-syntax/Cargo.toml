@@ -1,0 +1,12 @@
+[package]
+name = "keld-syntax"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keld-source = { path = "../keld-source" }
+
+[lints]
+workspace = true

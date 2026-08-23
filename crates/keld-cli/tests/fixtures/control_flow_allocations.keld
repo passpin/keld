@@ -1,0 +1,10 @@
+fn main() -> Int {
+    var i = 0
+    var total = 0
+    while i < 3 {
+        let text = "x" + "y"
+        total += text.byte_length
+        i += 1
+    }
+    return total
+}

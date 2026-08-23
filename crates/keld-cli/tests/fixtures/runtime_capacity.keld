@@ -1,0 +1,5 @@
+fn main() -> Int {
+    let items: List[Int] = List()
+    items.reserve(-1)
+    return 0
+}

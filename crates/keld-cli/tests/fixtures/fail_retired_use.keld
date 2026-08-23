@@ -1,0 +1,8 @@
+entity Enemy { health: Int }
+
+fn broken(enemy: Enemy) -> Int retires enemy {
+    retire enemy
+    return enemy.health
+}
+
+fn main() -> Int { return 0 }

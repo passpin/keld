@@ -1,0 +1,18 @@
+entity Enemy { health: Int }
+entity Anchor { target: link Enemy? }
+
+fn main() -> Int {
+    lifecycle game {
+        let anchor = Anchor(target: none)
+        lifecycle level {
+            let enemy = Enemy(health: 30)
+            anchor.target = enemy
+            keep enemy in game
+        }
+        when anchor.target as survivor {
+            return survivor.health
+        } else {
+            return 0
+        }
+    }
+}

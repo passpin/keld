@@ -1,0 +1,158 @@
+use keld_interpreter::{FieldId, Value, trace_text_for_test};
+
+#[test]
+fn locals_drop_in_reverse_successful_initialization_order() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let first: Text = \"a\"; let second: Text = \"b\"; return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.text_markers(), vec![(1, b'b'), (1, b'a')]);
+}
+
+#[test]
+fn moved_and_uninitialized_homes_are_skipped() {
+    let trace = trace_text_for_test(
+        "fn consume(take value: Text) { return }\nfn main() -> Int { let a: Text = \"a\"; var b: Text; consume(take a); return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.text_markers(), vec![(1, b'a')]);
+}
+
+#[test]
+fn maybe_live_home_drops_only_on_the_initialized_path() {
+    let live = trace_text_for_test(
+        "fn main() -> Int { var value: Text; if true { value = \"x\"; }; return 0 }\n",
+    )
+    .expect("live path executes");
+    let empty = trace_text_for_test(
+        "fn main() -> Int { var value: Text; if false { value = \"x\"; }; return 0 }\n",
+    )
+    .expect("empty path executes");
+    assert_eq!(live.text_markers(), vec![(1, b'x')]);
+    assert!(empty.text_markers().is_empty());
+}
+
+#[test]
+fn reinitialized_home_becomes_the_newest_cleanup() {
+    let trace = trace_text_for_test(
+        "fn consume(take value: Text) { return }\nfn main() -> Int { var a: Text = \"a\"; let b: Text = \"b\"; consume(take a); a = \"c\"; return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.text_markers(), vec![(1, b'a'), (1, b'c'), (1, b'b')]);
+}
+
+#[test]
+fn owned_temporary_loan_drops_after_the_call_closes() {
+    let trace = trace_text_for_test(
+        "fn inspect(value: Text) -> Int { return value.byte_length }\nfn main() -> Int { return inspect(\"abcdefghijklmnopqrstuvwxyz\") }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.result.value, Value::Int(26));
+    assert_eq!(trace.text_markers(), vec![(26, b'a')]);
+}
+
+#[test]
+fn fields_and_list_elements_drop_in_reverse_order_iteratively() {
+    let trace = trace_text_for_test(
+        "struct Pair {\nleft: Text\nright: Text\n}\nfn main() -> Int { let values: List[Pair] = List(); values.push(Pair(left: \"a\", right: \"b\")); values.push(Pair(left: \"c\", right: \"d\")); return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.list_indices(), vec![1, 0]);
+    assert_eq!(
+        trace.field_ids(),
+        vec![FieldId(1), FieldId(0), FieldId(1), FieldId(0)]
+    );
+}
+
+#[test]
+fn optional_try_remove_result_cleans_present_element() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let values: List[Text] = List(); values.push(\"x\"); let removed = values.try_remove(0); return 0 }\n",
+    )
+    .expect("program executes");
+    assert_eq!(trace.text_markers(), vec![(1, b'x')]);
+}
+
+#[test]
+fn nested_text_cleanup_is_iterative_and_preserves_reverse_success_order() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let first: List[Text] = List()\nfirst.push(\"a\")\nlet second: List[Text] = List()\nsecond.push(\"long-lived-text\")\nlet values: List[List[Text]] = List()\nvalues.push(take first)\nvalues.push(take second)\nreturn 0\n}\n",
+    )
+    .expect("nested Text cleanup executes");
+
+    assert_eq!(trace.list_indices(), vec![1, 0, 0, 0]);
+    assert_eq!(trace.text_markers(), vec![(15, b'l'), (1, b'a')]);
+}
+
+#[test]
+fn inline_and_heap_text_use_the_same_home_cleanup_rules() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { let inline: Text = \"a\"\nlet heap: Text = \"abcdefghijklmnopqrstuvwxyz\"\nreturn 0\n}\n",
+    )
+    .expect("inline and heap Text cleanup executes");
+
+    assert_eq!(trace.text_markers(), vec![(26, b'a'), (1, b'a')]);
+}
+
+#[test]
+fn entity_field_replacement_cleans_displaced_then_installed_text() {
+    let trace = trace_text_for_test(
+        "entity Holder { value: Text }\nfn main() -> Int { lifecycle level { let holder = Holder(value: \"old\"); holder.value = \"new\"; return 0; } }\n",
+    )
+    .expect("managed entity field replacement executes");
+
+    assert_eq!(trace.text_markers(), vec![(3, b'o'), (3, b'n')]);
+}
+
+#[test]
+fn nested_entity_field_replacement_preserves_recursive_reverse_cleanup() {
+    let trace = trace_text_for_test(
+        "entity Holder { values: List[Text] }\nfn main() -> Int { lifecycle level { let old: List[Text] = List(); old.push(\"a\"); old.push(\"b\"); let holder = Holder(values: take old); let new: List[Text] = List(); new.push(\"c\"); new.push(\"d\"); holder.values = take new; return 0; } }\n",
+    )
+    .expect("nested managed entity field replacement executes");
+
+    assert_eq!(trace.list_indices(), vec![1, 0, 1, 0]);
+    assert_eq!(
+        trace.text_markers(),
+        vec![(1, b'b'), (1, b'a'), (1, b'd'), (1, b'c')]
+    );
+}
+
+#[test]
+fn continue_drops_body_local_text_on_every_iteration() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { var i = 0; while i < 2 { let text: Text = \"x\"; i += 1; continue }; return i }\n",
+    )
+    .expect("continue cleanup executes");
+    assert_eq!(trace.result.value, Value::Int(2));
+    assert_eq!(trace.text_markers(), vec![(1, b'x'), (1, b'x')]);
+}
+
+#[test]
+fn break_drops_body_local_list_before_loop_exit() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { while true { let values: List[Text] = List(); values.push(\"b\"); break }; return 0 }\n",
+    )
+    .expect("break cleanup executes");
+    assert_eq!(trace.result.value, Value::Int(0));
+    assert_eq!(trace.list_indices(), vec![0]);
+    assert_eq!(trace.text_markers(), vec![(1, b'b')]);
+}
+
+#[test]
+fn managed_condition_temporary_is_cleaned_at_the_condition_boundary() {
+    let trace = trace_text_for_test(
+        "fn main() -> Int { while (\"abcdefghijklmnopqrstuvwxyz\" + \"!\").is_empty { return 1 }; return 0 }\n",
+    )
+    .expect("managed condition executes");
+    assert_eq!(trace.result.value, Value::Int(0));
+    assert_eq!(
+        trace
+            .text_markers()
+            .into_iter()
+            .filter(|(length, first)| *length == 27 && *first == b'a')
+            .count(),
+        1,
+        "the concatenation temporary must be destroyed exactly once"
+    );
+}

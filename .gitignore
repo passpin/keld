@@ -1,1 +1,5 @@
 /.worktrees/
+/target/
+.tools/llvm/*
+!.tools/llvm/
+!.tools/llvm/llvm-packages.lock.json

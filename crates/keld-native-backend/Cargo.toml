@@ -1,0 +1,22 @@
+[package]
+name = "keld-native-backend"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keld-ir = { path = "../keld-ir" }
+keld-native-abi = { path = "../keld-native-abi" }
+keld-native-llvm = { path = "../keld-native-llvm", features = ["llvm"] }
+keld-source = { path = "../keld-source" }
+
+[dev-dependencies]
+keld-flow = { path = "../keld-flow" }
+keld-interpreter = { path = "../keld-interpreter" }
+keld-lifecycle = { path = "../keld-lifecycle" }
+keld-semantics = { path = "../keld-semantics" }
+keld-storage = { path = "../keld-storage" }
+
+[lints]
+workspace = true

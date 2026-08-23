@@ -366,5 +366,7 @@ Keld 0.1. Their reserved keywords prevent accidental source incompatibility.
 
 Numeric operation behavior and faults are normative in
 [numeric-safety.md](numeric-safety.md). Single-home storage, loans, List, and
-Text are normative in [storage-values.md](storage-values.md). Syntax acceptance
-does not override either document's static restrictions.
+Text are normative in [storage-values.md](storage-values.md). Accepted `while`,
+`break`, and `continue` semantics, including condition boundaries, backedges,
+and structured exits, are normative in [control-flow.md](control-flow.md). Syntax
+acceptance does not override those documents' static restrictions.

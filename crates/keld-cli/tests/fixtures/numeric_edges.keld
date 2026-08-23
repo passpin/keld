@@ -1,0 +1,7 @@
+fn remainder(value: Int, divisor: Int) -> Int {
+    return value % divisor
+}
+
+fn main() -> Int {
+    return remainder(-9223372036854775808, -1)
+}

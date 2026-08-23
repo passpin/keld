@@ -1,0 +1,14 @@
+entity Enemy { health: Int }
+
+fn main() -> Int {
+    lifecycle level {
+        let enemy = Enemy(health: 4)
+        let saved: link Enemy? = enemy
+        retire enemy
+        when saved as live {
+            return live.health
+        } else {
+            return 4
+        }
+    }
+}

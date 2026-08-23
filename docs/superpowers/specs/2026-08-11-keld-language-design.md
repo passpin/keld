@@ -791,13 +791,15 @@ Keld syntax is defined by two normative files:
 - [`docs/spec/keld.ebnf`](../../spec/keld.ebnf) defines the Keld 0.1 core
   productions.
 
-Two additional normative files define operations whose safety cannot be
+Three additional normative files define operations whose safety cannot be
 expressed by grammar:
 
 - [`docs/spec/numeric-safety.md`](../../spec/numeric-safety.md) defines numeric
   types, arithmetic, sizes, faults, and backend obligations.
 - [`docs/spec/storage-values.md`](../../spec/storage-values.md) defines
   single-home values, `take`, loans, fields, List, and Text.
+- [`docs/spec/control-flow.md`](../../spec/control-flow.md) defines accepted
+  `while`, `break`, and `continue` semantics, cyclic joins, and structured exits.
 
 Examples in this design document are explanatory. When an example and the
 normative grammar differ, the grammar controls and the example must be corrected.
@@ -873,7 +875,8 @@ The planned Rust workspace uses small crates with one owner each:
 
 ```text
 crates/keld-cli/           command-line interface and diagnostics output
-crates/keld-syntax/        source text, lexer, lossless parser, syntax tree
+crates/keld-source/        normalized source text, spans, and diagnostics
+crates/keld-syntax/        lexer, lossless parser, and syntax tree
 crates/keld-semantics/     names, types, visible effects
 crates/keld-flow/          typed control-flow representation
 crates/keld-storage/       single-home state, loans, and value cleanup
