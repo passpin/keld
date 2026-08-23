@@ -131,7 +131,7 @@ fn generated_scalar_programs_match_interpreter_at_o0_and_o2() {
         let branch = 2 + next(&mut seed) % 17;
         let contribution = 11 + next(&mut seed) % 181;
         let source = format!(
-            r#"
+            r"
 fn main() -> Int {{
     var i = 0
     var x = {initial}
@@ -147,7 +147,7 @@ fn main() -> Int {{
     }}
     return acc + i
 }}
-"#
+"
         );
         assert_equivalent(&format!("generated-{case}"), &source);
     }
@@ -159,7 +159,7 @@ fn control_flow_and_managed_text_cases_match_interpreter() {
     let cases = [
         (
             "zero-iteration",
-            r#"
+            r"
 fn main() -> Int {
     var i = 5
     var acc = 19
@@ -168,11 +168,11 @@ fn main() -> Int {
     }
     return acc + i
 }
-"#,
+",
         ),
         (
             "nested-break-continue",
-            r#"
+            r"
 fn main() -> Int {
     var outer = 0
     var inner = 0
@@ -193,7 +193,7 @@ fn main() -> Int {
     }
     return acc + outer + inner
 }
-"#,
+",
         ),
         (
             "managed-text-loop",
