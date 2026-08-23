@@ -14,12 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
           components: clippy,rustfmt
       - name: Run keld-ir regression suite
         run: cargo test -p keld-ir --all-targets --no-fail-fast
+      - name: Run interpreter regression suite
+        run: cargo test -p keld-interpreter --all-targets --no-fail-fast
       - name: Run strict Clippy
         run: cargo clippy -p keld-ir --all-targets -- -D warnings
       - name: Check formatting
