@@ -13,7 +13,7 @@ const SAMPLES: usize = 5;
 const TEXT_A: &str = "abcdefghijklmnopqrstuvwxyz";
 const TEXT_B: &str = "!";
 
-const KELD_SCALAR: &str = r#"
+const KELD_SCALAR: &str = r"
 fn main() -> Int {
     var i = 0
     var x = 1
@@ -28,7 +28,7 @@ fn main() -> Int {
     }
     return acc
 }
-"#;
+";
 
 const KELD_TEXT: &str = r#"
 fn main() -> Int {
@@ -417,6 +417,7 @@ fn report(language: &str, workload: &str, ms: f64, expected: i64) {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 #[ignore = "manual cross-language runtime benchmark on Windows"]
 fn compare_keld_with_common_languages() {
