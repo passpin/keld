@@ -27,7 +27,10 @@ fn compile_source(source: &str) -> (Module, SourceText) {
         .expect("storage verification");
     let module = keld_ir::lower(&storage);
     let diagnostics = keld_ir::validate(&module);
-    assert!(diagnostics.is_empty(), "invalid equivalence IR: {diagnostics:#?}");
+    assert!(
+        diagnostics.is_empty(),
+        "invalid equivalence IR: {diagnostics:#?}"
+    );
     (module, source_text)
 }
 
@@ -57,8 +60,16 @@ fn native_result(
     let target = root.join("target/x86_64-pc-windows-gnu/release");
     let runtime_source = target.join("keld_runtime_v1.dll");
     let runtime_import = target.join("libkeld_runtime_v1.dll.a");
-    assert!(runtime_source.is_file(), "missing {}", runtime_source.display());
-    assert!(runtime_import.is_file(), "missing {}", runtime_import.display());
+    assert!(
+        runtime_source.is_file(),
+        "missing {}",
+        runtime_source.display()
+    );
+    assert!(
+        runtime_import.is_file(),
+        "missing {}",
+        runtime_import.display()
+    );
     let runtime_dll = directory.join("keld_runtime_v1.dll");
     std::fs::copy(&runtime_source, &runtime_dll).expect("runtime DLL copy");
 

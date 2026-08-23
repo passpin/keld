@@ -277,10 +277,8 @@ fn workspace_root() -> PathBuf {
 
 fn temp_dir() -> PathBuf {
     let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "keld-language-bench-{}-{id}",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("keld-language-bench-{}-{id}", std::process::id()));
     std::fs::create_dir_all(&path).expect("benchmark temporary directory");
     path
 }
@@ -296,7 +294,10 @@ fn compile_keld(source: &str) -> (Module, SourceText, i64) {
         .expect("storage verification");
     let module = keld_ir::lower(&storage);
     let diagnostics = keld_ir::validate(&module);
-    assert!(diagnostics.is_empty(), "invalid benchmark IR: {diagnostics:#?}");
+    assert!(
+        diagnostics.is_empty(),
+        "invalid benchmark IR: {diagnostics:#?}"
+    );
     let mut interpreter = Interpreter::new(&module).expect("interpreter setup");
     let result = interpreter.run_main().expect("interpreter run");
     let ValueKind::Int(value) = result.value.kind() else {
@@ -315,8 +316,16 @@ fn build_keld(
     let target = workspace_root().join("target/x86_64-pc-windows-gnu/release");
     let runtime_source = target.join("keld_runtime_v1.dll");
     let runtime_import = target.join("libkeld_runtime_v1.dll.a");
-    assert!(runtime_source.is_file(), "missing {}", runtime_source.display());
-    assert!(runtime_import.is_file(), "missing {}", runtime_import.display());
+    assert!(
+        runtime_source.is_file(),
+        "missing {}",
+        runtime_source.display()
+    );
+    assert!(
+        runtime_import.is_file(),
+        "missing {}",
+        runtime_import.display()
+    );
     let runtime_dll = directory.join("keld_runtime_v1.dll");
     if !runtime_dll.exists() {
         std::fs::copy(&runtime_source, &runtime_dll).expect("runtime DLL copy");
@@ -351,9 +360,17 @@ fn run_checked(program: &Path, args: &[OsString], directory: &Path, expected: i6
     assert_success(&output, program);
     let text = String::from_utf8(output.stdout).expect("benchmark stdout UTF-8");
     let value = text.trim().parse::<i64>().unwrap_or_else(|error| {
-        panic!("{} returned non-Int stdout {text:?}: {error}", program.display())
+        panic!(
+            "{} returned non-Int stdout {text:?}: {error}",
+            program.display()
+        )
     });
-    assert_eq!(value, expected, "checksum mismatch for {}", program.display());
+    assert_eq!(
+        value,
+        expected,
+        "checksum mismatch for {}",
+        program.display()
+    );
     elapsed
 }
 
@@ -549,7 +566,10 @@ fn compare_keld_with_common_languages() {
         text_expected,
     );
 
-    let python_scalar = vec![python_path.clone().into_os_string(), OsString::from("scalar")];
+    let python_scalar = vec![
+        python_path.clone().into_os_string(),
+        OsString::from("scalar"),
+    ];
     let python_text = vec![
         python_path.clone().into_os_string(),
         OsString::from("text"),
@@ -559,7 +579,12 @@ fn compare_keld_with_common_languages() {
     report(
         "python",
         "scalar",
-        median_ms(Path::new("python"), &python_scalar, &directory, scalar_expected),
+        median_ms(
+            Path::new("python"),
+            &python_scalar,
+            &directory,
+            scalar_expected,
+        ),
         scalar_expected,
     );
     report(
