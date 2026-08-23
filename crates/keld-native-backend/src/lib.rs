@@ -3351,6 +3351,23 @@ impl<'module> ScalarLowerer<'module> {
         self.line("ret i32 1");
         self.lines.push("internal_exit:".to_owned());
         self.line("ret i32 2");
+
+        // LLVM allocas execute dynamically at their insertion point. Scratch slots emitted
+        // inside a CFG loop would therefore grow the native stack on every back-edge.
+        // All slot sizes are static, so allocate the complete frame once in the entry block
+        // and keep only the loads/stores/calls at their original program points.
+        let mut allocas = Vec::new();
+        self.lines.retain(|line| {
+            if line.contains(" = alloca ") {
+                allocas.push(line.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let insertion = self.lines.first().map_or(0, |_| 1);
+        self.lines.splice(insertion..insertion, allocas);
+
         (self.lines.join("\n"), self.text_literals)
     }
 }

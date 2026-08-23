@@ -1,0 +1,84 @@
+name: Keld Equivalence and Language Benchmark
+
+on:
+  push:
+    branches: [bench/equivalence-performance]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-benchmark:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+      LLVM_SYS_221_PREFIX: C:\msys64\mingw64
+      KELD_MINGW_GCC: C:\mingw64\bin\gcc.exe
+      KELD_DLLTOOL: C:\mingw64\bin\dlltool.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-pc-windows-gnu
+          components: clippy,rustfmt
+      - name: Install pinned LLVM runtime
+        shell: pwsh
+        run: |
+          & C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools"
+          if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed" }
+          $version = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+          if ($version -ne "22.1.8") { throw "expected LLVM 22.1.8, got $version" }
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build native runtimes
+        shell: pwsh
+        run: |
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record tool versions
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List
+          & "$env:KELD_MINGW_GCC" --version | Select-Object -First 1
+          & (Join-Path (Split-Path "$env:KELD_MINGW_GCC") 'g++.exe') --version | Select-Object -First 1
+          rustc --version
+          javac -version
+          java -version
+          python --version
+          if (Get-Command swiftc -ErrorAction SilentlyContinue) { swiftc --version } else { Write-Host 'swiftc unavailable' }
+      - name: Format check
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Strict Clippy for benchmark tests
+        shell: pwsh
+        run: |
+          cargo clippy -p keld-native-backend --tests -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Existing interpreter/native differential suite
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test differential -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p keld-native-backend --release --test native_int -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Generated equivalence matrix
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test equivalence_matrix -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cross-language runtime benchmark
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test language_runtime_compare -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Text-content benchmark
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test language_text_content_compare -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -1,0 +1,38 @@
+name: Apply Native Alloca Hoist
+
+on:
+  push:
+    branches: [fix/native-loop-alloca-hoist]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/native-loop-alloca-hoist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - name: Apply patch and rustfmt
+        run: |
+          python .native-alloca-hoist-patch.py
+          cargo fmt --all
+      - name: Commit formatted change
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No formatting changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/keld-native-backend/src/lib.rs crates/keld-native-backend/tests/loop_stack_regression.rs
+          git commit -m "style: format native alloca hoist regression"
+          git push origin HEAD:fix/native-loop-alloca-hoist
