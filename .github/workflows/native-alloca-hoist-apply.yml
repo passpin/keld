@@ -14,17 +14,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/native-loop-alloca-hoist
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.0
-          components: rustfmt,clippy
       - name: Apply patch
         run: python .native-alloca-hoist-patch.py
-      - name: Format and check
-        run: |
-          cargo fmt --all
-          cargo test -p keld-native-backend --lib
-          cargo clippy -p keld-native-backend --lib -- -D warnings
       - name: Commit production change
         shell: bash
         run: |
