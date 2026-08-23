@@ -97,7 +97,7 @@ fn cyclic_reinitialization_order_uses_bounded_outer_scope_tracking() {
     assert!(
         plan.drop_flags
             .iter()
-            .all(|home| matches!(home, HomeId::Local(LocalId(0) | LocalId(1))))
+            .all(|home| matches!(home, HomeId::Local(LocalId(0 | 1))))
     );
     assert!(plan.drop_flags.len() <= 2);
 }
