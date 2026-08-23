@@ -278,22 +278,61 @@ fn write_sources(directory: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathB
     (c, cpp, rust, java, python, swift)
 }
 
-fn build_native_languages(directory: &Path, sources: &(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)) -> (PathBuf, PathBuf, PathBuf) {
+fn build_native_languages(
+    directory: &Path,
+    sources: &(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf),
+) -> (PathBuf, PathBuf, PathBuf) {
     let gcc = std::env::var_os("KELD_MINGW_GCC")
         .map(PathBuf::from)
         .expect("KELD_MINGW_GCC");
     let c_exe = directory.join("c-text.exe");
     let cpp_exe = directory.join("cpp-text.exe");
     let rust_exe = directory.join("rust-text.exe");
-    compile_command(&gcc, &[sources.0.clone().into_os_string(), "-O2".into(), "-std=c11".into(), "-o".into(), c_exe.clone().into_os_string()], directory);
-    compile_command(&gcc.with_file_name("g++.exe"), &[sources.1.clone().into_os_string(), "-O2".into(), "-std=c++20".into(), "-o".into(), cpp_exe.clone().into_os_string()], directory);
-    compile_command(Path::new("rustc"), &[sources.2.clone().into_os_string(), "-C".into(), "opt-level=2".into(), "-o".into(), rust_exe.clone().into_os_string()], directory);
-    compile_command(Path::new("javac"), &[sources.3.clone().into_os_string()], directory);
+    compile_command(
+        &gcc,
+        &[
+            sources.0.clone().into_os_string(),
+            "-O2".into(),
+            "-std=c11".into(),
+            "-o".into(),
+            c_exe.clone().into_os_string(),
+        ],
+        directory,
+    );
+    compile_command(
+        &gcc.with_file_name("g++.exe"),
+        &[
+            sources.1.clone().into_os_string(),
+            "-O2".into(),
+            "-std=c++20".into(),
+            "-o".into(),
+            cpp_exe.clone().into_os_string(),
+        ],
+        directory,
+    );
+    compile_command(
+        Path::new("rustc"),
+        &[
+            sources.2.clone().into_os_string(),
+            "-C".into(),
+            "opt-level=2".into(),
+            "-o".into(),
+            rust_exe.clone().into_os_string(),
+        ],
+        directory,
+    );
+    compile_command(
+        Path::new("javac"),
+        &[sources.3.clone().into_os_string()],
+        directory,
+    );
     (c_exe, cpp_exe, rust_exe)
 }
 
 fn report(language: &str, ms: f64, expected: i64) {
-    println!("TEXTCONTENT language={language} median_ms={ms:.3} samples={SAMPLES} checksum={expected} methodology=whole_process");
+    println!(
+        "TEXTCONTENT language={language} median_ms={ms:.3} samples={SAMPLES} checksum={expected} methodology=whole_process"
+    );
 }
 
 #[test]
@@ -304,25 +343,74 @@ fn compare_text_content_consumption() {
     let (keld_o2, expected_o2) = build_keld(&directory, OptimizationLevel::O2);
     assert_eq!(expected_o2, expected);
     let no_args = Vec::<OsString>::new();
-    report("keld-o0", median_ms(&keld_o0, &no_args, &directory, expected), expected);
-    report("keld-o2", median_ms(&keld_o2, &no_args, &directory, expected), expected);
+    report(
+        "keld-o0",
+        median_ms(&keld_o0, &no_args, &directory, expected),
+        expected,
+    );
+    report(
+        "keld-o2",
+        median_ms(&keld_o2, &no_args, &directory, expected),
+        expected,
+    );
 
     let sources = write_sources(&directory);
     let (c, cpp, rust) = build_native_languages(&directory, &sources);
     let args = vec![A.into(), B.into(), EXPECTED.into()];
     for (language, executable) in [("c", &c), ("cpp", &cpp), ("rust", &rust)] {
-        report(language, median_ms(executable, &args, &directory, expected), expected);
+        report(
+            language,
+            median_ms(executable, &args, &directory, expected),
+            expected,
+        );
     }
 
-    let java_args = vec!["-cp".into(), directory.clone().into_os_string(), "TextContentBench".into(), A.into(), B.into(), EXPECTED.into()];
-    report("java", median_ms(Path::new("java"), &java_args, &directory, expected), expected);
-    let python_args = vec![sources.4.clone().into_os_string(), A.into(), B.into(), EXPECTED.into()];
-    report("python", median_ms(Path::new("python"), &python_args, &directory, expected), expected);
+    let java_args = vec![
+        "-cp".into(),
+        directory.clone().into_os_string(),
+        "TextContentBench".into(),
+        A.into(),
+        B.into(),
+        EXPECTED.into(),
+    ];
+    report(
+        "java",
+        median_ms(Path::new("java"), &java_args, &directory, expected),
+        expected,
+    );
+    let python_args = vec![
+        sources.4.clone().into_os_string(),
+        A.into(),
+        B.into(),
+        EXPECTED.into(),
+    ];
+    report(
+        "python",
+        median_ms(Path::new("python"), &python_args, &directory, expected),
+        expected,
+    );
 
-    if Command::new("swiftc").arg("--version").output().is_ok_and(|output| output.status.success()) {
+    if Command::new("swiftc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
         let swift = directory.join("swift-text.exe");
-        compile_command(Path::new("swiftc"), &[sources.5.clone().into_os_string(), "-O".into(), "-o".into(), swift.clone().into_os_string()], &directory);
-        report("swift", median_ms(&swift, &args, &directory, expected), expected);
+        compile_command(
+            Path::new("swiftc"),
+            &[
+                sources.5.clone().into_os_string(),
+                "-O".into(),
+                "-o".into(),
+                swift.clone().into_os_string(),
+            ],
+            &directory,
+        );
+        report(
+            "swift",
+            median_ms(&swift, &args, &directory, expected),
+            expected,
+        );
     } else {
         println!("TEXTCONTENT language=swift status=unavailable-on-runner");
     }
