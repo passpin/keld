@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 }
 "#;
 
-const CPP_SOURCE: &str = r#"
+const CPP_SOURCE: &str = r"
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -75,7 +75,7 @@ int main(int argc, char **argv) {
     }
     std::cout << count + i << '\n';
 }
-"#;
+";
 
 const RUST_SOURCE: &str = r#"
 fn main() {
@@ -96,7 +96,7 @@ fn main() {
 }
 "#;
 
-const JAVA_SOURCE: &str = r#"
+const JAVA_SOURCE: &str = r"
 public final class TextContentBench {
     public static void main(String[] args) {
         if (args.length < 3) System.exit(3);
@@ -110,9 +110,9 @@ public final class TextContentBench {
         System.out.println(count + i);
     }
 }
-"#;
+";
 
-const PYTHON_SOURCE: &str = r#"
+const PYTHON_SOURCE: &str = r"
 import sys
 
 a, b, expected = sys.argv[1:4]
@@ -123,9 +123,9 @@ while i < 1_000_000:
     count += 1 if s == expected else 7
     i += 1
 print(count + i)
-"#;
+";
 
-const SWIFT_SOURCE: &str = r#"
+const SWIFT_SOURCE: &str = r"
 import Foundation
 
 let args = CommandLine.arguments
@@ -138,7 +138,7 @@ while i < 1_000_000 {
     i += 1
 }
 print(count + i)
-"#;
+";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
