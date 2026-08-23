@@ -1,0 +1,36 @@
+name: Fix Text Content Benchmark Clippy
+
+on:
+  push:
+    branches: [bench/equivalence-performance]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bench/equivalence-performance
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - name: Apply cleanup
+        run: |
+          python .text-content-clippy-fix.py
+          cargo fmt --all
+      - name: Commit cleanup
+        shell: bash
+        run: |
+          if git diff --quiet -- crates/keld-native-backend/tests/language_text_content_compare.rs; then
+            echo "No cleanup changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/keld-native-backend/tests/language_text_content_compare.rs
+          git commit -m "test: satisfy strict Clippy in text-content benchmark"
+          git push origin HEAD:bench/equivalence-performance
