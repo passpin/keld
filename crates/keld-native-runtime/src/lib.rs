@@ -719,11 +719,10 @@ impl RuntimeContext {
         lhs: KeldValue,
         rhs: KeldValue,
     ) -> Result<KeldValue, NativeValueError> {
-        let left = self.text_bytes(lhs)?.to_vec();
-        let right = self.text_bytes(rhs)?.to_vec();
-        let length = left
+        let length = self
+            .text_bytes(lhs)?
             .len()
-            .checked_add(right.len())
+            .checked_add(self.text_bytes(rhs)?.len())
             .ok_or(NativeValueError::Allocation)?;
         if !self.allow_test_allocation(AllocationPhase::Concat) {
             return Err(NativeValueError::Allocation);
@@ -732,8 +731,8 @@ impl RuntimeContext {
         bytes
             .try_reserve_exact(length)
             .map_err(|_| NativeValueError::Allocation)?;
-        bytes.extend_from_slice(&left);
-        bytes.extend_from_slice(&right);
+        bytes.extend_from_slice(self.text_bytes(lhs)?);
+        bytes.extend_from_slice(self.text_bytes(rhs)?);
         self.allocate(NativePayload::Text(bytes))
     }
 
