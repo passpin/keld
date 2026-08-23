@@ -17,5 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.0
+      - name: Diagnose Text IR validation
+        run: cargo test -p keld-native-backend --test text_ir_diagnostic -- --nocapture
       - name: Render and audit Text LLVM calls
         run: cargo test -p keld-native-backend --lib text_content_loop_reports_runtime_call_surface -- --nocapture
