@@ -3,6 +3,8 @@ name: IR Local Contract Review
 on:
   push:
     branches: [fix/ir-local-validator-contract]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
