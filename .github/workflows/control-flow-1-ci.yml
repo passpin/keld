@@ -15,7 +15,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run complete final gate
+      - name: Run plan-exact final gate
         shell: pwsh
         run: |
           $log = '.control-flow-ci-last.txt'
@@ -33,35 +33,43 @@ jobs:
           "llvm=$llvm" | Out-File $log -Append
           $setup = if ($llvm -eq '22.1.8') { 0 } else { 1 }
 
-          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log; $runtime=$LASTEXITCODE
-          cargo test --workspace *>> $log; $debug=$LASTEXITCODE
-          cargo test --workspace --release *>> $log; $release=$LASTEXITCODE
-          cargo clippy --workspace --all-targets -- -D warnings *>> $log; $clippy=$LASTEXITCODE
-          cargo fmt --all --check *>> $log; $fmt=$LASTEXITCODE
-          git diff --check origin/main...HEAD *>> $log; $diffcheck=$LASTEXITCODE
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log; $prod=$LASTEXITCODE
+          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log; $testRuntime=$LASTEXITCODE
+          $artifacts=0
+          foreach ($p in @('keld_runtime_v1.dll','libkeld_runtime_v1.dll.a','keld_runtime_v1_test.dll','libkeld_runtime_v1_test.dll.a')) {
+            if (-not (Test-Path "target\x86_64-pc-windows-gnu\release\$p")) { $artifacts=1 }
+          }
 
-          $interpreterLoop = (& cargo run -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
+          cargo test --workspace --all-targets --no-fail-fast *>> $log; $debug=$LASTEXITCODE
+          cargo test --workspace --all-targets --release --no-fail-fast *>> $log; $release=$LASTEXITCODE
+          cargo clippy --workspace --all-targets -- -D warnings *>> $log; $clippy=$LASTEXITCODE
+          cargo fmt --all -- --check *>> $log; $fmt=$LASTEXITCODE
+          git diff --check *>> $log; $diffcheck=$LASTEXITCODE
+
+          $interpreterLoop = (& cargo run --release -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
           $interpreterLoopStatus=$LASTEXITCODE
-          $nativeLoop = (& cargo run -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
+          $nativeLoop = (& cargo run --release -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
           $nativeLoopStatus=$LASTEXITCODE
-          $interpreterAlloc = (& cargo run -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
+          $interpreterAlloc = (& cargo run --release -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
           $interpreterAllocStatus=$LASTEXITCODE
-          $nativeAlloc = (& cargo run -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
+          $nativeAlloc = (& cargo run --release -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
           $nativeAllocStatus=$LASTEXITCODE
+          $dump = (& cargo run --release -q -p keld-cli -- dump-ir crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
+          $dumpStatus=$LASTEXITCODE
 
           $smoke = 0
-          if ($interpreterLoopStatus -ne 0 -or $nativeLoopStatus -ne 0 -or $interpreterAllocStatus -ne 0 -or $nativeAllocStatus -ne 0) { $smoke = 1 }
-          if ($interpreterLoop.Trim() -ne '8' -or $nativeLoop.Trim() -ne '8' -or $interpreterAlloc.Trim() -ne '6' -or $nativeAlloc.Trim() -ne '6') { $smoke = 1 }
-          "smoke interpreter_loop='$interpreterLoop' native_loop='$nativeLoop' interpreter_alloc='$interpreterAlloc' native_alloc='$nativeAlloc'" | Out-File $log -Append
+          if ($interpreterLoopStatus -ne 0 -or $nativeLoopStatus -ne 0 -or $interpreterAllocStatus -ne 0 -or $nativeAllocStatus -ne 0 -or $dumpStatus -ne 0) { $smoke = 1 }
+          if ($interpreterLoop.Trim() -ne '8' -or $nativeLoop.Trim() -ne '8' -or $interpreterAlloc.Trim() -ne '6' -or $nativeAlloc.Trim() -ne '6' -or [string]::IsNullOrWhiteSpace($dump)) { $smoke = 1 }
+          "smoke interpreter_loop='$interpreterLoop' native_loop='$nativeLoop' interpreter_alloc='$interpreterAlloc' native_alloc='$nativeAlloc' dump_chars=$($dump.Length)" | Out-File $log -Append
 
-          "setup=$setup runtime=$runtime workspace_debug=$debug workspace_release=$release clippy=$clippy fmt=$fmt diffcheck=$diffcheck smoke=$smoke" | Out-File $log -Append
-          $values = @($setup,$runtime,$debug,$release,$clippy,$fmt,$diffcheck,$smoke)
+          "setup=$setup prod=$prod test_runtime=$testRuntime artifacts=$artifacts workspace_debug=$debug workspace_release=$release clippy=$clippy fmt=$fmt diffcheck=$diffcheck smoke=$smoke" | Out-File $log -Append
+          $values = @($setup,$prod,$testRuntime,$artifacts,$debug,$release,$clippy,$fmt,$diffcheck,$smoke)
           $status = if ($values | Where-Object { $_ -ne 0 }) { 1 } else { 0 }
           "exit_status=$status" | Out-File $log -Append
 
           git add .control-flow-ci-last.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "ci: record complete Control Flow-1 final gate [skip ci]"
+          git commit -m "ci: record plan-exact Control Flow-1 final gate [skip ci]"
           git push
           exit $status
