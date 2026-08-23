@@ -3,6 +3,8 @@ name: Keld Equivalence and Language Benchmark
 on:
   push:
     branches: [bench/equivalence-performance]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
