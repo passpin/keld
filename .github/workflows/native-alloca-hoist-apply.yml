@@ -24,15 +24,15 @@ jobs:
         run: |
           python .native-alloca-hoist-patch.py
           cargo fmt --all
-      - name: Commit production change
+      - name: Commit formatted change
         shell: bash
         run: |
           if git diff --quiet; then
-            echo "No production changes to commit"
+            echo "No formatting changes to commit"
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add crates/keld-native-backend/src/lib.rs
-          git commit -m "style: format native alloca hoist"
+          git add crates/keld-native-backend/src/lib.rs crates/keld-native-backend/tests/loop_stack_regression.rs
+          git commit -m "style: format native alloca hoist regression"
           git push origin HEAD:fix/native-loop-alloca-hoist
