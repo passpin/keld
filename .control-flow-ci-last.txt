@@ -1,6 +1,3 @@
-info: syncing channel updates for 1.97.0-x86_64-pc-windows-msvc
-info: latest update on 2026-07-09 for version 1.97.0 (2d8144b78 2026-07-07)
-info: downloading 5 components
 info: downloading component rust-std
 info: component clippy is up to date
 MSYS2 is starting for the first time. Executing the initial setup.
@@ -64,74 +61,43 @@ llvm=22.1.8
     Updating crates.io index
  Downloading crates ...
   Downloaded lazy_static v1.5.0
-  Downloaded stats_alloc v0.1.10
   Downloaded shlex v2.0.1
+  Downloaded anyhow v1.0.104
+  Downloaded stats_alloc v0.1.10
   Downloaded semver v1.0.28
   Downloaded find-msvc-tools v0.1.10
   Downloaded llvm-sys v221.0.1
-  Downloaded anyhow v1.0.104
-  Downloaded cc v1.4.2
   Downloaded regex-lite v0.1.9
+  Downloaded cc v1.4.2
   Downloaded libc v0.2.189
     Checking keld-source v0.1.0 (D:\a\keld\keld\crates\keld-source)
     Checking keld-numeric v0.1.0 (D:\a\keld\keld\crates\keld-numeric)
     Checking keld-native-abi v0.1.0 (D:\a\keld\keld\crates\keld-native-abi)
     Checking keld-runtime v0.1.0 (D:\a\keld\keld\crates\keld-runtime)
    Compiling anyhow v1.0.104
-   Compiling shlex v2.0.1
-    Checking keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
    Compiling find-msvc-tools v0.1.10
-   Compiling regex-lite v0.1.9
-    Checking keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
-    Checking keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
-    Checking keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
-   Compiling cc v1.4.2
+    Checking keld-syntax v0.1.0 (D:\a\keld\keld\crates\keld-syntax)
+   Compiling shlex v2.0.1
    Compiling semver v1.0.28
-   Compiling lazy_static v1.5.0
-    Checking keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
+    Checking keld-semantics v0.1.0 (D:\a\keld\keld\crates\keld-semantics)
+   Compiling cc v1.4.2
+    Checking keld-flow v0.1.0 (D:\a\keld\keld\crates\keld-flow)
    Compiling libc v0.2.189
+    Checking keld-lifecycle v0.1.0 (D:\a\keld\keld\crates\keld-lifecycle)
+    Checking keld-storage v0.1.0 (D:\a\keld\keld\crates\keld-storage)
+    Checking keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
+   Compiling lazy_static v1.5.0
+   Compiling regex-lite v0.1.9
+    Checking keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
     Checking stats_alloc v0.1.10
     Checking keld-native-runtime v0.1.0 (D:\a\keld\keld\crates\keld-native-runtime)
-    Checking keld-ir v0.1.0 (D:\a\keld\keld\crates\keld-ir)
-    Checking keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
     Checking keld-native-toolchain v0.1.0 (D:\a\keld\keld\crates\keld-native-toolchain)
+    Checking keld-native-ffi v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi)
     Checking keld-native-ffi-test v0.1.0 (D:\a\keld\keld\crates\keld-native-ffi-test)
-    Checking keld-interpreter v0.1.0 (D:\a\keld\keld\crates\keld-interpreter)
    Compiling llvm-sys v221.0.1
     Checking keld-native-llvm v0.1.0 (D:\a\keld\keld\crates\keld-native-llvm)
     Checking keld-native-backend v0.1.0 (D:\a\keld\keld\crates\keld-native-backend)
     Checking keld-cli v0.1.0 (D:\a\keld\keld\crates\keld-cli)
-error: this function has too many lines (101/100)
-   --> crates\keld-native-backend\tests\differential.rs:949:1
-    |
-949 | fn every_executable_ir_variant_is_in_a_real_differential_fixture() {
-    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    |
-    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#too_many_lines
-    = note: `-D clippy::too-many-lines` implied by `-D warnings`
-    = help: to override `-D warnings` add `#[allow(clippy::too_many_lines)]`
-
-error: could not compile `keld-native-backend` (test "differential") due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
-error: for loop over a single element
-   --> crates\keld-cli\tests\milestone_acceptance.rs:416:5
-    |
-416 | /     for proof in ["fn return_from_nested_lifecycle_has_an_explicit_exit_edge()"] {
-417 | |         assert!(flow.contains(proof), "missing Flow proof: {proof}");
-418 | |     }
-    | |_____^
-    |
-    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#single_element_loop
-    = note: `-D clippy::single-element-loop` implied by `-D warnings`
-    = help: to override `-D warnings` add `#[allow(clippy::single_element_loop)]`
-help: try
-    |
-416 ~     {
-417 +         let proof = "fn return_from_nested_lifecycle_has_an_explicit_exit_edge()";
-418 +         assert!(flow.contains(proof), "missing Flow proof: {proof}");
-419 +     }
-    |
-
-error: could not compile `keld-cli` (test "milestone_acceptance") due to 1 previous error
-clippy=101
-exit_status=101
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.73s
+clippy=0
+exit_status=0
