@@ -1,0 +1,39 @@
+name: Apply Native Alloca Hoist
+
+on:
+  push:
+    branches: [fix/native-loop-alloca-hoist]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/native-loop-alloca-hoist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt,clippy
+      - name: Apply patch
+        run: python .native-alloca-hoist-patch.py
+      - name: Format and check
+        run: |
+          cargo fmt --all
+          cargo test -p keld-native-backend --lib
+          cargo clippy -p keld-native-backend --lib -- -D warnings
+      - name: Commit production change
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No patch changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/keld-native-backend/src/lib.rs
+          git commit -m "fix: hoist native scratch allocas to function entry"
+          git push origin HEAD:fix/native-loop-alloca-hoist
