@@ -1,36 +1,64 @@
 from pathlib import Path
 
-path = Path("crates/keld-native-backend/src/lib.rs")
-text = path.read_text(encoding="utf-8")
-marker = "#[cfg(test)]\nmod text_ir_audit {"
-start = text.find(marker)
-if start < 0:
-    raise SystemExit("text_ir_audit module not found")
-replacement = r'''#[cfg(test)]
-mod text_ir_audit {
-    use super::*;
-    use keld_ir::TestModuleBuilder;
-    use keld_source::SourceId;
+path = Path("crates/keld-native-backend/tests/production_test_site.rs")
+path.write_text(r'''use keld_ir::TestModuleBuilder;
+use keld_native_backend::{BuildRequest, OptimizationLevel, SourceMetadata, build_executable};
+use keld_source::{SourceId, SourceText};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn production_ir_has_no_test_site_calls() {
-        let module = TestModuleBuilder::new().finish();
-        assert!(validate(&module).is_empty());
-        let source = SourceText::from_str(SourceId(0), "test-site audit").expect("source");
-        let ir = lower_scalar_ir(
-            &module,
-            &SourceMetadata {
-                path: PathBuf::from("test-site-audit.keld"),
-                source,
-            },
-        )
-        .expect("LLVM IR lowering");
-        assert_eq!(
-            ir.matches("call i32 @keld_rt_v1_test_site").count(),
-            0,
-            "production codegen must not cross the test-control ABI"
-        );
-    }
+static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
 }
-'''
-path.write_text(text[:start] + replacement, encoding="utf-8")
+
+#[test]
+fn production_executable_does_not_import_test_site() {
+    let root = workspace_root();
+    let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+    let directory = std::env::temp_dir().join(format!(
+        "keld-production-test-site-{}-{id}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).expect("temporary directory");
+
+    let target = root.join("target/x86_64-pc-windows-gnu/release");
+    let output = directory.join("program.exe");
+    let module = TestModuleBuilder::new().finish();
+    let source = SourceText::from_str(SourceId(0), "production test-site audit")
+        .expect("source text");
+    let request = BuildRequest {
+        output: output.clone(),
+        optimization: OptimizationLevel::O2,
+        llvm_prefix: std::env::var_os("LLVM_SYS_221_PREFIX")
+            .map(PathBuf::from)
+            .expect("LLVM_SYS_221_PREFIX"),
+        gcc: std::env::var_os("KELD_MINGW_GCC").map(PathBuf::from),
+        runtime_dll: target.join("keld_runtime_v1.dll"),
+        runtime_import_library: target.join("libkeld_runtime_v1.dll.a"),
+    };
+    build_executable(
+        &module,
+        &SourceMetadata {
+            path: PathBuf::from("production-test-site.keld"),
+            source,
+        },
+        &request,
+    )
+    .expect("production native build");
+
+    let image = std::fs::read(&output).expect("native executable");
+    let forbidden = b"keld_rt_v1_test_site";
+    assert!(
+        !image.windows(forbidden.len()).any(|window| window == forbidden),
+        "production executable must not import the test-control site marker"
+    );
+
+    let _ = std::fs::remove_dir_all(directory);
+}
+''', encoding="utf-8")
