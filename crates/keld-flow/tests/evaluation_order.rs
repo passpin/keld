@@ -225,7 +225,6 @@ fn struct_field_replacement_is_not_an_entity_view_write() {
     );
 }
 
-
 #[test]
 fn local_compound_assignment_reads_updates_and_stores_the_local() {
     let flow = lower_text_for_test("fn main() -> Int { var i = 1; i += 2; return i }\n").unwrap();

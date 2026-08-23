@@ -343,7 +343,11 @@ fn criterion_16_numeric_stages_have_identical_boundaries() {
 
 #[test]
 fn control_flow_1_acceptance_table_is_complete_and_separate() {
-    assert_eq!(DONE_CRITERIA.len(), 16, "historical bootstrap criteria stay frozen");
+    assert_eq!(
+        DONE_CRITERIA.len(),
+        16,
+        "historical bootstrap criteria stay frozen"
+    );
     assert_eq!(CONTROL_FLOW_1_ACCEPTANCE.len(), 11);
     for proof in &CONTROL_FLOW_1_ACCEPTANCE {
         assert!(!proof.requirement.is_empty());
@@ -376,15 +380,28 @@ fn control_flow_1_static_loop_join_diagnostics_are_focused() {
 #[test]
 fn control_flow_1_compiler_ir_is_validated_and_cyclic() {
     let compilation = compile_fixture("control_flow_loop.keld");
-    assert!(compilation.diagnostics.is_empty(), "{:#?}", compilation.diagnostics);
-    let module = compilation.ir.as_ref().expect("Control Flow-1 fixture reaches executable IR");
+    assert!(
+        compilation.diagnostics.is_empty(),
+        "{:#?}",
+        compilation.diagnostics
+    );
+    let module = compilation
+        .ir
+        .as_ref()
+        .expect("Control Flow-1 fixture reaches executable IR");
     assert!(validate(module).is_empty());
-    assert!(module.functions.iter().any(|function| function.blocks.iter().any(|block| {
-        matches!(
-            &block.terminator,
-            IrTerminator::Goto(target) if target.0 <= block.id.0
-        )
-    })), "validated executable IR must contain a CFG backedge");
+    assert!(
+        module
+            .functions
+            .iter()
+            .any(|function| function.blocks.iter().any(|block| {
+                matches!(
+                    &block.terminator,
+                    IrTerminator::Goto(target) if target.0 <= block.id.0
+                )
+            })),
+        "validated executable IR must contain a CFG backedge"
+    );
 }
 
 #[test]
@@ -396,9 +413,7 @@ fn control_flow_1_self_review_proofs_are_present() {
     let lifecycle = include_str!("../../keld-lifecycle/tests/control_flow.rs");
     let differential = include_str!("../../keld-native-backend/tests/differential.rs");
 
-    for proof in [
-        "fn return_from_nested_lifecycle_has_an_explicit_exit_edge()",
-    ] {
+    for proof in ["fn return_from_nested_lifecycle_has_an_explicit_exit_edge()"] {
         assert!(flow.contains(proof), "missing Flow proof: {proof}");
     }
     for proof in [
@@ -419,16 +434,23 @@ fn control_flow_1_self_review_proofs_are_present() {
         "fn keep_to_ancestor_survives_break_out_of_inner_lifecycle()",
         "fn checked_fault_in_condition_occurs_before_body()",
     ] {
-        assert!(interpreter.contains(proof), "missing interpreter proof: {proof}");
+        assert!(
+            interpreter.contains(proof),
+            "missing interpreter proof: {proof}"
+        );
     }
     for proof in [
         "fn loop_carried_entity_from_repeated_allocation_keeps_dynamic_identity()",
         "fn retirement_call_effect_in_condition_invalidates_post_loop_use()",
     ] {
-        assert!(lifecycle.contains(proof), "missing lifecycle proof: {proof}");
+        assert!(
+            lifecycle.contains(proof),
+            "missing lifecycle proof: {proof}"
+        );
     }
     assert!(
-        differential.contains("fn repeated_condition_concat_uses_one_static_site_with_three_attempts()"),
+        differential
+            .contains("fn repeated_condition_concat_uses_one_static_site_with_three_attempts()"),
         "missing repeated condition-allocation proof"
     );
 }

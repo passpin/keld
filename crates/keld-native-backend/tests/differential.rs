@@ -796,7 +796,10 @@ fn repeated_loop_concat_allocation_uses_one_static_site_with_three_attempts() {
         .collect::<Vec<_>>();
     assert_eq!(concat.len(), 3, "{events:#?}");
     let site_id = concat[0].site_id;
-    assert!(concat.iter().all(|event| event.site_id == site_id), "{concat:#?}");
+    assert!(
+        concat.iter().all(|event| event.site_id == site_id),
+        "{concat:#?}"
+    );
     assert_eq!(
         concat.iter().map(|event| event.attempt).collect::<Vec<_>>(),
         vec![1, 2, 3]
@@ -819,7 +822,10 @@ fn repeated_condition_concat_uses_one_static_site_with_three_attempts() {
         .collect::<Vec<_>>();
     assert_eq!(concat.len(), 3, "{events:#?}");
     let site_id = concat[0].site_id;
-    assert!(concat.iter().all(|event| event.site_id == site_id), "{concat:#?}");
+    assert!(
+        concat.iter().all(|event| event.site_id == site_id),
+        "{concat:#?}"
+    );
     assert_eq!(
         concat.iter().map(|event| event.attempt).collect::<Vec<_>>(),
         vec![1, 2, 3]

@@ -47,7 +47,6 @@ fn return_exits_storage_scopes_inside_out() {
     );
 }
 
-
 #[test]
 fn continue_exits_iteration_storage_and_lifecycle_before_back_edge() {
     let flow = lower_text_for_test(
@@ -64,12 +63,15 @@ fn continue_exits_iteration_storage_and_lifecycle_before_back_edge() {
         })
         .expect("iteration lifecycle exists");
 
-    assert!(main.blocks.iter().any(|block| matches!(
-        &block.terminator,
-        Terminator::ExitScopes {
-            storage_scopes,
-            lifecycles,
-            next: ExitTarget::Goto(_),
-        } if !storage_scopes.is_empty() && lifecycles == &[lifecycle]
-    )), "continue must clean both lexical storage and the iteration lifecycle");
+    assert!(
+        main.blocks.iter().any(|block| matches!(
+            &block.terminator,
+            Terminator::ExitScopes {
+                storage_scopes,
+                lifecycles,
+                next: ExitTarget::Goto(_),
+            } if !storage_scopes.is_empty() && lifecycles == &[lifecycle]
+        )),
+        "continue must clean both lexical storage and the iteration lifecycle"
+    );
 }

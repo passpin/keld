@@ -56,7 +56,6 @@ fn explicit_iteration_lifecycle_exits_before_the_next_iteration() {
     );
 }
 
-
 #[test]
 fn plain_loop_does_not_create_an_implicit_lifecycle() {
     assert_eq!(

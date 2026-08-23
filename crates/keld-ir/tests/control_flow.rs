@@ -1,6 +1,6 @@
 use keld_ir::{
-    Function, Instruction, IrBlock, IrBlockId, IrType, Module, Register, RegisterStorage, Terminator,
-    lower, validate,
+    Function, Instruction, IrBlock, IrBlockId, IrType, Module, Register, RegisterStorage,
+    Terminator, lower, validate,
 };
 use keld_semantics::FunctionId;
 use keld_source::{SourceId, Span};
@@ -29,11 +29,14 @@ fn source_loop_lowers_to_valid_cyclic_executable_ir() {
     assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
 
     let function = &module.functions[module.main.0 as usize];
-    assert!(function.blocks.iter().any(|block| {
-        successors(&block.terminator)
-            .into_iter()
-            .any(|successor| successor.0 <= block.id.0)
-    }), "lowered while must contain a real CFG back-edge");
+    assert!(
+        function.blocks.iter().any(|block| {
+            successors(&block.terminator)
+                .into_iter()
+                .any(|successor| successor.0 <= block.id.0)
+        }),
+        "lowered while must contain a real CFG back-edge"
+    );
 }
 
 #[test]
@@ -97,7 +100,6 @@ fn validator_accepts_a_minimal_valid_cycle() {
     assert!(validate(&module).is_empty(), "{:#?}", validate(&module));
 }
 
-
 #[test]
 fn validator_still_rejects_duplicate_ssa_definitions() {
     let span = Span::new(SourceId(0), 0, 0).expect("empty test span is valid");
@@ -118,8 +120,16 @@ fn validator_still_rejects_duplicate_ssa_definitions() {
             blocks: vec![IrBlock {
                 id: IrBlockId(0),
                 instructions: vec![
-                    Instruction::ConstInt { dst: Register(1), value: 1, span },
-                    Instruction::ConstInt { dst: Register(1), value: 2, span },
+                    Instruction::ConstInt {
+                        dst: Register(1),
+                        value: 1,
+                        span,
+                    },
+                    Instruction::ConstInt {
+                        dst: Register(1),
+                        value: 2,
+                        span,
+                    },
                 ],
                 terminator: Terminator::Return(Some(Register(1))),
             }],
@@ -129,8 +139,14 @@ fn validator_still_rejects_duplicate_ssa_definitions() {
     };
 
     let diagnostics = validate(&module);
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.code.0 == "KLD9002"
-            && diagnostic.primary.message.contains("defined more than once")
-    }), "{diagnostics:#?}");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.0 == "KLD9002"
+                && diagnostic
+                    .primary
+                    .message
+                    .contains("defined more than once")
+        }),
+        "{diagnostics:#?}"
+    );
 }

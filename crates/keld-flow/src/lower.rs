@@ -349,7 +349,11 @@ impl<'module> FunctionBuilder<'module> {
         self.terminate(Terminator::ExitScopes {
             storage_scopes,
             lifecycles,
-            next: ExitTarget::Goto(if is_break { target.exit } else { target.condition }),
+            next: ExitTarget::Goto(if is_break {
+                target.exit
+            } else {
+                target.condition
+            }),
         });
     }
 

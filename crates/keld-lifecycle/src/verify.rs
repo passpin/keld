@@ -224,9 +224,9 @@ impl Analyzer<'_> {
             .iter()
             .enumerate()
             .filter_map(|(index, state)| {
-                state.as_ref().map(|_| {
-                    BlockId(u32::try_from(index).expect("flow block index fits in u32"))
-                })
+                state
+                    .as_ref()
+                    .map(|_| BlockId(u32::try_from(index).expect("flow block index fits in u32")))
             })
             .collect();
 
@@ -332,13 +332,9 @@ impl Analyzer<'_> {
             }
 
             let mut produced = BTreeMap::<BlockId, Vec<AbstractState>>::new();
-            for (successor, successor_state) in
-                self.terminator(block_id, &block.terminator, state)
+            for (successor, successor_state) in self.terminator(block_id, &block.terminator, state)
             {
-                produced
-                    .entry(successor)
-                    .or_default()
-                    .push(successor_state);
+                produced.entry(successor).or_default().push(successor_state);
             }
 
             for successor in successors(&block.terminator) {
@@ -368,9 +364,7 @@ impl Analyzer<'_> {
                 let successor_index = successor.0 as usize;
                 let mut states = predecessors[successor_index]
                     .iter()
-                    .filter_map(|predecessor| {
-                        edge_states.get(&(*predecessor, successor)).cloned()
-                    })
+                    .filter_map(|predecessor| edge_states.get(&(*predecessor, successor)).cloned())
                     .collect::<Vec<_>>();
                 if successor == self.function.entry {
                     states.push(self.initial_state());

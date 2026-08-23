@@ -178,7 +178,11 @@ fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
         .rposition(|operation| matches!(operation, FlowOp::CopyLocal { .. }))
         .unwrap();
     let facts = module
-        .entity_facts_at(function, identity_block.id, u32::try_from(last_copy).unwrap())
+        .entity_facts_at(
+            function,
+            identity_block.id,
+            u32::try_from(last_copy).unwrap(),
+        )
         .expect("identity block publishes facts before its final copy");
     let previous = facts.local_reference(copied_locals[0]);
     let current = facts.local_reference(copied_locals[1]);
@@ -190,7 +194,10 @@ fn loop_carried_allocation_uses_a_stable_distinct_merge_provenance() {
                 .then(|| module.entity_facts_at(function, block.id, 0))
                 .flatten()
                 .and_then(|facts| facts.local_reference(copied_locals[0]));
-            format!("block {:?}: previous={first:?}, ops={:#?}, term={:#?}", block.id, block.operations, block.terminator)
+            format!(
+                "block {:?}: previous={first:?}, ops={:#?}, term={:#?}",
+                block.id, block.operations, block.terminator
+            )
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -234,7 +241,11 @@ fn loop_carried_nonfresh_identity_is_may_alias_before_refinement() {
         .rposition(|operation| matches!(operation, FlowOp::CopyLocal { .. }))
         .unwrap();
     let facts = module
-        .entity_facts_at(function, identity_block.id, u32::try_from(last_copy).unwrap())
+        .entity_facts_at(
+            function,
+            identity_block.id,
+            u32::try_from(last_copy).unwrap(),
+        )
         .expect("identity comparison publishes facts");
     let carried = facts.local_reference(copied_locals[0]).unwrap();
     let left = facts.local_reference(copied_locals[1]).unwrap();
@@ -269,7 +280,11 @@ fn repeated_when_resolution_forgets_prior_iteration_identity_refinement() {
         .rposition(|operation| matches!(operation, FlowOp::CopyLocal { .. }))
         .unwrap();
     let facts = module
-        .entity_facts_at(function, identity_block.id, u32::try_from(last_copy).unwrap())
+        .entity_facts_at(
+            function,
+            identity_block.id,
+            u32::try_from(last_copy).unwrap(),
+        )
         .expect("resolved comparison publishes facts");
     let seed = facts.local_reference(copied_locals[0]).unwrap();
     let current = facts.local_reference(copied_locals[1]).unwrap();

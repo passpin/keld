@@ -9,26 +9,36 @@ fn loop_body_local_is_reinitialized_and_cleaned_on_each_backedge() {
     );
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     let module = result.module.expect("loop storage verifies");
-    let function = module.lifecycle.flow.function_named("main").expect("main exists");
+    let function = module
+        .lifecycle
+        .flow
+        .function_named("main")
+        .expect("main exists");
     let plan = &module.annotations.functions[function.id.0 as usize];
     let text_local = LocalId(1);
 
-    let stores = function
-        .blocks
-        .iter()
-        .enumerate()
-        .flat_map(|(block_index, block)| {
-            block.operations.iter().enumerate().filter_map(move |(operation_index, operation)| {
+    let stores =
+        function
+            .blocks
+            .iter()
+            .enumerate()
+            .flat_map(|(block_index, block)| {
+                block.operations.iter().enumerate().filter_map(move |(operation_index, operation)| {
                 matches!(operation, FlowOp::StoreLocal { local, .. } if *local == text_local)
                     .then_some(plan.blocks[block_index].operations[operation_index].store)
                     .flatten()
             })
-        })
-        .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
     assert_eq!(stores, vec![StoreKind::Initialize]);
-    assert!(plan.blocks.iter().any(|block| {
-        block.exit.contains(&CleanupAction::Drop(HomeId::Local(text_local)))
-    }), "loop backedge must clean the body-local text home");
+    assert!(
+        plan.blocks.iter().any(|block| {
+            block
+                .exit
+                .contains(&CleanupAction::Drop(HomeId::Local(text_local)))
+        }),
+        "loop backedge must clean the body-local text home"
+    );
 }
 
 #[test]

@@ -4,8 +4,8 @@ use crate::symbols::{FunctionSignature, RetirementSignature};
 use crate::{
     BindingMutability, CompareOp, DefId, DefinitionKind, FunctionEffects, FunctionId, HirBinaryOp,
     HirBlock, HirExpr, HirExprKind, HirFunction, HirIf, HirLifecycle, HirLifecycleId, HirPlace,
-    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, HirWhile, LocalId, ParameterIndex, TypeId,
-    TypeKind, TypeStore,
+    HirStmt, HirStmtKind, HirUnaryOp, HirWhen, HirWhile, LocalId, ParameterIndex, TypeId, TypeKind,
+    TypeStore,
 };
 use keld_numeric::{
     IntBinaryOp, IntUnaryOp, ParsedIntLiteral, eval_binary, eval_unary, parse_int_literal,
@@ -1924,10 +1924,7 @@ fn decode_string_literal(text: &str) -> Option<String> {
 }
 
 fn block_definitely_returns(block: &HirBlock) -> bool {
-    block
-        .statements
-        .iter()
-        .any(statement_definitely_returns)
+    block.statements.iter().any(statement_definitely_returns)
 }
 
 fn statement_definitely_returns(statement: &HirStmt) -> bool {
@@ -1954,24 +1951,26 @@ fn statement_definitely_returns(statement: &HirStmt) -> bool {
 }
 
 fn block_has_break_for_current_loop(block: &HirBlock) -> bool {
-    block.statements.iter().any(|statement| match &statement.kind {
-        HirStmtKind::Break => true,
-        HirStmtKind::While(_) => false,
-        HirStmtKind::If(value) => {
-            block_has_break_for_current_loop(&value.then_block)
-                || value
-                    .else_block
-                    .as_ref()
-                    .is_some_and(block_has_break_for_current_loop)
-        }
-        HirStmtKind::When(value) => {
-            block_has_break_for_current_loop(&value.live)
-                || value
-                    .absent
-                    .as_ref()
-                    .is_some_and(block_has_break_for_current_loop)
-        }
-        HirStmtKind::Lifecycle(value) => block_has_break_for_current_loop(&value.body),
-        _ => false,
-    })
+    block
+        .statements
+        .iter()
+        .any(|statement| match &statement.kind {
+            HirStmtKind::Break => true,
+            HirStmtKind::If(value) => {
+                block_has_break_for_current_loop(&value.then_block)
+                    || value
+                        .else_block
+                        .as_ref()
+                        .is_some_and(block_has_break_for_current_loop)
+            }
+            HirStmtKind::When(value) => {
+                block_has_break_for_current_loop(&value.live)
+                    || value
+                        .absent
+                        .as_ref()
+                        .is_some_and(block_has_break_for_current_loop)
+            }
+            HirStmtKind::Lifecycle(value) => block_has_break_for_current_loop(&value.body),
+            _ => false,
+        })
 }

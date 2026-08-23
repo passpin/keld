@@ -1553,10 +1553,7 @@ impl<'module> ScalarLowerer<'module> {
             let slot = scalar_local_slot_name(*local);
             self.line(format!("{slot} = alloca {ty}"));
             if self.function.parameters.contains(local) {
-                self.line(format!(
-                    "store {ty} {}, ptr {slot}",
-                    register_name(*local)
-                ));
+                self.line(format!("store {ty} {}, ptr {slot}", register_name(*local)));
             }
         }
         for (index, ty) in self.function.register_types.iter().enumerate() {
@@ -2044,15 +2041,9 @@ impl<'module> ScalarLowerer<'module> {
                             scalar_local_slot_name(*dst)
                         ));
                     } else if ty == "i64" {
-                        self.line(format!(
-                            "{} = add i64 0, {source}",
-                            register_name(*dst)
-                        ));
+                        self.line(format!("{} = add i64 0, {source}", register_name(*dst)));
                     } else if ty == "i1" {
-                        self.line(format!(
-                            "{} = xor i1 {source}, false",
-                            register_name(*dst)
-                        ));
+                        self.line(format!("{} = xor i1 {source}, false", register_name(*dst)));
                     } else {
                         self.line(format!(
                             "{} = select i1 true, {ty} {source}, {ty} zeroinitializer",

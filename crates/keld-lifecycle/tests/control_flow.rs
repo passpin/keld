@@ -8,7 +8,10 @@ fn loop_analysis_reaches_entity_operations_and_publishes_facts() {
     );
     assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     let module = result.module.expect("loop program verifies");
-    let function = module.flow.function_named("read_many").expect("read_many exists");
+    let function = module
+        .flow
+        .function_named("read_many")
+        .expect("read_many exists");
 
     let mut entity_operations = 0;
     for block in &function.blocks {
@@ -30,7 +33,10 @@ fn loop_analysis_reaches_entity_operations_and_publishes_facts() {
             );
         }
     }
-    assert!(entity_operations > 0, "test must contain an entity operation");
+    assert!(
+        entity_operations > 0,
+        "test must contain an entity operation"
+    );
 }
 
 #[test]

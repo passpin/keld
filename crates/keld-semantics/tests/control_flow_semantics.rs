@@ -56,10 +56,13 @@ fn loop_control_outside_loop_is_rejected() {
 
 #[test]
 fn while_is_preserved_in_typed_hir() {
-    let analysis = analyze_text(
-        "fn main() -> Int { var i = 0; while i < 2 { i += 1 }; return i }\n",
+    let analysis =
+        analyze_text("fn main() -> Int { var i = 0; while i < 2 { i += 1 }; return i }\n");
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
     );
-    assert!(analysis.diagnostics.is_empty(), "{:#?}", analysis.diagnostics);
     let module = analysis.module.expect("loop program must reach typed HIR");
     let while_statement = &module.functions[0].body.statements[1];
     let HirStmtKind::While(while_) = &while_statement.kind else {
@@ -117,7 +120,11 @@ fn recursion_hidden_inside_loop_is_still_deferred() {
     let analysis = analyze_text(
         "fn recurse(flag: Bool) -> Int { while flag { return recurse(flag) }; return 0 }\nfn main() -> Int { return 0 }\n",
     );
-    assert!(analysis.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code.0 == "KLD0004" && diagnostic.primary.message.contains("recursive")
-    }), "{:#?}", analysis.diagnostics);
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.0 == "KLD0004" && diagnostic.primary.message.contains("recursive")
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
 }

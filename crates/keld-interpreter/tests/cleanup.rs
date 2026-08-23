@@ -118,7 +118,6 @@ fn nested_entity_field_replacement_preserves_recursive_reverse_cleanup() {
     );
 }
 
-
 #[test]
 fn continue_drops_body_local_text_on_every_iteration() {
     let trace = trace_text_for_test(
