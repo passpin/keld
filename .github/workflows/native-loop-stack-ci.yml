@@ -32,10 +32,12 @@ jobs:
           $version = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
           if ($version -ne "22.1.8") { throw "expected LLVM 22.1.8, got $version" }
           "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Build production runtime
+      - name: Build native runtimes
         shell: pwsh
         run: |
           cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run 500k loop stack regression
         shell: pwsh
