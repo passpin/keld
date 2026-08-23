@@ -30,3 +30,42 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check diff whitespace
         run: git diff --check origin/main...HEAD
+
+  native-parity:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+      LLVM_SYS_221_PREFIX: C:\msys64\mingw64
+      KELD_MINGW_GCC: C:\mingw64\bin\gcc.exe
+      KELD_DLLTOOL: C:\mingw64\bin\dlltool.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-pc-windows-gnu
+      - name: Install pinned LLVM toolchain
+        shell: pwsh
+        run: |
+          & C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools"
+          if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed" }
+          $version = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+          if ($version -ne "22.1.8") { throw "expected LLVM 22.1.8, got $version" }
+          $target = (& $env:KELD_MINGW_GCC -dumpmachine).Trim()
+          if (-not $target.Contains("mingw")) { throw "unexpected GCC target: $target" }
+      - name: Build native runtime artifacts
+        shell: pwsh
+        run: |
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run native focused regression suite
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --test native_int -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p keld-native-backend --test differential -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p keld-native-backend --test surface_audit -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
