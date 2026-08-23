@@ -3,6 +3,8 @@ name: Apply Native Alloca Hoist
 on:
   push:
     branches: [fix/native-loop-alloca-hoist]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
