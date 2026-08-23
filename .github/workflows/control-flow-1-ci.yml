@@ -13,22 +13,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Apply queued Clippy fix
-        shell: pwsh
-        run: |
-          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
-          & python .control-flow-apply.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup component add rustfmt
-          cargo fmt --all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git rm .control-flow-apply.py
-          git add -A
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "fix: satisfy strict Control Flow-1 Clippy [skip ci]"
-          git push
-
       - name: Run strict Clippy iteration
         shell: pwsh
         run: |
@@ -36,6 +20,12 @@ jobs:
           $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
           rustup target add x86_64-pc-windows-gnu *>> $log
           rustup component add clippy *>> $log
+          & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
+          $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          $llvm = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+          "llvm=$llvm" | Out-File $log -Append
+          if ($llvm -ne '22.1.8') { exit 1 }
           cargo clippy --workspace --all-targets -- -D warnings *>> $log
           $status=$LASTEXITCODE
           "clippy=$status" | Out-File $log -Append
