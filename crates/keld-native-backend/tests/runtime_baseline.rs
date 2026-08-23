@@ -1,4 +1,4 @@
-use keld_interpreter::{Interpreter, InterpreterFailure, ValueKind};
+use keld_interpreter::{Interpreter, ValueKind};
 use keld_ir::Module;
 use keld_native_backend::{BuildRequest, OptimizationLevel, SourceMetadata, build_executable};
 use keld_source::{SourceId, SourceText};
@@ -174,7 +174,7 @@ fn main() -> Int {
     var i = 0
     var x = 1
     var acc = 0
-    while i < 500000 {
+    while i < 5000000 {
         x = (x * 48271 + 1) % 2147483647
         i += 1
         if x % 7 == 0 {
@@ -193,7 +193,7 @@ fn main() -> Int {
 fn main() -> Int {
     var i = 0
     var count = 0
-    while i < 50000 {
+    while i < 500000 {
         if ("abcdefghijklmnopqrstuvwxyz" + "!").is_empty {
             count += 1
         }
