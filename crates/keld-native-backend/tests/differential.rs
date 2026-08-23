@@ -3,7 +3,9 @@ use keld_interpreter::{
     TestControls, ValueKind,
 };
 use keld_ir::{AllocationPhase, AllocationSchedule, Module};
-use keld_native_backend::{BuildRequest, OptimizationLevel, SourceMetadata, build_executable};
+use keld_native_backend::{
+    BuildRequest, OptimizationLevel, SourceMetadata, build_executable_with_test_controls,
+};
 use keld_source::{SourceId, SourceText};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -135,7 +137,7 @@ fn build_native(
 ) -> PathBuf {
     let (dll, import) = runtime_artifacts(directory);
     let output = directory.join(format!("program-{optimization:?}.exe"));
-    build_executable(
+    build_executable_with_test_controls(
         module,
         &SourceMetadata {
             path: path.to_path_buf(),

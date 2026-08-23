@@ -31,5 +31,8 @@ fn main() -> Int {
     let module = keld_ir::lower(&storage);
     let diagnostics = keld_ir::validate(&module);
     println!("TEXTIR_DIAGNOSTICS {diagnostics:#?}");
-    assert!(diagnostics.is_empty(), "generated Text-content IR is invalid");
+    assert!(
+        diagnostics.is_empty(),
+        "generated Text-content IR is invalid"
+    );
 }

@@ -3,7 +3,8 @@ use keld_ir::{
     IrType, Module, Register, RegisterStorage, Terminator,
 };
 use keld_native_backend::{
-    BackendError, BuildRequest, NativeArtifact, OptimizationLevel, SourceMetadata, build_executable,
+    BackendError, BuildRequest, NativeArtifact, OptimizationLevel, SourceMetadata,
+    build_executable, build_executable_with_test_controls,
 };
 use keld_source::{SourceId, SourceText, Span};
 use std::path::{Path, PathBuf};
@@ -201,7 +202,7 @@ fn run_test_runtime(
     let observation = directory.join("observation.txt");
     std::fs::write(&control, controls).expect("control file");
     let output = directory.join("program.exe");
-    let artifact = build_executable(
+    let artifact = build_executable_with_test_controls(
         module,
         metadata,
         &request(&output, &runtime_dll, &import_library, optimization),
