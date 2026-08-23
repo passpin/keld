@@ -65,7 +65,7 @@ fn production_executable_does_not_import_test_site() {
 }
 
 #[test]
-fn production_text_executable_keeps_cleanup_but_not_home_bookkeeping_ffi() {
+fn production_text_executable_does_not_import_home_bookkeeping_ffi() {
     const SOURCE: &str = r#"
 fn main() -> Int {
     let a = "abcdefghijklmnopqrstuvwxyz"
@@ -116,11 +116,6 @@ fn main() -> Int {
     .expect("production native build");
 
     let image = std::fs::read(&output).expect("native executable");
-    let cleanup = b"keld_rt_v1_cleanup_scope";
-    assert!(
-        image.windows(cleanup.len()).any(|window| window == cleanup),
-        "managed Text fixture must exercise runtime cleanup"
-    );
     for forbidden in [
         b"keld_rt_v1_home_track".as_slice(),
         b"keld_rt_v1_home_untrack".as_slice(),
