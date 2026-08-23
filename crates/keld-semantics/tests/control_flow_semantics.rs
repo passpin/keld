@@ -3,7 +3,7 @@ use keld_semantics::{HirExprKind, HirStmtKind, TypeStore, analyze_text};
 #[test]
 fn while_break_and_continue_are_not_feature_gated() {
     let analysis = analyze_text(
-        r#"fn main() -> Int {
+        r"fn main() -> Int {
 var i = 0
 while i < 4 {
 i += 1
@@ -12,7 +12,7 @@ if i == 3 { break }
 }
 return i
 }
-"#,
+",
     );
 
     assert!(
