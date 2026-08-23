@@ -3,6 +3,8 @@ name: Keld Runtime Baseline
 on:
   push:
     branches: [bench/runtime-baseline-2026-08-23]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
