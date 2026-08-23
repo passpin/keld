@@ -1,5 +1,0 @@
-added lifecycle, cleanup, condition, and repeated-allocation self-review regressions
-
-exit_status=0
-added separate 11-item Control Flow-1 milestone acceptance table and proofs
-updated Control Flow-1 README, normative cross-references, architecture, and acceptance docs

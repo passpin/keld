@@ -1,6 +1,6 @@
 # Keld Control Flow-1 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Implement source-level `while`, `break`, and `continue` as ordinary cyclic Keld control flow while preserving the existing single-home storage lattice, deterministic scope/lifecycle cleanup, conservative entity provenance, validated executable IR, and interpreter/native parity.
 
@@ -44,7 +44,7 @@
 - Keep `KLD0107` as the existing non-`Bool` condition diagnostic.
 - Make all HIR visitors, especially `called_functions`, recurse through loop conditions and bodies.
 
-- [ ] **Step 1: Write semantic RED tests**
+- [x] **Step 1: Write semantic RED tests**
 
   In `crates/keld-semantics/tests/loops.rs`, add a typed loop:
 
@@ -119,7 +119,7 @@
 
   Finally put the recursion-under-loop regression in `loops.rs` because this repository has no dedicated recursion test file: a call cycle hidden only inside a loop must still be detected by the current recursion gate.
 
-- [ ] **Step 2: Update feature-gate tests and verify RED**
+- [x] **Step 2: Update feature-gate tests and verify RED**
 
   Remove `while`, `break`, and `continue` from `every_deferred_construct_is_rejected_before_typing` in `feature_gate.rs`.
 
@@ -141,7 +141,7 @@
 
   Expected: RED because loops are still feature-gated and HIR has no loop variants.
 
-- [ ] **Step 3: Implement semantic loop forms**
+- [x] **Step 3: Implement semantic loop forms**
 
   In `hir.rs`, add:
 
@@ -166,7 +166,7 @@
 
   Replace the current return-only structural helper with fallthrough classification. General `while condition` may fall through. Literal `while true` is non-fallthrough only when a recursive syntax walk of its body finds no `BreakStmt` targeting that same loop. Recurse through `if`, `when`, lifecycle, and ordinary nested blocks, but do not count breaks beneath a nested `WhileStmt`.
 
-- [ ] **Step 4: Run semantic GREEN and commit**
+- [x] **Step 4: Run semantic GREEN and commit**
 
   ```powershell
   cargo test -p keld-semantics
@@ -196,7 +196,7 @@
 - Reuse `Terminator::{Goto,Branch,ExitScopes}`; add no loop terminator.
 - Reuse existing `storage_scopes_until`, `active_lifecycles`, `new_storage_scope`, and block sealing.
 
-- [ ] **Step 1: Write Flow RED tests**
+- [x] **Step 1: Write Flow RED tests**
 
   Add a basic loop:
 
@@ -249,7 +249,7 @@
 
   Require `continue` to use `ExitScopes` with the lexical scopes being left and the explicit `iteration` lifecycle before jumping to condition evaluation.
 
-- [ ] **Step 2: Verify Flow RED**
+- [x] **Step 2: Verify Flow RED**
 
   ```powershell
   cargo test -p keld-flow --test control_flow --test storage_scopes
@@ -257,7 +257,7 @@
 
   Expected: RED because `lower_statement` has no loop forms.
 
-- [ ] **Step 3: Implement `LoopTarget` and `lower_while`**
+- [x] **Step 3: Implement `LoopTarget` and `lower_while`**
 
   Add an internal target equivalent to:
 
@@ -292,7 +292,7 @@
 
   For `break`/`continue`, call `storage_scopes_until(target.outer_storage_scope)` and collect `active_lifecycles[target.lifecycle_depth..]` in reverse order. Emit one `ExitScopes` to loop exit or condition evaluation. Keep the current source path sealed after the terminator.
 
-- [ ] **Step 4: Run Flow GREEN and commit**
+- [x] **Step 4: Run Flow GREEN and commit**
 
   ```powershell
   cargo test -p keld-flow
@@ -320,7 +320,7 @@
 - `VerifiedFlowModule::entity_facts_at` must still expose one final fact snapshot per reachable operation.
 - Diagnostics/proof IDs must be emitted once from converged states, not once per solver iteration.
 
-- [ ] **Step 1: Write lifecycle RED tests**
+- [x] **Step 1: Write lifecycle RED tests**
 
   Add an accepted loop carrying a stable entity parameter/reference:
 
@@ -362,7 +362,7 @@
 
   Require the post-loop use to produce existing join-liveness diagnostic `KLD1003`.
 
-- [ ] **Step 2: Verify lifecycle RED**
+- [x] **Step 2: Verify lifecycle RED**
 
   ```powershell
   cargo test -p keld-lifecycle --test control_flow --test retirement
@@ -370,7 +370,7 @@
 
   Expected: RED or missing reachable facts because current `Analyzer::run` uses predecessor indegrees and assumes a DAG.
 
-- [ ] **Step 3: Implement solve/replay fixed-point analysis**
+- [x] **Step 3: Implement solve/replay fixed-point analysis**
 
   Remove the indegree/`complete_predecessor` scheduler from `Analyzer::run`.
 
@@ -396,7 +396,7 @@
 
   Keep joins idempotent and finite: origins union finite source sets; equality/distinctness are finite sets; reference states only lose permission at joins.
 
-- [ ] **Step 4: Run lifecycle GREEN and commit**
+- [x] **Step 4: Run lifecycle GREEN and commit**
 
   ```powershell
   cargo test -p keld-lifecycle
@@ -425,7 +425,7 @@
 - Add an analyzer-owned `join_at(block, incoming_states)` that can create a conservative local merge using only preallocated IDs.
 - `AliasRelation` remains `MustAlias | MustDistinct | MayAlias`; `facts.rs` needs no new public relation.
 
-- [ ] **Step 1: Write repeated-site RED regressions**
+- [x] **Step 1: Write repeated-site RED regressions**
 
   Add a same-static-allocation-site loop carrying an older dynamic entity into the next iteration:
 
@@ -463,7 +463,7 @@
 
   Add repeated `when` resolution inside a loop. The same static resolve site may resolve different identities on different iterations; a carried previous result and the new resolution must be conservative until comparison/refinement.
 
-- [ ] **Step 2: Verify provenance RED**
+- [x] **Step 2: Verify provenance RED**
 
   ```powershell
   cargo test -p keld-lifecycle --test provenance_facts --test control_flow
@@ -471,7 +471,7 @@
 
   Expected: current state joins either lose the carried local entirely or reuse one static entity-producing provenance too precisely.
 
-- [ ] **Step 3: Implement fixed merge provenance at CFG joins**
+- [x] **Step 3: Implement fixed merge provenance at CFG joins**
 
   During catalog construction, compute predecessor counts once and preallocate one merge provenance for every entity-flow local at every block that has more than one predecessor. This is bounded by `blocks × entity locals`; it does not depend on runtime iteration count.
 
@@ -492,7 +492,7 @@
 
   Ensure stale static `ValueId` entries from a previous traversal cannot make a newly executed entity-producing operation look like its previous dynamic result before that operation is transferred. If the solve state reaches a defining block with such stale SSA values, clear only values defined by that block before transfer; do not clear locals or parameter values.
 
-- [ ] **Step 4: Run provenance GREEN and commit**
+- [x] **Step 4: Run provenance GREEN and commit**
 
   ```powershell
   cargo test -p keld-lifecycle
@@ -522,7 +522,7 @@
 - Keep `exit_states[block]` as the pre-exit state used to plan actual drops.
 - Normalize only the outgoing successor state after `ExitScopes` to model completed lexical cleanup.
 
-- [ ] **Step 1: Write storage RED tests**
+- [x] **Step 1: Write storage RED tests**
 
   In `control_flow.rs`, add body-local repeated initialization:
 
@@ -586,7 +586,7 @@
 
   In `cleanup_planner.rs`, add a loop where two outer managed `var` homes are moved/reinitialized in different successful orders across paths/iterations. Require the outer scope to use `tracked_scopes`; tracker/drop-flag state must remain bounded by static homes.
 
-- [ ] **Step 2: Verify storage RED**
+- [x] **Step 2: Verify storage RED**
 
   ```powershell
   cargo test -p keld-storage --test home_verifier --test cleanup_planner --test control_flow
@@ -594,7 +594,7 @@
 
   Expected: body-scope re-entry exposes that the current `ExitScopes` transfer resets cleanup-order metadata but leaves body-local `Home` states live across a backedge.
 
-- [ ] **Step 3: Normalize homes after lexical scope exit**
+- [x] **Step 3: Normalize homes after lexical scope exit**
 
   In `verify_function`, keep:
 
@@ -614,7 +614,7 @@
 
   Do not change `Home::join`. The existing worklist then naturally forms `MaybeLive` on loop heads/exits when outer paths disagree.
 
-- [ ] **Step 4: Run storage GREEN and commit**
+- [x] **Step 4: Run storage GREEN and commit**
 
   ```powershell
   cargo test -p keld-storage
@@ -645,7 +645,7 @@
 - `keld_ir::validate` must accept valid cyclic CFG while continuing to reject invalid register/home/view/lifecycle state.
 - `run_text_for_test` remains the interpreter semantic oracle.
 
-- [ ] **Step 1: Add source fixtures and IR/interpreter contracts**
+- [x] **Step 1: Add source fixtures and IR/interpreter contracts**
 
   `control_flow_loop.keld`:
 
@@ -688,7 +688,7 @@
 
   In `keld-interpreter/tests/control_flow.rs`, run both fixtures plus zero-iteration, nested-loop targeting, condition re-evaluation, and explicit lifecycle exit cases.
 
-- [ ] **Step 2: Run IR/interpreter tests**
+- [x] **Step 2: Run IR/interpreter tests**
 
   ```powershell
   cargo test -p keld-ir --test lowering --test validation
@@ -697,13 +697,13 @@
 
   Expected after Tasks 1-5: existing IR/interpreter machinery should already support backedges. If the hand-built valid cycle is RED due a forward-only validator assumption, fix only that demonstrated assumption.
 
-- [ ] **Step 3: Fix IR validator only if RED proves a real cycle bug**
+- [x] **Step 3: Fix IR validator only if RED proves a real cycle bug**
 
   `FunctionValidator` already owns predecessor/reachability plus definition, lifecycle, home, and entity-identity dataflow. If one `compute_*_dataflow` pass is forward-only, convert only that pass to a changed-state worklist: seed entry, recompute joined input, transfer, enqueue successors when output changes. Do not weaken validation rules and do not add any loop form.
 
   The interpreter must continue choosing the next block from existing terminators; no loop-specific execution branch is permitted.
 
-- [ ] **Step 4: Run complete IR/interpreter GREEN and commit**
+- [x] **Step 4: Run complete IR/interpreter GREEN and commit**
 
   ```powershell
   cargo test -p keld-ir
@@ -731,7 +731,7 @@
 - Reuse `run_differential_case`, `discover_failure_schedules`, interpreter execution, and the existing test-runtime observation protocol.
 - Repeated dynamic execution of one static allocation site keeps one site ID and increments `attempt`.
 
-- [ ] **Step 1: Add differential loop coverage**
+- [x] **Step 1: Add differential loop coverage**
 
   Extend the source fixture sets used by:
 
@@ -742,7 +742,7 @@
 
   Add a focused repeated-site assertion for `control_flow_allocations.keld`: run the no-failure interpreter schedule, filter the repeated Text-concat semantic allocation site, and require one `site_id` with attempts `1`, `2`, and `3` in order. Then run the existing differential harness so every discovered attempt can be failed independently and compared with native O0/O2.
 
-- [ ] **Step 2: Build test runtime and run differential GREEN**
+- [x] **Step 2: Build test runtime and run differential GREEN**
 
   ```powershell
   $env:CARGO_BUILD_TARGET='x86_64-pc-windows-gnu'
@@ -753,7 +753,7 @@
 
   Require identical interpreter/native return or fault, source span, site ID, phase, attempt, and failure-observation sequence at O0 and O2.
 
-- [ ] **Step 3: Run Native-1 focused regression suite and commit**
+- [x] **Step 3: Run Native-1 focused regression suite and commit**
 
   ```powershell
   cargo test -p keld-native-backend --test native_int -- --nocapture
@@ -790,7 +790,7 @@
 - `control-flow.md` becomes the normative semantic supplement for accepted loops.
 - Historical bootstrap acceptance remains historical; Control Flow-1 gets a separate acceptance section.
 
-- [ ] **Step 1: Replace the obsolete unsupported-loop fixture**
+- [x] **Step 1: Replace the obsolete unsupported-loop fixture**
 
   Change `fail_unsupported.keld` to a still-deferred parsed feature:
 
@@ -806,7 +806,7 @@
 
   Add `control_flow_loop.keld` to representative interpreter/native fixture tables with `8\n`, and `control_flow_allocations.keld` with `6\n` where managed allocation parity belongs.
 
-- [ ] **Step 2: Add Control Flow-1 acceptance tests**
+- [x] **Step 2: Add Control Flow-1 acceptance tests**
 
   Do not renumber or rewrite the historical 16 bootstrap criteria. Add a separate Control Flow-1 acceptance section/table in `milestone_acceptance.rs` covering:
 
@@ -820,7 +820,7 @@
 
   Use existing compiler/library helpers rather than building another pipeline in the tests.
 
-- [ ] **Step 3: Write `docs/spec/control-flow.md`**
+- [x] **Step 3: Write `docs/spec/control-flow.md`**
 
   Normatively specify:
 
@@ -837,7 +837,7 @@
   11. backend-neutral cyclic executable IR;
   12. deferred loop forms.
 
-- [ ] **Step 4: Update cross-references/status docs**
+- [x] **Step 4: Update cross-references/status docs**
 
   - `grammar.md`: point semantic loop restrictions to `control-flow.md` and include it in the normative-spec list.
   - `storage-values.md`: state that the existing Home join applies at backedges and exited lexical homes are cleaned/reset before re-entry.
@@ -846,7 +846,7 @@
   - README: move `while`/`break`/`continue` from deferred to implemented surface and link the new spec.
   - `milestone-acceptance.md`: add Control Flow-1 evidence and explicitly record that the executable IR still uses the existing 48/6 surface.
 
-- [ ] **Step 5: Run docs/CLI-facing GREEN and commit**
+- [x] **Step 5: Run docs/CLI-facing GREEN and commit**
 
   ```powershell
   cargo test -p keld-cli --test cli --test milestone_acceptance
@@ -869,7 +869,7 @@
 - Inspect all changes against design commit `407f6d85a5b9322f6a8496b9d9cdb9525577e665`
 - Modify only regressions required by a failing Control Flow-1 gate; do not expand scope
 
-- [ ] **Step 1: Build pinned native runtime artifacts**
+- [x] **Step 1: Build pinned native runtime artifacts**
 
   ```powershell
   $env:CARGO_BUILD_TARGET='x86_64-pc-windows-gnu'
@@ -880,7 +880,7 @@
 
   Confirm expected sibling runtime artifacts exist under `target/x86_64-pc-windows-gnu/release/` before native CLI/differential tests.
 
-- [ ] **Step 2: Run focused milestone suites**
+- [x] **Step 2: Run focused milestone suites**
 
   ```powershell
   cargo test -p keld-semantics
@@ -897,7 +897,7 @@
 
   Require no compile-time verifier nontermination and no metadata growth proportional to dynamic loop iterations.
 
-- [ ] **Step 3: Run full debug/release workspace gates**
+- [x] **Step 3: Run full debug/release workspace gates**
 
   ```powershell
   cargo test --workspace --all-targets --no-fail-fast
@@ -909,7 +909,7 @@
 
   All commands must exit zero on the pinned Rust 1.97.0 Windows GNU setup.
 
-- [ ] **Step 4: Run source-level interpreter/native smoke**
+- [x] **Step 4: Run source-level interpreter/native smoke**
 
   ```powershell
   cargo run --release -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_loop.keld
@@ -921,7 +921,7 @@
 
   Expected stdout: `8`, `8`, `6`, `6`, each with one newline. `dump-ir` must be non-empty and contain only existing executable forms.
 
-- [ ] **Step 5: Review the final diff against approved scope**
+- [x] **Step 5: Review the final diff against approved scope**
 
   ```powershell
   git diff 407f6d85a5b9322f6a8496b9d9cdb9525577e665...HEAD --stat
@@ -939,7 +939,7 @@
   - no temporary CI/debug scaffolding remains;
   - plan checkboxes match actual verified work.
 
-- [ ] **Step 6: Commit final acceptance-only adjustments if needed**
+- [x] **Step 6: Commit final acceptance-only adjustments if needed**
 
   If the final gate required only acceptance bookkeeping/tests, commit those exact changes:
 
