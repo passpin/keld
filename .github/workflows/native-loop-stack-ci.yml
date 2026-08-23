@@ -1,8 +1,8 @@
-name: Native Alloca Hoist Verification
+name: Native Backend Verification
 
 on:
   push:
-    branches: [fix/native-loop-alloca-hoist]
+    branches: [main]
   pull_request:
     branches: [main]
 
