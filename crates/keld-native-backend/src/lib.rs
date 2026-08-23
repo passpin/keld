@@ -948,6 +948,7 @@ struct ScalarLowerer<'module> {
     function: &'module keld_ir::Function,
     locations: &'module LocationTable,
     allocation_schedule: &'module AllocationSchedule,
+    emit_test_sites: bool,
     lines: Vec<String>,
     current_label: String,
     faults: BTreeSet<(u32, u32)>,
@@ -973,12 +974,14 @@ impl<'module> ScalarLowerer<'module> {
         function: &'module keld_ir::Function,
         locations: &'module LocationTable,
         allocation_schedule: &'module AllocationSchedule,
+        emit_test_sites: bool,
     ) -> Self {
         Self {
             module,
             function,
             locations,
             allocation_schedule,
+            emit_test_sites,
             lines: Vec::new(),
             current_label: String::new(),
             faults: BTreeSet::new(),
@@ -1693,7 +1696,7 @@ impl<'module> ScalarLowerer<'module> {
         block: IrBlockId,
         instruction_index: u32,
     ) -> Result<(), BackendError> {
-        if self.instruction_allocates(instruction) {
+        if self.emit_test_sites && self.instruction_allocates(instruction) {
             self.emit_test_site(block, instruction_index)?;
         }
         match instruction {
@@ -3351,12 +3354,44 @@ impl<'module> ScalarLowerer<'module> {
         self.line("ret i32 1");
         self.lines.push("internal_exit:".to_owned());
         self.line("ret i32 2");
+
+        // LLVM allocas execute dynamically at their insertion point. Scratch slots emitted
+        // inside a CFG loop would therefore grow the native stack on every back-edge.
+        // All slot sizes are static, so allocate the complete frame once in the entry block
+        // and keep only the loads/stores/calls at their original program points.
+        let mut allocas = Vec::new();
+        self.lines.retain(|line| {
+            if line.contains(" = alloca ") {
+                allocas.push(line.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let insertion = self.lines.first().map_or(0, |_| 1);
+        self.lines.splice(insertion..insertion, allocas);
+
         (self.lines.join("\n"), self.text_literals)
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String, BackendError> {
+    lower_scalar_ir_inner(module, metadata, false)
+}
+
+fn lower_scalar_ir_with_test_sites(
+    module: &Module,
+    metadata: &SourceMetadata,
+) -> Result<String, BackendError> {
+    lower_scalar_ir_inner(module, metadata, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn lower_scalar_ir_inner(
+    module: &Module,
+    metadata: &SourceMetadata,
+    emit_test_sites: bool,
+) -> Result<String, BackendError> {
     let Some(main) = module
         .functions
         .iter()
@@ -3409,7 +3444,13 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let mut functions_ir = String::new();
     let mut text_literals = BTreeMap::new();
     for function in &module.functions {
-        let mut lowerer = ScalarLowerer::new(module, function, &locations, &allocation_schedule);
+        let mut lowerer = ScalarLowerer::new(
+            module,
+            function,
+            &locations,
+            &allocation_schedule,
+            emit_test_sites,
+        );
         let Some(entry) = function
             .blocks
             .iter()
@@ -3511,10 +3552,12 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
         "declare ptr @keld_rt_v1_context_new()\n",
         "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_context_new_at(i32, ptr, ptr, ptr)\n",
     );
-    ir = ir.replace(
-        "declare ptr @keld_rt_v1_context_new()\n",
-        "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_test_site(ptr, i32)\n",
-    );
+    if emit_test_sites {
+        ir = ir.replace(
+            "declare ptr @keld_rt_v1_context_new()\n",
+            "declare ptr @keld_rt_v1_context_new()\ndeclare i32 @keld_rt_v1_test_site(ptr, i32)\n",
+        );
+    }
     let old_context_call = "  %context = call ptr @keld_rt_v1_context_new()\n  %context_ok = icmp ne ptr %context, null\n  br i1 %context_ok, label %root_init, label %no_context\nno_context:\n  ret i32 70\n";
     let new_context_call = format!(
         "  %context_owned = alloca i1\n  store i1 false, ptr %context_owned\n  %context_slot = alloca ptr\n  %context_status = call i32 @keld_rt_v1_context_new_at(i32 {main_location}, ptr %context_slot, ptr %out_kind, ptr %out_location)\n  %context = load ptr, ptr %context_slot\n  %context_ok = icmp eq i32 %context_status, 0\n  br i1 %context_ok, label %root_init, label %context_init_status\ncontext_init_status:\n  %context_init_language = icmp eq i32 %context_status, 1\n  br i1 %context_init_language, label %fault_dispatch, label %internal_main\n"
@@ -3523,10 +3566,12 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
     let context_status_call = format!(
         "  %context_status = call i32 @keld_rt_v1_context_new_at(i32 {main_location}, ptr %context_slot, ptr %out_kind, ptr %out_location)"
     );
-    let context_status_with_site = format!(
-        "  %context_site_status = call i32 @keld_rt_v1_test_site(ptr null, i32 {context_site})\n  %context_site_ok = icmp eq i32 %context_site_status, 0\n  br i1 %context_site_ok, label %context_site_cont, label %internal_main\ncontext_site_cont:\n{context_status_call}"
-    );
-    ir = ir.replace(&context_status_call, &context_status_with_site);
+    if emit_test_sites {
+        let context_status_with_site = format!(
+            "  %context_site_status = call i32 @keld_rt_v1_test_site(ptr null, i32 {context_site})\n  %context_site_ok = icmp eq i32 %context_site_status, 0\n  br i1 %context_site_ok, label %context_site_cont, label %internal_main\ncontext_site_cont:\n{context_status_call}"
+        );
+        ir = ir.replace(&context_status_call, &context_status_with_site);
+    }
     for location in locations.entries() {
         let _ = writeln!(
             ir,
@@ -3566,11 +3611,36 @@ fn lower_scalar_ir(module: &Module, metadata: &SourceMetadata) -> Result<String,
 ///
 /// Returns a distinct error when IR validation, the LLVM toolchain, LLVM
 /// lowering, GNU linking, or filesystem staging fails.
-#[allow(clippy::too_many_lines)]
 pub fn build_executable(
     module: &Module,
     metadata: &SourceMetadata,
     request: &BuildRequest,
+) -> Result<NativeArtifact, BackendError> {
+    build_executable_inner(module, metadata, request, false)
+}
+
+/// Test-control build path used only by differential/native runtime tests.
+/// Production callers must use [`build_executable`].
+///
+/// # Errors
+///
+/// Returns the same validation, toolchain, lowering, linking, and filesystem
+/// errors as [`build_executable`].
+#[doc(hidden)]
+pub fn build_executable_with_test_controls(
+    module: &Module,
+    metadata: &SourceMetadata,
+    request: &BuildRequest,
+) -> Result<NativeArtifact, BackendError> {
+    build_executable_inner(module, metadata, request, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn build_executable_inner(
+    module: &Module,
+    metadata: &SourceMetadata,
+    request: &BuildRequest,
+    emit_test_sites: bool,
 ) -> Result<NativeArtifact, BackendError> {
     let diagnostics = validate(module);
     if !diagnostics.is_empty() {
@@ -3592,7 +3662,11 @@ pub fn build_executable(
     validate_llvm_prefix(&request.llvm_prefix)?;
     let gcc = resolve_gcc(request.gcc.as_deref())?;
     require_runtime_artifacts(request)?;
-    let generated_ir = lower_scalar_ir(module, metadata)?;
+    let generated_ir = if emit_test_sites {
+        lower_scalar_ir_with_test_sites(module, metadata)?
+    } else {
+        lower_scalar_ir(module, metadata)?
+    };
     let stage_name = format!(
         ".keld-native-stage-{}-{}",
         std::process::id(),

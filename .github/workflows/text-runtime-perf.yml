@@ -1,0 +1,28 @@
+name: Text Runtime Performance Regression
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy,rustfmt
+      - name: Text concat allocation regression
+        run: cargo test -p keld-native-runtime --test text_allocations -- --nocapture
+      - name: Native runtime tests
+        run: cargo test -p keld-native-runtime --tests
+      - name: Strict Clippy
+        run: cargo clippy -p keld-native-runtime --tests -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check
