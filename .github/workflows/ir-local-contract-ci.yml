@@ -1,0 +1,19 @@
+name: IR Local Contract Review
+
+on:
+  push:
+    branches: [fix/ir-local-validator-contract]
+
+permissions:
+  contents: read
+
+jobs:
+  ir-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - name: Run adversarial IR validator tests
+        run: cargo test -p keld-ir --test review_adversarial -- --nocapture
