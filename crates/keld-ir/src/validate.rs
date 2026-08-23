@@ -160,6 +160,7 @@ struct FunctionValidator<'module, 'sink> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HomeState {
+    Unknown,
     Empty,
     Live,
     MaybeLive,
@@ -706,7 +707,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
             self.incoming_homes[block.id.0 as usize] = if block.id == self.function.entry {
                 initial.clone()
             } else {
-                self.all_home_states(HomeState::Empty)
+                self.all_home_states(HomeState::Unknown)
             };
             self.outgoing_homes[block.id.0 as usize] = transfer_home_states(
                 &self.incoming_homes[block.id.0 as usize],
@@ -780,22 +781,20 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
     }
 
     fn join_predecessor_homes(&self, block: IrBlockId) -> BTreeMap<Register, HomeState> {
-        let mut joined = self.all_home_states(HomeState::Empty);
+        let mut joined = self.all_home_states(HomeState::Unknown);
         for register in joined.keys().copied().collect::<Vec<_>>() {
-            let mut state = None;
+            let mut state = HomeState::Unknown;
             for predecessor in &self.predecessors[block.0 as usize] {
+                if !self.reachable_blocks.contains(predecessor) {
+                    continue;
+                }
                 let predecessor_state = self.outgoing_homes[predecessor.0 as usize]
                     .get(&register)
                     .copied()
-                    .unwrap_or(HomeState::Empty);
-                state = Some(match state {
-                    Some(current) => join_home_state(current, predecessor_state),
-                    None => predecessor_state,
-                });
+                    .unwrap_or(HomeState::Unknown);
+                state = join_home_state(state, predecessor_state);
             }
-            if let Some(state) = state {
-                joined.insert(register, state);
-            }
+            joined.insert(register, state);
         }
         joined
     }
@@ -2744,6 +2743,7 @@ impl<'module, 'sink> FunctionValidator<'module, 'sink> {
 
 fn join_home_state(left: HomeState, right: HomeState) -> HomeState {
     match (left, right) {
+        (HomeState::Unknown, state) | (state, HomeState::Unknown) => state,
         (HomeState::Live, HomeState::Live) => HomeState::Live,
         (HomeState::Empty, HomeState::Empty) => HomeState::Empty,
         _ => HomeState::MaybeLive,
