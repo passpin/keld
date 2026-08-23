@@ -1,7 +1,7 @@
 use keld_flow::StorageScopeId;
 use keld_ir::{
-    ArgumentProjection, ArgumentSource, Instruction, IntBinaryOp, IrType, Register, RegisterStorage,
-    TestModuleBuilder, ViewId, ViewMode, validate,
+    ArgumentProjection, ArgumentSource, Instruction, IntBinaryOp, IrType, Register,
+    RegisterStorage, TestModuleBuilder, ViewId, ViewMode, validate,
 };
 use keld_semantics::{DefId, FieldId};
 use keld_source::{SourceId, Span};
