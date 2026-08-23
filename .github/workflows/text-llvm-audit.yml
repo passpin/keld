@@ -1,0 +1,21 @@
+name: Text LLVM Call Surface Audit
+
+on:
+  push:
+    branches: [perf/text-runtime]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - name: Render and audit Text LLVM calls
+        run: cargo test -p keld-native-backend --lib text_content_loop_reports_runtime_call_surface -- --nocapture
