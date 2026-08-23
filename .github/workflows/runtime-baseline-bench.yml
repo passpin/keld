@@ -1,0 +1,45 @@
+name: Keld Runtime Baseline
+
+on:
+  push:
+    branches: [bench/runtime-baseline-2026-08-23]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-benchmark:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
+      LLVM_SYS_221_PREFIX: C:\msys64\mingw64
+      KELD_MINGW_GCC: C:\mingw64\bin\gcc.exe
+      KELD_DLLTOOL: C:\mingw64\bin\dlltool.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-pc-windows-gnu
+      - name: Install pinned LLVM runtime
+        shell: pwsh
+        run: |
+          & C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools"
+          if ($LASTEXITCODE -ne 0) { throw "MSYS2 LLVM install failed" }
+          $version = (& "$env:LLVM_SYS_221_PREFIX\bin\llvm-config.exe" --version).Trim()
+          if ($version -ne "22.1.8") { throw "expected LLVM 22.1.8, got $version" }
+          "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build production runtime
+        shell: pwsh
+        run: |
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Item target\x86_64-pc-windows-gnu\release\keld_runtime_v1.dll
+          Get-Item target\x86_64-pc-windows-gnu\release\libkeld_runtime_v1.dll.a
+      - name: Run runtime benchmark
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --test runtime_baseline -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
