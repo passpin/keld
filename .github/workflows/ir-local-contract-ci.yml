@@ -54,7 +54,6 @@ jobs:
           $target = (& $env:KELD_MINGW_GCC -dumpmachine).Trim()
           if (-not $target.Contains("mingw")) { throw "unexpected GCC target: $target" }
           "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Build native runtime artifacts
         shell: pwsh
         run: |
