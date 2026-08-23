@@ -1,4 +1,4 @@
-name: Native Loop Stack Regression
+name: Native Alloca Hoist Verification
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  loop-stack:
+  verify:
     runs-on: windows-latest
     env:
       CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
@@ -23,6 +23,7 @@ jobs:
         with:
           toolchain: 1.97.0
           targets: x86_64-pc-windows-gnu
+          components: clippy,rustfmt
       - name: Install pinned LLVM runtime
         shell: pwsh
         run: |
@@ -36,8 +37,23 @@ jobs:
         run: |
           cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Run loop stack regression
+      - name: Run 500k loop stack regression
         shell: pwsh
         run: |
           cargo test -p keld-native-backend --release --test loop_stack_regression -- --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run native backend release suite
+        shell: pwsh
+        run: |
+          cargo test -p keld-native-backend --release --all-targets --no-fail-fast -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Strict Clippy
+        shell: pwsh
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Rustfmt check
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
