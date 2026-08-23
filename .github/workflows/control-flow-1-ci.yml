@@ -13,6 +13,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Apply queued Clippy fix
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
+          & python .control-flow-apply.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup component add rustfmt
+          cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git rm .control-flow-apply.py
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: satisfy strict Control Flow-1 Clippy [skip ci]"
+          git push
+
       - name: Run strict Clippy iteration
         shell: pwsh
         run: |
