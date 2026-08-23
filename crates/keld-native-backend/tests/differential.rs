@@ -945,66 +945,67 @@ fn ir_only_surface_fixtures_extend_the_same_differential_schedule() {
     }
 }
 
+const EXECUTABLE_INSTRUCTIONS: &[&str] = &[
+    "ConstInt",
+    "ConstBool",
+    "ConstText",
+    "ConstNoneLink",
+    "Copy",
+    "Take",
+    "InstallHome",
+    "MoveHome",
+    "DropHome",
+    "DropIfLive",
+    "DropSlot",
+    "CleanupTrackedScope",
+    "ReplacePlace",
+    "ReplaceField",
+    "ListNew",
+    "ListLength",
+    "ListPush",
+    "ListPushPlace",
+    "ListRemove",
+    "ListRemovePlace",
+    "ListIndex",
+    "ListGet",
+    "ListReplace",
+    "ListTryRemove",
+    "ListClear",
+    "ListReserve",
+    "ListTryReserve",
+    "TextByteLength",
+    "TextIsEmpty",
+    "TextConcat",
+    "CheckedUnaryInt",
+    "CheckedBinaryInt",
+    "Not",
+    "Compare",
+    "Phi",
+    "ConstructStruct",
+    "ReadStructField",
+    "BeginLifecycle",
+    "EndLifecycle",
+    "AllocateEntity",
+    "EntityToLink",
+    "OpenView",
+    "ReadField",
+    "WriteField",
+    "CloseView",
+    "KeepEntity",
+    "RetireEntity",
+    "Call",
+];
+const EXECUTABLE_TERMINATORS: &[&str] = &[
+    "Goto",
+    "Branch",
+    "ResolveLink",
+    "Return",
+    "Fault",
+    "Unreachable",
+];
+
 #[test]
 fn every_executable_ir_variant_is_in_a_real_differential_fixture() {
-    const INSTRUCTIONS: &[&str] = &[
-        "ConstInt",
-        "ConstBool",
-        "ConstText",
-        "ConstNoneLink",
-        "Copy",
-        "Take",
-        "InstallHome",
-        "MoveHome",
-        "DropHome",
-        "DropIfLive",
-        "DropSlot",
-        "CleanupTrackedScope",
-        "ReplacePlace",
-        "ReplaceField",
-        "ListNew",
-        "ListLength",
-        "ListPush",
-        "ListPushPlace",
-        "ListRemove",
-        "ListRemovePlace",
-        "ListIndex",
-        "ListGet",
-        "ListReplace",
-        "ListTryRemove",
-        "ListClear",
-        "ListReserve",
-        "ListTryReserve",
-        "TextByteLength",
-        "TextIsEmpty",
-        "TextConcat",
-        "CheckedUnaryInt",
-        "CheckedBinaryInt",
-        "Not",
-        "Compare",
-        "Phi",
-        "ConstructStruct",
-        "ReadStructField",
-        "BeginLifecycle",
-        "EndLifecycle",
-        "AllocateEntity",
-        "EntityToLink",
-        "OpenView",
-        "ReadField",
-        "WriteField",
-        "CloseView",
-        "KeepEntity",
-        "RetireEntity",
-        "Call",
-    ];
-    const TERMINATORS: &[&str] = &[
-        "Goto",
-        "Branch",
-        "ResolveLink",
-        "Return",
-        "Fault",
-        "Unreachable",
-    ];
     let mut instructions = BTreeSet::new();
     let mut terminators = BTreeSet::new();
     for fixture_name in [
@@ -1036,13 +1037,13 @@ fn every_executable_ir_variant_is_in_a_real_differential_fixture() {
         instructions.extend(fixture_instructions);
         terminators.extend(fixture_terminators);
     }
-    for variant in INSTRUCTIONS {
+    for variant in EXECUTABLE_INSTRUCTIONS {
         assert!(
             instructions.contains(variant),
             "missing executable fixture for {variant}"
         );
     }
-    for variant in TERMINATORS {
+    for variant in EXECUTABLE_TERMINATORS {
         assert!(
             terminators.contains(variant),
             "missing executable fixture for {variant}"

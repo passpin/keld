@@ -413,9 +413,11 @@ fn control_flow_1_self_review_proofs_are_present() {
     let lifecycle = include_str!("../../keld-lifecycle/tests/control_flow.rs");
     let differential = include_str!("../../keld-native-backend/tests/differential.rs");
 
-    for proof in ["fn return_from_nested_lifecycle_has_an_explicit_exit_edge()"] {
-        assert!(flow.contains(proof), "missing Flow proof: {proof}");
-    }
+    let flow_proof = "fn return_from_nested_lifecycle_has_an_explicit_exit_edge()";
+    assert!(
+        flow.contains(flow_proof),
+        "missing Flow proof: {flow_proof}"
+    );
     for proof in [
         "fn loop_body_local_is_reinitialized_and_cleaned_on_each_backedge()",
         "fn assignment_after_possible_move_repairs_loop_carried_home()",
