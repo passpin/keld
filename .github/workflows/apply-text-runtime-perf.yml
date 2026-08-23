@@ -1,0 +1,36 @@
+name: Apply Text Runtime Optimization
+
+on:
+  push:
+    branches: [perf/text-runtime]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/text-runtime
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - name: Apply patch
+        run: |
+          python .text-runtime-patch.py
+          cargo fmt --all
+      - name: Commit production change
+        shell: bash
+        run: |
+          if git diff --quiet -- crates/keld-native-runtime/src/lib.rs; then
+            echo "No production patch changes"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/keld-native-runtime/src/lib.rs
+          git commit -m "perf: copy Text concat directly into result buffer"
+          git push origin HEAD:perf/text-runtime
