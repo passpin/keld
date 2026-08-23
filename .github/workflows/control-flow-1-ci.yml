@@ -15,10 +15,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Apply quality-only fixes
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .control-flow-apply.py)) { exit 0 }
+          & python .control-flow-apply.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup component add rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git rm .control-flow-apply.py
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: satisfy Control Flow-1 quality gates [skip ci]"
+          git push
+
       - name: Run plan-exact final gate
         shell: pwsh
         run: |
-          $log = '.control-flow-ci-last.txt'
+          $log = Join-Path $env:RUNNER_TEMP 'control-flow-ci-last.txt'
           Remove-Item $log -ErrorAction SilentlyContinue
           $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
           $env:KELD_MINGW_GCC = 'C:\mingw64\bin\gcc.exe'
@@ -67,6 +84,7 @@ jobs:
           $status = if ($values | Where-Object { $_ -ne 0 }) { 1 } else { 0 }
           "exit_status=$status" | Out-File $log -Append
 
+          Copy-Item $log .control-flow-ci-last.txt -Force
           git add .control-flow-ci-last.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
