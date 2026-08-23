@@ -1,5 +1,6 @@
+use keld_flow::StorageScopeId;
 use keld_ir::{
-    ArgumentProjection, ArgumentSource, Instruction, IrType, Register, RegisterStorage,
+    ArgumentProjection, ArgumentSource, Instruction, IntBinaryOp, IrType, Register, RegisterStorage,
     TestModuleBuilder, ViewId, ViewMode, validate,
 };
 use keld_semantics::{DefId, FieldId};
@@ -88,4 +89,118 @@ fn projected_list_remove_is_rejected_while_entity_view_is_open() {
         .push(RegisterStorage::Trivial);
 
     assert_open_view_error(&module);
+}
+
+#[test]
+fn copy_cannot_overwrite_a_live_managed_local_home() {
+    let mut module = TestModuleBuilder::new().finish();
+    let local = Register(2);
+    let first = Register(3);
+    let second = Register(4);
+    let function = &mut module.functions[0];
+    function.locals.push(local);
+    for _ in 0..3 {
+        function.register_types.push(IrType::Text);
+        function.register_storage.push(RegisterStorage::Home {
+            scope: StorageScopeId(0),
+            conditional: false,
+        });
+    }
+    function.blocks[0].instructions.splice(
+        0..0,
+        [
+            Instruction::ConstText {
+                dst: first,
+                value: "first".to_owned(),
+                span: span(),
+            },
+            Instruction::Copy {
+                dst: local,
+                src: first,
+                span: span(),
+            },
+            Instruction::ConstText {
+                dst: second,
+                value: "second".to_owned(),
+                span: span(),
+            },
+            Instruction::Copy {
+                dst: local,
+                src: second,
+                span: span(),
+            },
+            Instruction::DropHome {
+                home: local,
+                span: span(),
+            },
+            Instruction::DropHome {
+                home: second,
+                span: span(),
+            },
+            Instruction::DropHome {
+                home: first,
+                span: span(),
+            },
+        ],
+    );
+
+    let diagnostics = validate(&module);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.0 == "KLD9006"
+                && diagnostic.primary.message == "copy destination is already live"
+        }),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn scalar_local_cannot_be_used_directly_as_an_arithmetic_operand() {
+    let mut module = TestModuleBuilder::new().finish();
+    let seed = Register(2);
+    let local = Register(3);
+    let rhs = Register(4);
+    let sum = Register(5);
+    let function = &mut module.functions[0];
+    function.locals.push(local);
+    for _ in 0..4 {
+        function.register_types.push(IrType::Int);
+        function.register_storage.push(RegisterStorage::Trivial);
+    }
+    function.blocks[0].instructions.splice(
+        0..0,
+        [
+            Instruction::ConstInt {
+                dst: seed,
+                value: 10,
+                span: span(),
+            },
+            Instruction::Copy {
+                dst: local,
+                src: seed,
+                span: span(),
+            },
+            Instruction::ConstInt {
+                dst: rhs,
+                value: 3,
+                span: span(),
+            },
+            Instruction::CheckedBinaryInt {
+                dst: sum,
+                op: IntBinaryOp::Add,
+                lhs: local,
+                rhs,
+                span: span(),
+            },
+        ],
+    );
+
+    let diagnostics = validate(&module);
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.0 == "KLD9002"
+                && diagnostic.primary.message == "source local must be read through Copy or Take"
+        }),
+        "{diagnostics:#?}"
+    );
 }
