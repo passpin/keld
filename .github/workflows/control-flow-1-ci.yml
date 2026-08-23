@@ -12,7 +12,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run focused final gate
+        with:
+          fetch-depth: 0
+
+      - name: Run complete final gate
         shell: pwsh
         run: |
           $log = '.control-flow-ci-last.txt'
@@ -20,7 +23,9 @@ jobs:
           $env:CARGO_BUILD_TARGET = 'x86_64-pc-windows-gnu'
           $env:KELD_MINGW_GCC = 'C:\mingw64\bin\gcc.exe'
           $env:KELD_DLLTOOL = 'C:\mingw64\bin\dlltool.exe'
+
           rustup target add x86_64-pc-windows-gnu *>> $log
+          rustup component add clippy rustfmt *>> $log
           & C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm mingw-w64-x86_64-llvm mingw-w64-x86_64-llvm-tools" *>> $log
           $env:LLVM_SYS_221_PREFIX = 'C:\msys64\mingw64'
           $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
@@ -28,31 +33,35 @@ jobs:
           "llvm=$llvm" | Out-File $log -Append
           $setup = if ($llvm -eq '22.1.8') { 0 } else { 1 }
 
-          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log; $prod=$LASTEXITCODE
-          cargo build -p keld-native-ffi-test --release --target x86_64-pc-windows-gnu *>> $log; $test=$LASTEXITCODE
-          $artifacts=0
-          foreach ($p in @('keld_runtime_v1.dll','libkeld_runtime_v1.dll.a','keld_runtime_v1_test.dll','libkeld_runtime_v1_test.dll.a')) {
-            if (-not (Test-Path "target\x86_64-pc-windows-gnu\release\$p")) { $artifacts=1 }
-          }
+          cargo build -p keld-native-ffi --release --target x86_64-pc-windows-gnu *>> $log; $runtime=$LASTEXITCODE
+          cargo test --workspace *>> $log; $debug=$LASTEXITCODE
+          cargo test --workspace --release *>> $log; $release=$LASTEXITCODE
+          cargo clippy --workspace --all-targets -- -D warnings *>> $log; $clippy=$LASTEXITCODE
+          cargo fmt --all --check *>> $log; $fmt=$LASTEXITCODE
+          git diff --check origin/main...HEAD *>> $log; $diffcheck=$LASTEXITCODE
 
-          cargo test -p keld-semantics *>> $log; $semantics=$LASTEXITCODE
-          cargo test -p keld-flow *>> $log; $flow=$LASTEXITCODE
-          cargo test -p keld-lifecycle *>> $log; $lifecycle=$LASTEXITCODE
-          cargo test -p keld-storage *>> $log; $storage=$LASTEXITCODE
-          cargo test -p keld-ir *>> $log; $ir=$LASTEXITCODE
-          cargo test -p keld-interpreter *>> $log; $interpreter=$LASTEXITCODE
-          cargo test -p keld-native-backend --test differential -- --nocapture *>> $log; $diff=$LASTEXITCODE
-          cargo test -p keld-native-backend --test native_int -- --nocapture *>> $log; $native=$LASTEXITCODE
-          cargo test -p keld-native-backend --test surface_audit -- --nocapture *>> $log; $surface=$LASTEXITCODE
-          cargo test -p keld-cli --test cli --test milestone_acceptance *>> $log; $cli=$LASTEXITCODE
+          $interpreterLoop = (& cargo run -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
+          $interpreterLoopStatus=$LASTEXITCODE
+          $nativeLoop = (& cargo run -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_loop.keld 2>> $log) -join "`n"
+          $nativeLoopStatus=$LASTEXITCODE
+          $interpreterAlloc = (& cargo run -q -p keld-cli -- run --engine interpreter crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
+          $interpreterAllocStatus=$LASTEXITCODE
+          $nativeAlloc = (& cargo run -q -p keld-cli -- run --engine native crates/keld-cli/tests/fixtures/control_flow_allocations.keld 2>> $log) -join "`n"
+          $nativeAllocStatus=$LASTEXITCODE
 
-          "setup=$setup prod=$prod test_runtime=$test artifacts=$artifacts semantics=$semantics flow=$flow lifecycle=$lifecycle storage=$storage ir=$ir interpreter=$interpreter differential=$diff native_int=$native surface=$surface cli=$cli" | Out-File $log -Append
-          $status = if (@($setup,$prod,$test,$artifacts,$semantics,$flow,$lifecycle,$storage,$ir,$interpreter,$diff,$native,$surface,$cli) -contains 1) { 1 } else { 0 }
+          $smoke = 0
+          if ($interpreterLoopStatus -ne 0 -or $nativeLoopStatus -ne 0 -or $interpreterAllocStatus -ne 0 -or $nativeAllocStatus -ne 0) { $smoke = 1 }
+          if ($interpreterLoop.Trim() -ne '8' -or $nativeLoop.Trim() -ne '8' -or $interpreterAlloc.Trim() -ne '6' -or $nativeAlloc.Trim() -ne '6') { $smoke = 1 }
+          "smoke interpreter_loop='$interpreterLoop' native_loop='$nativeLoop' interpreter_alloc='$interpreterAlloc' native_alloc='$nativeAlloc'" | Out-File $log -Append
+
+          "setup=$setup runtime=$runtime workspace_debug=$debug workspace_release=$release clippy=$clippy fmt=$fmt diffcheck=$diffcheck smoke=$smoke" | Out-File $log -Append
+          $values = @($setup,$runtime,$debug,$release,$clippy,$fmt,$diffcheck,$smoke)
+          $status = if ($values | Where-Object { $_ -ne 0 }) { 1 } else { 0 }
           "exit_status=$status" | Out-File $log -Append
 
           git add .control-flow-ci-last.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "ci: record focused Control Flow-1 final gate [skip ci]"
+          git commit -m "ci: record complete Control Flow-1 final gate [skip ci]"
           git push
           exit $status
