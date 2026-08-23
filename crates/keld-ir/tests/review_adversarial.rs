@@ -199,7 +199,7 @@ fn scalar_local_cannot_be_used_directly_as_an_arithmetic_operand() {
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.0 == "KLD9002"
-                && diagnostic.primary.message == "source local must be read through Copy or Take"
+                && diagnostic.primary.message == "scalar source local must be read through Copy"
         }),
         "{diagnostics:#?}"
     );
