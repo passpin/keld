@@ -51,7 +51,8 @@ jobs:
       - name: Apply production/test-control codegen split
         shell: pwsh
         run: |
-          python .test-site-green.py
+          python .test-site-green-v2.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo fmt --all
       - name: GREEN - production executable omits test-site marker
         shell: pwsh
