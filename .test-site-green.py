@@ -11,6 +11,14 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 backend = Path("crates/keld-native-backend/src/lib.rs")
 text = backend.read_text(encoding="utf-8")
 
+# Remove the temporary source-level LLVM audit. The executable-level regression
+# in tests/production_test_site.rs is the permanent contract and keeps backend
+# architecture tests free of policy-crate imports.
+audit_marker = "\n#[cfg(test)]\nmod text_ir_audit {"
+audit_start = text.find(audit_marker)
+if audit_start >= 0:
+    text = text[:audit_start].rstrip() + "\n"
+
 text = replace_once(
     text,
     "    allocation_schedule: &'module AllocationSchedule,\n    lines: Vec<String>,\n",
@@ -150,7 +158,7 @@ text = replace_once(
 )
 backend.write_text(text, encoding="utf-8")
 
-# Differential tests always require the deterministic allocation-site markers.
+# Differential tests always require deterministic allocation-site markers.
 diff = Path("crates/keld-native-backend/tests/differential.rs")
 text = diff.read_text(encoding="utf-8")
 text = replace_once(
