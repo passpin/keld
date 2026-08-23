@@ -1,8 +1,8 @@
 name: Apply Production Test-Site Split
 
 on:
-  push:
-    branches: [perf/text-runtime]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
